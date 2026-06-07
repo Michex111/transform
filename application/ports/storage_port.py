@@ -1,0 +1,6 @@
+from typing import Protocol
+from domain.entities.conversion_job import ConversionJob
+
+class StoragePort(Protocol):
+    def save_job(self, job: ConversionJob) -> None:...
+    def get_job_by_id(self, job_id: str) -> ConversionJob:...
