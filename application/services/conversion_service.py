@@ -12,6 +12,6 @@ class ConversionService:
     async def submit_conversion_job(self, job: ConversionJob) -> str:
         conversion_type = job.conversion
         is_supported(conversion_type, converter_registry.list_conversions())
-        self.queue_port.enqueue_job(job)
+        await self.queue_port.push_job(job)
         # self.storage_port.save_job(job)
         return job.job_id

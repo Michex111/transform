@@ -7,6 +7,12 @@ class Settings(BaseSettings):
     REDIS_URL: SecretStr
     REDIS_CACHE_TTL: int = 86400  # Cache time-to-live in seconds
 
+    # s3 access
+    BACKBLAZE_ENDPOINT: str
+    BACKBLAZE_ACCESS_KEY: SecretStr
+    BACKBLAZE_SECRET_KEY: SecretStr
+    S3_BUCKET_NAME: str = "transform-convertion-bucket"
+
     model_config = SettingsConfigDict(env_file=".env")
 
 

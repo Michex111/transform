@@ -7,6 +7,7 @@ class ConversionJobMessage:
     source_format: str
     target_format: str
     input_key: str
+    retries: int = 0
 
     @classmethod
     def from_conversion_job(cls, job: ConversionJob):
