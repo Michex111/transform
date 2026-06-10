@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
     "fastapi>=0.136.3",
+    "minio>=7.2.20",
     "pydantic-settings>=2.14.1",
     "redis[hiredis]>=8.0.0",
 ]

@@ -7,13 +7,15 @@ import sys
 
 from infrastructure.converters.converter_registry import converter_registry
 from infrastructure.logging.loggers import worker_logger
+from infrastructure.adapters.storage.minio_storage import get_storage
+from .dependencies import get_consumer_queue
 from workers.converter_workers.context.worker_context import WorkerContext
 from workers.converter_workers.worker import ConverterWorker
 from workers.converter_workers.processor import process_job
-from workers.converter_workers.port_dependencies import StoragePort, QueuePort
+from workers.converter_workers.ports import StoragePort, QueuePort
 
 
-def create_worker(storage_port: StoragePort, queue_port: QueuePort, worker_name: str = "file_converter_worker") -> ConverterWorker:
+def build_worker(storage_port: StoragePort, queue_port: QueuePort, worker_name: str = "file_converter_worker") -> ConverterWorker:
     """
     Factory function to create and configure a ConverterWorker.
     
@@ -42,14 +44,10 @@ def main():
     Instantiates concrete port implementations and runs the worker.
     """
     # TODO: Instantiate concrete StoragePort implementation
-    # Example: storage_port = S3Storage(bucket="my-bucket")
-    # Example: storage_port = LocalStorage(base_path="/data")
-    storage_port: StoragePort = None  # Replace with concrete implementation
+    storage_port: StoragePort = get_storage()  # Replace with concrete implementation
     
     # TODO: Instantiate concrete QueuePort implementation
-    # Example: queue_port = SQSQueue(queue_url="https://...")
-    # Example: queue_port = RedisQueue(host="localhost", port=6379)
-    queue_port: QueuePort = None  # Replace with concrete implementation
+    queue_port: QueuePort = get_consumer_queue()  # Replace with concrete implementation
     
     if storage_port is None or queue_port is None:
         raise RuntimeError(
@@ -57,7 +55,7 @@ def main():
             "See TODO comments in main() for examples."
         )
     
-    worker = create_worker(storage_port=storage_port, queue_port=queue_port)
+    worker = build_worker(storage_port=storage_port, queue_port=queue_port)
     
     log_context = worker.context.get_log_context()
     worker_logger.info("Starting converter worker", extra=log_context)
