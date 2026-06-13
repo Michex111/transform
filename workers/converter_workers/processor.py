@@ -20,7 +20,7 @@ def process_job(context: WorkerContext, job: ConversionJob) -> None:
             output_path = Path(temp_dir) / "output_file"
 
             # Download the input file
-            context.storage_port.download(job.input_file, str(input_path))
+            context.storage_port.download(job.input_file, input_path)
             worker_logger.debug(f"Downloaded input file for job {job.job_id} to {input_path}", extra=log_context)
 
             # Perform the conversion
@@ -33,16 +33,12 @@ def process_job(context: WorkerContext, job: ConversionJob) -> None:
 
             # Upload the output file
             output_destination = f"converted/{output_path.name}"
-            context.storage_port.upload(str(output_path), output_destination)
+            context.storage_port.upload(output_destination, output_path)
             worker_logger.debug(f"Uploaded output file for job {job.job_id} to {output_destination}", extra=log_context)
 
             # Update job status to COMPLETED
             job.complete(output_destination)
-            context.queue_port.acknowledge_job(job.job_id)
-            worker_logger.info(f"Job {job.job_id} completed successfully", extra=log_context)
 
     except Exception as e:
         error_message = str(e)
         job.fail(error_message)
-        context.queue_port.fail_job(job.job_id, error_message)
-        worker_logger.error(f"Job {job.job_id} failed with error: {error_message}", extra=log_context)
