@@ -9,25 +9,30 @@ class ConverterWorker:
         self.process_job = process_job
         self._running = False
 
-    def run(self):
+    async def run(self):
         self._running = True
         log_context = self.context.get_log_context()
         worker_logger.info("Converter worker started", extra=log_context)
         
         while self._running:
             try:
-                job = self.context.queue_port.fetch_job()
+                job = await self.context.queue_port.fetch_job()
                 if job is None:
                     time.sleep(1)  # Sleep briefly if no job is available
                     continue
-
+                
+                message_id, job = job
                 job_log_context = self.context.get_log_context(job_id=job.job_id, conversion_type=job.conversion)
                 worker_logger.info(f"Fetched job {job.job_id} for processing", extra=job_log_context)
                 try:
                     self.process_job(self.context, job)
                 except Exception as e:
+                    await self.context.queue_port.fail_job(message_id, str(e))
                     worker_logger.error(f"Error processing job {job.job_id}: {str(e)}", extra=job_log_context)
                     continue
+                else:
+                    await self.context.queue_port.acknowledge_job(message_id)
+                    worker_logger.info(f"Job {job.job_id} completed successfully", extra=log_context)
             except KeyboardInterrupt:
                 worker_logger.info("Converter worker received shutdown signal", extra=log_context)
                 self.stop()

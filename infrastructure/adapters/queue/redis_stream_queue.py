@@ -23,11 +23,20 @@ class JobStream(RedisStreamQueue):
 class JobStreamConsumer(RedisStreamQueue):
     """Implements a Redis Stream consumer for conversion jobs. Used by the worker to fetch jobs from the stream."""
     
-    async def __init__(self, consumer_group: str, consumer_name: str, redis_client: Redis):
+    def __init__(self, consumer_group: str, consumer_name: str, redis_client: Redis):
         super().__init__(redis_client)
         self.consumer_group = consumer_group
         self.consumer_name = consumer_name
-        await self._ensure_consumer_group()
+
+    @classmethod
+    async def create(cls, consumer_group: str, consumer_name: str, redis_client: Redis) -> 'JobStreamConsumer':
+        stream = cls(
+            consumer_group,
+            consumer_name,
+            redis_client
+        )
+        await stream._ensure_consumer_group()
+        return stream
 
     async def _ensure_consumer_group(self):
         try:
@@ -43,7 +52,7 @@ class JobStreamConsumer(RedisStreamQueue):
             self.consumer_group, 
             self.consumer_name, 
             {self.stream_name: '>'}, 
-            count=1, block=5000
+            count=1, block=10000
         )
 
         if not jobs:
