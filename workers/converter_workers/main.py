@@ -11,13 +11,13 @@ import asyncio
 project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-from infrastructure.converters.converter_registry import converter_registry
-from infrastructure.logging.loggers import worker_logger
-from infrastructure.adapters.storage.minio_storage import get_storage
+from src.infrastructure.converters.converter_registry import get_registry
+from src.infrastructure.logging.loggers import worker_logger
+from src.infrastructure.adapters.storage.minio_storage import get_storage
 from workers.converter_workers.dependencies import get_consumer_queue
 from workers.converter_workers.context.worker_context import WorkerContext
 from workers.converter_workers.worker import ConverterWorker
-from workers.converter_workers.processor import process_job
+from workers.converter_workers.processor import process_job, dev_process_job
 from workers.converter_workers.ports import StoragePort, QueuePort
 
 
@@ -47,11 +47,11 @@ async def build_worker(worker_name: str = "file_converter_worker") -> ConverterW
     context = WorkerContext(
         storage_port=storage_port,
         queue_port=queue_port,
-        converter_registry=converter_registry,
+        converter_registry=get_registry(),
         worker_name=worker_name
     )
     
-    worker = ConverterWorker(context=context, process_job=process_job)
+    worker = ConverterWorker(context=context, process_job=dev_process_job)
     return worker
 
 
@@ -62,8 +62,15 @@ async def main():
     """
     # TODO: Instantiate concrete StoragePort implementation
     
-    
-    worker = await build_worker()
+    worker_logger.info("Initializing converter worker...")
+    try:
+        worker = await build_worker()
+    except Exception as e:
+        worker_logger.critical(
+            f"Failed to initialize worker. Ensure Redis is running (default: localhost:6379). Error: {str(e)}",
+            exc_info=True
+        )
+        sys.exit(1)
     
     log_context = worker.context.get_log_context()
     worker_logger.info("Starting converter worker", extra=log_context)
@@ -73,7 +80,7 @@ async def main():
     except KeyboardInterrupt:
         worker_logger.info("Worker interrupted", extra=log_context)
     except Exception as e:
-        worker_logger.critical(f"Worker failed: {str(e)}", extra=log_context)
+        worker_logger.critical(f"Worker failed: {str(e)}", extra=log_context, exc_info=True)
         sys.exit(1)
     finally:       
         worker_logger.info("Converter worker stopped", extra=log_context)

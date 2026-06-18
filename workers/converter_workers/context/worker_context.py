@@ -3,9 +3,9 @@ from dataclasses import dataclass, field
 from uuid import uuid4
 from typing import Optional, Tuple
 
-from domain.value_object.conversion_type import ConversionType
+from src.domain.value_object.conversion_type import ConversionType
 from ..ports import QueuePort, StoragePort
-from infrastructure.converters.converter_registry import ConverterRegistry
+from src.infrastructure.converters.converter_registry import ConverterRegistry
 
 @dataclass(frozen=True)
 class WorkerContext:

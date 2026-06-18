@@ -1,5 +1,5 @@
 import time
-from infrastructure.logging.loggers import worker_logger
+from src.infrastructure.logging.loggers import worker_logger
 from workers.converter_workers.context.worker_context import WorkerContext
 from workers.converter_workers.processor import JobProcess
 

@@ -1,4 +1,4 @@
-from domain.entities.conversion_job import ConversionJob, JobStatus
+from src.domain.entities.conversion_job import ConversionJob, JobStatus
 from typing import Protocol, Optional
 from pathlib import Path
 
