@@ -33,7 +33,8 @@ async def build_worker(worker_name: str = "file_converter_worker") -> ConverterW
     Returns:
         Configured ConverterWorker instance ready to run
     """
-    storage_port: StoragePort = get_storage()  # Replace with concrete implementation
+    storage_port: StoragePort = get_storage() 
+    # Replace with concrete implementation
     
     # TODO: Instantiate concrete QueuePort implementation
     queue_port: QueuePort = await get_consumer_queue(consumer_group="conversion-workers", consumer_name=worker_name)  # Replace with concrete implementation
@@ -51,7 +52,7 @@ async def build_worker(worker_name: str = "file_converter_worker") -> ConverterW
         worker_name=worker_name
     )
     
-    worker = ConverterWorker(context=context, process_job=dev_process_job)
+    worker = ConverterWorker(context=context, process_job=process_job)
     return worker
 
 

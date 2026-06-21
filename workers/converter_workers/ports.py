@@ -11,5 +11,9 @@ class QueuePort(Protocol):
     async def acknowledge_job(self, message_id: str) -> None:...
     async def fail_job(self, message_id: str, error_message: str) -> None:...
 
+class JobEventPort(Protocol):
+    async def publish(self, job_id: str, status: JobStatus, details: Optional[dict] = None) -> None:...
+
+
 
     
