@@ -1,4 +1,4 @@
-from src.infrastructure.adapters.queue.redis_stream_queue import JobStreamConsumer
+from infrastructure.adapters.queues.redis_stream_job_queue import JobStreamConsumer
 from src.infrastructure.redis.client import create_redis_client
 from src.infrastructure.config.settings import get_settings
 from workers.converter_workers.ports import QueuePort
