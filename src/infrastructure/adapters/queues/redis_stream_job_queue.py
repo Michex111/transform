@@ -105,7 +105,7 @@ class JobStreamConsumer(RedisStreamQueue):
             job_id=job["job_id"],
             conversion=ConversionType(source_format=job["source_format"], target_format=job["target_format"]),
             input_file=job["input_key"],
-            output_file="" # Implement this,
+            output_file="" # This will be set later when the job is completed
         )
 
         return message_id, conversation_job

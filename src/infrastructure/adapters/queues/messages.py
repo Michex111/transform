@@ -18,5 +18,7 @@ class ConversionJobMessage:
             input_key=job.input_file
         )
        
-    def to_dict(self):
+    def to_dict(self) -> dict:
         return asdict(self)
+    
+
