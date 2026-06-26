@@ -1,6 +1,6 @@
 import tempfile
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Coroutine
 from src.infrastructure.logging.loggers import worker_logger
 from workers.converter_workers.context.worker_context import WorkerContext
 from workers.converter_workers.context.event_context import EventContext
@@ -8,7 +8,7 @@ from src.domain.entities.conversion_job import ConversionJob, JobStatus
 from src.domain.value_object.conversion_type import ConversionType
 from src.infrastructure.config.settings import get_settings
 
-JobProcess = Callable[[WorkerContext, ConversionJob], None]
+JobProcess = Callable[[WorkerContext, ConversionJob], Coroutine[None, None, None]]
 
 settings = get_settings()
 
@@ -26,7 +26,7 @@ async def process_job(context: WorkerContext, job: ConversionJob) -> None:
             input_file, output_file = resolve_path(job.input_file, job.conversion, Path(temp_dir))
 
             # Download the input file
-            await context.job_event.publish(**event.downloading().to_dict())
+            await context.event_port.publish(**event.downloading().to_dict())
             context.storage_port.download(job.input_file, input_file)
             worker_logger.debug(f"Downloaded input file for job {job.job_id} to {input_file}", extra=log_context)
 
@@ -35,9 +35,9 @@ async def process_job(context: WorkerContext, job: ConversionJob) -> None:
             if not converter:
                 raise RuntimeError(f"No converter found for conversion type {job.conversion}")
             
-            await context.job_event.publish(**event.processing().to_dict())
+            await context.event_port.publish(**event.processing().to_dict())
             converter(str(input_file), str(output_file))
-            await context.job_event.publish(**event.uploading().to_dict())
+            await context.event_port.publish(**event.uploading().to_dict())
             worker_logger.debug(f"Conversion completed for job {job.job_id}, output at {output_file}", extra=log_context)
 
             # Upload the output file
