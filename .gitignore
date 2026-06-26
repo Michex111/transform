@@ -11,6 +11,6 @@ wheels/
 
 #ENV files
 .env
-.vscode
 
 Agents.MD
+.vscode
