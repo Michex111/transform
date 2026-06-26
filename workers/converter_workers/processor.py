@@ -8,7 +8,7 @@ from src.domain.entities.conversion_job import ConversionJob, JobStatus
 from src.domain.value_object.conversion_type import ConversionType
 from src.infrastructure.config.settings import get_settings
 
-JobProcess = Callable[[WorkerContext, ConversionJob], Coroutine[None, None, None]]
+type JobProcess = Callable[[WorkerContext, ConversionJob], Coroutine[None, None, None]] 
 
 settings = get_settings()
 
@@ -47,6 +47,7 @@ async def process_job(context: WorkerContext, job: ConversionJob) -> None:
 
             # Update job status to COMPLETED
             job.complete(output_dest)
+            await context.event_port.publish(**event.completed().to_dict())
 
     except Exception as e:
         error_message = str(e)
