@@ -1,0 +1,14 @@
+version: "3.9"
+
+worker:
+  build:
+    context: ../../
+    dockerfile: deployment/docker/worker.Dockerfile
+  container_name: converter-worker
+  env_file:
+    - ../../.env
+  networks:
+    - converter-net
+
+networks:
+  converter-net:
