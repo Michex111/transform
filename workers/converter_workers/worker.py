@@ -1,4 +1,6 @@
 import time
+
+import asyncio
 from src.infrastructure.logging.loggers import worker_logger
 from workers.converter_workers.context.worker_context import WorkerContext
 from workers.converter_workers.processor import JobProcess
@@ -18,14 +20,14 @@ class ConverterWorker:
             try:
                 job = await self.context.queue_port.fetch_job()
                 if job is None:
-                    time.sleep(1)  # Sleep briefly if no job is available
+                    await asyncio.sleep(1)  # Sleep briefly if no job is available
                     continue
                 
                 message_id, job = job
                 job_log_context = self.context.get_log_context(job_id=job.job_id, conversion_type=job.conversion)
                 worker_logger.info(f"Fetched job {job.job_id} for processing", extra=job_log_context)
                 try:
-                    self.process_job(self.context, job)
+                    await self.process_job(self.context, job)
                 except Exception as e:
                     await self.context.queue_port.fail_job(message_id, str(e))
                     worker_logger.error(f"Error processing job {job.job_id}: {str(e)}", extra=job_log_context)

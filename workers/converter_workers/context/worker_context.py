@@ -11,7 +11,7 @@ from src.infrastructure.converters.converter_registry import ConverterRegistry
 class WorkerContext:
     storage_port: StoragePort
     queue_port: QueuePort
-    job_event: JobEventPort
+    event_port: JobEventPort
     converter_registry: ConverterRegistry
     worker_name: str = "file_converter_worker"
     worker_id: str = field(default_factory=lambda: f"{WorkerContext.worker_name}_{uuid4()}")

@@ -14,7 +14,7 @@ sys.path.insert(0, str(project_root))
 from src.infrastructure.converters.converter_registry import get_registry
 from src.infrastructure.logging.loggers import worker_logger
 from src.infrastructure.adapters.storage.minio_storage import get_storage
-from workers.converter_workers.dependencies import get_consumer_queue
+from workers.converter_workers.dependencies import get_consumer_queue, get_event_queue
 from workers.converter_workers.context.worker_context import WorkerContext
 from workers.converter_workers.worker import ConverterWorker
 from workers.converter_workers.processor import process_job, dev_process_job
@@ -39,15 +39,18 @@ async def build_worker(worker_name: str = "file_converter_worker") -> ConverterW
     # TODO: Instantiate concrete QueuePort implementation
     queue_port: QueuePort = await get_consumer_queue(consumer_group="conversion-workers", consumer_name=worker_name)  # Replace with concrete implementation
     
-    if storage_port is None or queue_port is None:
+    event_port = get_event_queue() 
+
+    if storage_port is None or queue_port is None or event_port is None:
         raise RuntimeError(
-            "StoragePort and QueuePort implementations must be configured. "
+            "StoragePort, QueuePort, and JobEventPort implementations must be configured. "
             "See TODO comments in main() for examples."
         )
 
     context = WorkerContext(
         storage_port=storage_port,
         queue_port=queue_port,
+        event_port=event_port,
         converter_registry=get_registry(),
         worker_name=worker_name
     )
