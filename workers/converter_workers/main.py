@@ -17,7 +17,7 @@ from src.infrastructure.adapters.storage.minio_storage import get_storage
 from workers.converter_workers.dependencies import get_consumer_queue, get_event_queue
 from workers.converter_workers.context.worker_context import WorkerContext
 from workers.converter_workers.worker import ConverterWorker
-from workers.converter_workers.processor import process_job, dev_process_job
+from workers.converter_workers.processor import process_job
 from workers.converter_workers.ports import StoragePort, QueuePort
 
 
@@ -54,7 +54,7 @@ async def build_worker(worker_name: str = "file_converter_worker") -> ConverterW
         converter_registry=get_registry(),
         worker_name=worker_name
     )
-    
+
     worker = ConverterWorker(context=context, process_job=process_job)
     return worker
 
