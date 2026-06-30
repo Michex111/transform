@@ -25,6 +25,7 @@ class MinioStorage:
         except S3Error as e:
             if self.logger:
                 self.logger.error("minio_upload_failed", extra={"key": target_key, "error": str(e)})
+            raise
 
 
 

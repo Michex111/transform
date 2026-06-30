@@ -17,5 +17,5 @@ class JobEventPublisher:
             "progress": progress,
             "message": message or ""
         }
-        self.redis_client.xadd(self.stream_name, event)
+        await self.redis_client.xadd(self.stream_name, event)
         

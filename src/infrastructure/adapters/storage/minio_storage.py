@@ -1,5 +1,5 @@
 from minio import Minio
-from src.application.ports.storage_port import StorageGateway
+from src.application.ports.contracts import StorageGateway
 from src.infrastructure.config.settings import get_settings
 from .s3_storage import MinioStorage
 from typing import Optional

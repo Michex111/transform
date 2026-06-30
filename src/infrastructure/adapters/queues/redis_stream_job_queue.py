@@ -67,7 +67,8 @@ class JobStreamConsumer(RedisStreamQueue):
             except Exception as e:
                 last_error = e
                 if attempt < max_retries - 1:
-                    delay = base_delay * (2 ** attempt)  # Exponential backoff
+                    # Keep exponential backoff bounded to avoid multi-hour startup stalls.
+                    delay = min(base_delay * (2 ** attempt), 60.0)
                     worker_logger.warning(
                         f"Failed to connect to Redis (attempt {attempt + 1}/{max_retries}). "
                         f"Retrying in {delay:.1f} seconds... Error: {str(e)}"
@@ -113,12 +114,17 @@ class JobStreamConsumer(RedisStreamQueue):
     async def acknowledge_job(self, message_id: str):
         await self.redis_client.xack(
             self.stream_name,
-            self.consumer_name,
+            self.consumer_group,
             message_id
         )
 
     async def fail_job(self, message_id: str, error_message: str):
-        ...
+        
+        await self.redis_client.xack(
+            self.stream_name,
+            self.consumer_group,
+            message_id,
+        )
    
 def extract_job(job) -> tuple:       
     _, messages = job[0]

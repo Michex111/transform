@@ -14,12 +14,16 @@ def retry_on_exception(max_retries=3, exceptions=(Exception,), base_delay=1, max
     def decorator(func):
         @wraps(func)
         async def wrapper(*args, **kwargs):
+            retries = max(1, int(max_retries))
             attempts = 1
             while True:
                 try:
                     return await func(*args, **kwargs)
+                except asyncio.CancelledError:
+                    # Cancellation should not be retried.
+                    raise
                 except exceptions as e:
-                    if attempts >= max_retries:
+                    if attempts >= retries:
                         if logger:
                             logger.error(f"Function {func.__name__} failed after {attempts} attempts. Raising exception.")
                         raise
@@ -28,7 +32,7 @@ def retry_on_exception(max_retries=3, exceptions=(Exception,), base_delay=1, max
                         jitter = random.uniform(0, delay)  # Add jitter to avoid thundering herd
 
                         if logger:
-                            logger.warning(f"Function {func.__name__} failed with {e}. Retrying {attempts}/{max_retries} after {jitter:.2f} seconds...")
+                            logger.warning(f"Function {func.__name__} failed with {e}. Retrying {attempts}/{retries} after {jitter:.2f} seconds...")
 
                         await asyncio.sleep(jitter)
                         attempts += 1

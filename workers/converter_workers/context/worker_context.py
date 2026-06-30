@@ -1,10 +1,10 @@
 import os
 from dataclasses import dataclass, field
 from uuid import uuid4
-from typing import Optional, Tuple
+from typing import Optional
 
+from src.application.ports.contracts import JobEventPort, QueuePort, StoragePort
 from src.domain.value_object.conversion_type import ConversionType
-from ..ports import QueuePort, StoragePort, JobEventPort
 from src.infrastructure.converters.converter_registry import ConverterRegistry
 
 @dataclass(frozen=True)
@@ -14,8 +14,11 @@ class WorkerContext:
     event_port: JobEventPort
     converter_registry: ConverterRegistry
     worker_name: str = "file_converter_worker"
-    worker_id: str = field(default_factory=lambda: f"{WorkerContext.worker_name}_{uuid4()}")
+    worker_id: str = field(init=False)
     process_id: int = field(default_factory=os.getpid)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "worker_id", f"{self.worker_name}_{uuid4()}")
 
 
     def get_log_context(self, job_id: Optional[str] = None, conversion_type: Optional[ConversionType] = None) -> dict:

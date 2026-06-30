@@ -1,11 +1,10 @@
 from src.domain.entities.conversion_job import ConversionJob
 from src.domain.services.conversion_policy import is_supported
 from src.infrastructure.converters.converter_registry import get_registry
-from src.application.ports.queue_port import JobQueuePort
-from src.application.ports.storage_port import StoragePort
+from src.application.ports.contracts import JobQueuePort, JobStoragePort
 
 class ConversionService:
-    def __init__(self, queue_port: JobQueuePort, storage_port: StoragePort | None = None):
+    def __init__(self, queue_port: JobQueuePort, storage_port: JobStoragePort | None = None):
         self.queue_port = queue_port
         self.storage_port = storage_port
 

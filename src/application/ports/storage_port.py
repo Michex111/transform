@@ -1,13 +1,6 @@
-from pathlib import Path
-from typing import Protocol
-from src.domain.entities.conversion_job import ConversionJob
+from src.application.ports.contracts import JobStoragePort, StorageGateway
 
-class StoragePort(Protocol):
+# Backward-compatible alias for existing imports.
+StoragePort = JobStoragePort
     def save_job(self, job: ConversionJob) -> None:...
-    def get_job_by_id(self, job_id: str) -> ConversionJob:...
 
-# S3 Storage Port
-class StorageGateway(Protocol):
-    def download(self, key: str, dest_path: Path) -> None:...
-    def upload(self, target_key: str, source_path: Path) -> None:...
-    

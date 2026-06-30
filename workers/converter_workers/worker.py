@@ -32,10 +32,11 @@ class ConverterWorker:
                     continue
                 else:
                     await self.context.queue_port.acknowledge_job(message_id)
-                    worker_logger.info(f"Job {job.job_id} completed successfully", extra=log_context)
+                    worker_logger.info(f"Job {job.job_id} completed successfully", extra=job_log_context)
             except asyncio.CancelledError:
                 worker_logger.info("Converter worker received shutdown signal", extra=log_context)
                 self.stop()
+                return
             except Exception as loop_error:
                 worker_logger.critical(f"Unexpected error in worker loop: {str(loop_error)}", extra=log_context)
                 await asyncio.sleep(5)  # Sleep before retrying to avoid tight error loop
