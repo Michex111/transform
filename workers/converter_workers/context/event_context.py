@@ -39,6 +39,12 @@ class EventContext:
         self.message = "conversion completed"
 
         return self
+    
+    def failed(self, error_message: str):
+        self.status = JobStatus.FAILED
+        self.message = error_message
+
+        return self
 
     def to_dict(self) -> dict:
         return asdict(self)

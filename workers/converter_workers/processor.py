@@ -72,6 +72,7 @@ async def process_job(context: WorkerContext, job: ConversionJob) -> None:
     except Exception as e:
         error_message = str(e)
         job.fail(error_message)
+        await context.event_port.publish(**event.failed(error_message).to_dict())
         raise RuntimeError(error_message)
 
 
