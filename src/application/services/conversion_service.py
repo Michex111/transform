@@ -8,7 +8,7 @@ class ConversionService:
         self.queue_port = queue_port
         self.storage_port = storage_port
 
-    async def submit_conversion_job(self, job: ConversionJob) -> str:
+    async def push_conversion_job(self, job: ConversionJob) -> str:
         conversion_type = job.conversion
         is_supported(conversion_type, get_registry().list_conversions())
         await self.queue_port.push_job(job)

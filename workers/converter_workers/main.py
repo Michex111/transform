@@ -14,7 +14,7 @@ sys.path.insert(0, str(project_root))
 from src.infrastructure.converters.converter_registry import get_registry
 from src.application.ports.contracts import QueuePort, StoragePort
 from src.infrastructure.logging.loggers import worker_logger
-from src.infrastructure.adapters.storage.minio_storage import get_storage
+from infrastructure.adapters.storage.minio_storage_factory import get_storage
 from workers.converter_workers.dependencies import get_consumer_queue, get_event_queue
 from workers.converter_workers.context.worker_context import WorkerContext
 from workers.converter_workers.worker import ConverterWorker

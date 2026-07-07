@@ -26,7 +26,7 @@ def test_job_pipeline_runs_end_to_end_in_memory(
     monkeypatch.setattr(conversion_service_module, "get_registry", lambda: fake_converter_registry)
     service = ConversionService(queue_port=fake_queue_port)
 
-    returned_id = asyncio.run(service.submit_conversion_job(conversion_job))
+    returned_id = asyncio.run(service.push_conversion_job(conversion_job))
     message_id, queued_job = asyncio.run(fake_queue_port.fetch_job())
 
     context = WorkerContext(

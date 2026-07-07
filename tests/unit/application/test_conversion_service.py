@@ -22,7 +22,7 @@ def test_submit_conversion_job_successfully_enqueues_job(
     monkeypatch.setattr(conversion_service_module, "get_registry", lambda: converter_registry)
     service = ConversionService(queue_port=fake_queue_port)
 
-    returned_id = asyncio.run(service.submit_conversion_job(conversion_job))
+    returned_id = asyncio.run(service.push_conversion_job(conversion_job))
 
     assert returned_id == conversion_job.job_id
     assert fake_queue_port.pushed_jobs == [conversion_job]
@@ -38,7 +38,7 @@ def test_submit_conversion_job_rejects_unsupported_conversion(
     service = ConversionService(queue_port=fake_queue_port)
 
     with pytest.raises(InvalidConversion):
-        asyncio.run(service.submit_conversion_job(conversion_job))
+        asyncio.run(service.push_conversion_job(conversion_job))
 
     assert fake_queue_port.pushed_jobs == []
 
@@ -57,7 +57,7 @@ def test_submit_conversion_job_calls_queue_exactly_once(
     monkeypatch.setattr(conversion_service_module, "get_registry", lambda: converter_registry)
     service = ConversionService(queue_port=fake_queue_port)
 
-    asyncio.run(service.submit_conversion_job(conversion_job))
+    asyncio.run(service.push_conversion_job(conversion_job))
 
     assert len(fake_queue_port.pending) == 1
 
@@ -76,7 +76,7 @@ def test_submit_conversion_job_returns_original_job_id(
     monkeypatch.setattr(conversion_service_module, "get_registry", lambda: converter_registry)
     service = ConversionService(queue_port=fake_queue_port)
 
-    assert asyncio.run(service.submit_conversion_job(conversion_job)) == "job-1"
+    assert asyncio.run(service.push_conversion_job(conversion_job)) == "job-1"
 
 
 def test_submit_conversion_job_propagates_queue_failure(
@@ -98,4 +98,4 @@ def test_submit_conversion_job_propagates_queue_failure(
     service = ConversionService(queue_port=FailingQueue())
 
     with pytest.raises(RuntimeError, match="queue unavailable"):
-        asyncio.run(service.submit_conversion_job(conversion_job))
+        asyncio.run(service.push_conversion_job(conversion_job))
