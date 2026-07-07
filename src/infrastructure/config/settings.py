@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     BACKBLAZE_SECRET_KEY: SecretStr
     S3_BUCKET_NAME: str = "transform-convertion-bucket"
     BASE_TARGET_KEY: str
+    UPLOAD_URL_TTL_MINUTES: int = 15  # Time-to-live for upload URLs in minutes
 
     model_config = SettingsConfigDict(env_file=".env")
 
