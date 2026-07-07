@@ -7,6 +7,9 @@ class Settings(BaseSettings):
     REDIS_URL: SecretStr
     REDIS_CACHE_TTL: int = 86400  # Cache time-to-live in seconds
 
+    #Database configuration
+    DATABASE_URL: SecretStr
+
     # s3 access
     BACKBLAZE_ENDPOINT: str
     BACKBLAZE_ACCESS_KEY: SecretStr
