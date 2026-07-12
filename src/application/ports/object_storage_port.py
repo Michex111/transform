@@ -6,7 +6,7 @@ class StorageUrlGateway(Protocol):
     Protocol for object storage operations.
     """
 
-    def generate_upload_url(self, object_key: str) -> str:
+    def generate_put_url(self, object_key: str) -> str:
         """
         Generate a pre-signed URL for uploading an object.
 
@@ -18,7 +18,7 @@ class StorageUrlGateway(Protocol):
         """
         ...
 
-    def generate_download_url(self, object_key: str, expires_in_minutes: int) -> str:
+    def generate_get_url(self, object_key: str, expires_in_minutes: int) -> str:
         """
         Generate a pre-signed URL for downloading an object.
 
@@ -31,4 +31,27 @@ class StorageUrlGateway(Protocol):
         """
         ...
 
-    
+    async def object_exists(self, object_key: str) -> bool:
+        """
+        Check if an object exists in the storage.
+
+        Args:
+            object_key: The key of the object to check.
+
+
+        Returns:
+            bool: True if the object exists, False otherwise.
+        """
+        ...
+
+    async def verify_upload_completion(self, object_key: str) -> bool:
+        """
+        Verify if the upload for the given object key has been completed successfully.
+
+        Args:
+            object_key: The key of the object to verify.
+
+        Returns:
+            bool: True if the upload is complete, False otherwise.
+        """
+        ...

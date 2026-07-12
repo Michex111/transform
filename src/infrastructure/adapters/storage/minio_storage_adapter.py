@@ -1,10 +1,16 @@
+import asyncio
+
 from minio import Minio
 from minio.error import S3Error
 from datetime import timedelta
 from pathlib import Path
 from typing import Optional
 from infrastructure.config.settings import get_settings
-from src.application.exceptions import storage_exceptions
+from src.infrastructure.adapters.storage.exceptions import (
+    ObjectNotFoundError,
+    StorageOperationError,
+    StoragePermissionError,
+)
 import logging
 
 
@@ -35,16 +41,16 @@ class MinioUrlStorageAdapter:
         self._ttl = timedelta(minutes=ttl_minutes)
         self._logger = logger or logging.getLogger(__name__)
 
-    def generate_upload_url(self, object_key: str) -> str:
+    def generate_put_url(self, object_key: str) -> str:
         """
-        Generates a MinIO presigned GET URL for downloading an object.
+        Generates a MinIO presigned PUT URL for uploading an object.
 
         Args:
             object_key: The path of the stored file.
-            expires_in_minutes: How long the download URL should remain valid.
+            expires_in_minutes: How long the upload URL should remain valid.
 
         Returns:
-            str: The presigned GET URL.
+            str: The presigned PUT URL.
             
         Raises:
             StorageOperationError: If MinIO encounters an issue.
@@ -58,14 +64,14 @@ class MinioUrlStorageAdapter:
         except S3Error as e:
             self._logger.error("minio_generate_upload_url_failed", extra={"key": object_key, "error": str(e)})
             if e.code == "NoSuchKey":
-                raise storage_exceptions.ObjectNotFoundError(f"Object '{object_key}' not found in bucket '{self._bucket_name}'.")
+                raise ObjectNotFoundError(f"Object '{object_key}' not found in bucket '{self._bucket_name}'.")
             
             if e.code == "AccessDenied":
-                raise storage_exceptions.StoragePermissionError(f"Access denied for object '{object_key}' in bucket '{self._bucket_name}'.")
+                raise StoragePermissionError(f"Access denied for object '{object_key}' in bucket '{self._bucket_name}'.")
             
-            raise storage_exceptions.StorageOperationError() from e
+            raise StorageOperationError() from e
         
-    def generate_download_url(self, object_key: str, expires_in_minutes: int = 60) -> str:
+    def generate_get_url(self, object_key: str, expires_in_minutes: int = 60) -> str:
         """
         Generates a MinIO presigned GET URL for downloading an object.
 
@@ -88,9 +94,34 @@ class MinioUrlStorageAdapter:
         except S3Error as e:
             self._logger.error("minio_generate_download_url_failed", extra={"key": object_key, "error": str(e)})
             if e.code == "NoSuchKey":
-                raise storage_exceptions.ObjectNotFoundError(f"Object '{object_key}' not found in bucket '{self._bucket_name}'.")
+                raise ObjectNotFoundError(f"Object '{object_key}' not found in bucket '{self._bucket_name}'.")
             
             if e.code == "AccessDenied":
-                raise storage_exceptions.StoragePermissionError(f"Access denied for object '{object_key}' in bucket '{self._bucket_name}'.")
+                raise StoragePermissionError(f"Access denied for object '{object_key}' in bucket '{self._bucket_name}'.")
             
-            raise storage_exceptions.StorageOperationError() from e
+            raise StorageOperationError() from e
+
+    async def object_exists(self, object_key: str) -> bool:
+        """
+        Check if an object exists in the MinIO bucket.
+
+        Args:
+            object_key: The path of the stored file.
+
+        Returns:
+            bool: True if the object exists, False otherwise.
+
+        Raises:
+            StorageOperationError: If MinIO encounters an issue.
+        """
+        def _stat():
+            try:
+                self._minio_client.stat_object(self._bucket_name, object_key)
+                return True
+            except S3Error as e:
+                if e.code == "NoSuchKey":
+                    return False
+                self._logger.error("minio_check_object_exists_failed", extra={"key": object_key, "error": str(e)})
+                raise StorageOperationError() from e
+            
+        return await asyncio.to_thread(_stat)
