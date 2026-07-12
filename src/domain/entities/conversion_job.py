@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum, auto
 
 from src.domain.exceptions import InvalidStateTransition
@@ -7,7 +7,7 @@ from src.domain.value_object.job_status import JobStatus
 
 @dataclass
 class ConversionJob:
-    job_id: str
+    job_id: str | None
     conversion: ConversionType
     input_file: str
     output_file: str | None = None

@@ -3,7 +3,7 @@ from dataclasses import dataclass, field
 from uuid import uuid4
 from typing import Optional
 
-from src.application.ports.contracts import JobEventPort, QueuePort, StoragePort
+from workers.converter_workers.ports import JobEventPort, QueuePort, StoragePort
 from src.domain.value_object.conversion_type import ConversionType
 from src.infrastructure.converters.converter_registry import ConverterRegistry
 
