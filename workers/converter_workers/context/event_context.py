@@ -2,7 +2,7 @@ from dataclasses import dataclass, asdict
 from enum import StrEnum, auto
 from typing import TypedDict, Optional
 
-from src.domain.value_object.job_status import JobStatus
+from domain.value_object.job_status import JobStatus
 
 
 @dataclass

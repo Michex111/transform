@@ -1,4 +1,4 @@
-from src.application.ports.session_cache_port import SessionCache
+from application.ports.session_cache_port import SessionCache
 
 from redis.asyncio import Redis
 from datetime import timedelta

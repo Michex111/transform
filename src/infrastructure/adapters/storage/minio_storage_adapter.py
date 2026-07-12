@@ -6,7 +6,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Optional
 from infrastructure.config.settings import get_settings
-from src.infrastructure.adapters.storage.exceptions import (
+from infrastructure.adapters.storage.exceptions import (
     ObjectNotFoundError,
     StorageOperationError,
     StoragePermissionError,

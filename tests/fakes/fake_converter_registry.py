@@ -1,6 +1,6 @@
 from collections.abc import Callable
 
-from src.domain.value_object.conversion_type import ConversionType
+from domain.value_object.conversion_type import ConversionType
 
 ConverterFunction = Callable[[str, str], None]
 

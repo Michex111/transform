@@ -2,15 +2,16 @@ import asyncio
 
 import pytest
 
-import src.application.services.conversion_service as conversion_service_module
-from src.application.services.conversion_service import ConversionService
-from src.domain.exceptions import InvalidConversion
-from src.domain.value_object.conversion_type import ConversionType
+import application.services.conversion_service as conversion_service_module
+from application.services.conversion_service import ConversionService
+from domain.exceptions import InvalidConversion
+from domain.value_object.conversion_type import ConversionType
 
 
 def test_submit_conversion_job_successfully_enqueues_job(
     conversion_job,
     fake_queue_port,
+    fake_repository_port,
     converter_registry,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -20,7 +21,7 @@ def test_submit_conversion_job_successfully_enqueues_job(
         del output_path
 
     monkeypatch.setattr(conversion_service_module, "get_registry", lambda: converter_registry)
-    service = ConversionService(queue_port=fake_queue_port)
+    service = ConversionService(queue_port=fake_queue_port, db_repository=fake_repository_port)
 
     returned_id = asyncio.run(service.push_conversion_job(conversion_job))
 
@@ -31,11 +32,12 @@ def test_submit_conversion_job_successfully_enqueues_job(
 def test_submit_conversion_job_rejects_unsupported_conversion(
     conversion_job,
     fake_queue_port,
+    fake_repository_port,
     converter_registry,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(conversion_service_module, "get_registry", lambda: converter_registry)
-    service = ConversionService(queue_port=fake_queue_port)
+    service = ConversionService(queue_port=fake_queue_port, db_repository=fake_repository_port)
 
     with pytest.raises(InvalidConversion):
         asyncio.run(service.push_conversion_job(conversion_job))
@@ -46,6 +48,7 @@ def test_submit_conversion_job_rejects_unsupported_conversion(
 def test_submit_conversion_job_calls_queue_exactly_once(
     conversion_job,
     fake_queue_port,
+    fake_repository_port,
     converter_registry,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -55,7 +58,7 @@ def test_submit_conversion_job_calls_queue_exactly_once(
         del output_path
 
     monkeypatch.setattr(conversion_service_module, "get_registry", lambda: converter_registry)
-    service = ConversionService(queue_port=fake_queue_port)
+    service = ConversionService(queue_port=fake_queue_port, db_repository=fake_repository_port)
 
     asyncio.run(service.push_conversion_job(conversion_job))
 
@@ -65,6 +68,7 @@ def test_submit_conversion_job_calls_queue_exactly_once(
 def test_submit_conversion_job_returns_original_job_id(
     conversion_job,
     fake_queue_port,
+    fake_repository_port,
     converter_registry,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -74,7 +78,7 @@ def test_submit_conversion_job_returns_original_job_id(
         del output_path
 
     monkeypatch.setattr(conversion_service_module, "get_registry", lambda: converter_registry)
-    service = ConversionService(queue_port=fake_queue_port)
+    service = ConversionService(queue_port=fake_queue_port, db_repository=fake_repository_port)
 
     assert asyncio.run(service.push_conversion_job(conversion_job)) == "job-1"
 
@@ -82,6 +86,7 @@ def test_submit_conversion_job_returns_original_job_id(
 def test_submit_conversion_job_propagates_queue_failure(
     conversion_job,
     converter_registry,
+    fake_repository_port,   
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class FailingQueue:
@@ -95,7 +100,7 @@ def test_submit_conversion_job_propagates_queue_failure(
         del output_path
 
     monkeypatch.setattr(conversion_service_module, "get_registry", lambda: converter_registry)
-    service = ConversionService(queue_port=FailingQueue())
+    service = ConversionService(queue_port=FailingQueue(), db_repository=fake_repository_port)
 
     with pytest.raises(RuntimeError, match="queue unavailable"):
         asyncio.run(service.push_conversion_job(conversion_job))

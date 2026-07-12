@@ -1,8 +1,18 @@
+from contextlib import asynccontextmanager
+
 import uvicorn
 
 from fastapi import FastAPI
+from infrastructure.database.initializer import initialize_database
 
-app = FastAPI()
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    await initialize_database()
+    yield
+
+
+app = FastAPI(lifespan=lifespan)
 
 @app.get("/health")
 async def health_check():

@@ -3,7 +3,7 @@ import asyncio
 import pytest
 
 import workers.converter_workers.worker as worker_module
-from src.domain.value_object.job_status import JobStatus
+from domain.value_object.job_status import JobStatus
 from tests.fakes.fake_logger import FakeLogger
 from workers.converter_workers.context.worker_context import WorkerContext
 from workers.converter_workers.worker import ConverterWorker

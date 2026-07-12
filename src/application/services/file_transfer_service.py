@@ -2,7 +2,7 @@ import logging
 
 from application.ports.object_storage_port import StorageUrlGateway
 from application.ports.session_cache_port import SessionCache
-from src.application.exceptions.file_transfer_exceptions import (
+from application.exceptions.file_transfer_exceptions import (
     UploadSessionNotFoundError,
     UploadVerificationError,
 )

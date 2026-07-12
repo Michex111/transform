@@ -1,5 +1,5 @@
 from redis.asyncio import Redis
-from src.infrastructure.config.settings import get_settings
+from infrastructure.config.settings import get_settings
 
 
 settings = get_settings()

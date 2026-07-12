@@ -3,9 +3,9 @@ from pathlib import Path
 
 import pytest
 
-import src.application.services.conversion_service as conversion_service_module
-from src.application.services.conversion_service import ConversionService
-from src.domain.value_object.job_status import JobStatus
+import application.services.conversion_service as conversion_service_module
+from application.services.conversion_service import ConversionService
+from domain.value_object.job_status import JobStatus
 from workers.converter_workers.context.worker_context import WorkerContext
 from workers.converter_workers.processor import process_job
 
@@ -14,6 +14,7 @@ def test_job_pipeline_runs_end_to_end_in_memory(
     conversion_job,
     fake_queue_port,
     fake_storage_port,
+    fake_repository_port,
     fake_event_publisher,
     fake_converter_registry,
     monkeypatch: pytest.MonkeyPatch,
@@ -24,7 +25,7 @@ def test_job_pipeline_runs_end_to_end_in_memory(
         Path(output_path).write_text(text.replace("hello", "goodbye"), encoding="utf-8")
 
     monkeypatch.setattr(conversion_service_module, "get_registry", lambda: fake_converter_registry)
-    service = ConversionService(queue_port=fake_queue_port)
+    service = ConversionService(queue_port=fake_queue_port, db_repository=fake_repository_port)
 
     returned_id = asyncio.run(service.push_conversion_job(conversion_job))
     message_id, queued_job = asyncio.run(fake_queue_port.fetch_job())

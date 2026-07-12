@@ -1,4 +1,4 @@
-from src.domain.value_object.conversion_type import ConversionType
+from domain.value_object.conversion_type import ConversionType
 
 from typing import Callable
 
@@ -31,6 +31,6 @@ def get_registry() -> ConverterRegistry:
     Imports converter functions to trigger their registration decorators.
     """
     # Import functions to register them with the global registry
-    import src.infrastructure.converters.functions
+    import infrastructure.converters.functions
     
     return converter_registry
