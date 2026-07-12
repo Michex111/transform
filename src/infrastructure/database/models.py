@@ -1,8 +1,8 @@
-from src.infrastructure.database.session import Base
+from infrastructure.database.session import Base
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy import Enum as SqlEnum, String, Integer
 
-from src.domain.value_object.job_status import JobStatus
+from domain.value_object.job_status import JobStatus
 
 class ConversionJobModel(Base):
     __tablename__ = "conversion_jobs"

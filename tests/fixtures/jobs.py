@@ -2,8 +2,8 @@ from collections.abc import Callable
 
 import pytest
 
-from src.domain.entities.conversion_job import ConversionJob
-from src.domain.value_object.conversion_type import ConversionType
+from domain.entities.conversion_job import ConversionJob
+from domain.value_object.conversion_type import ConversionType
 
 
 @pytest.fixture

@@ -1,9 +1,9 @@
 from application.ports.db_repository import ConversionJobRepository
-from src.domain.entities.conversion_job import ConversionJob
-from src.domain.services.conversion_policy import is_supported
-from src.infrastructure.converters.converter_registry import get_registry
-from src.application.ports.contracts import JobQueuePort, JobStoragePort
-from src.application.exceptions.conversion_job_exception import InvalidConversionJobError
+from domain.entities.conversion_job import ConversionJob
+from domain.services.conversion_policy import is_supported
+from infrastructure.converters.converter_registry import get_registry
+from application.ports.contracts import JobQueuePort, JobStoragePort
+from application.exceptions.conversion_job_exception import InvalidConversionJobError
 
 from uuid import uuid4
 

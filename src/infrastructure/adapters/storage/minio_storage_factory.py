@@ -1,6 +1,6 @@
 from minio import Minio
-from src.application.ports.contracts import FileStorageGateway
-from src.infrastructure.config.settings import get_settings
+from application.ports.contracts import FileStorageGateway
+from infrastructure.config.settings import get_settings
 from .minio_storage_adapter import MinioFileStorageAdapter
 from typing import Optional
 import logging

@@ -1,9 +1,9 @@
 from dataclasses import dataclass, field
 from enum import StrEnum, auto
 
-from src.domain.exceptions import InvalidStateTransition
-from src.domain.value_object.conversion_type import ConversionType
-from src.domain.value_object.job_status import JobStatus
+from domain.exceptions import InvalidStateTransition
+from domain.value_object.conversion_type import ConversionType
+from domain.value_object.job_status import JobStatus
 
 @dataclass
 class ConversionJob:

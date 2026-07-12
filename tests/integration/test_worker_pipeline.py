@@ -3,8 +3,8 @@ from pathlib import Path
 
 import pytest
 
-import src.application.services.conversion_service as conversion_service_module
-from src.application.services.conversion_service import ConversionService
+import application.services.conversion_service as conversion_service_module
+from application.services.conversion_service import ConversionService
 from tests.fakes.fake_logger import FakeLogger
 from workers.converter_workers.context.worker_context import WorkerContext
 from workers.converter_workers.processor import process_job
@@ -14,6 +14,7 @@ from workers.converter_workers.worker import ConverterWorker
 def test_worker_pipeline_runs_through_service_queue_and_processor(
     conversion_job,
     fake_queue_port,
+    fake_repository_port,
     fake_storage_port,
     fake_event_publisher,
     fake_converter_registry,
@@ -25,7 +26,7 @@ def test_worker_pipeline_runs_through_service_queue_and_processor(
         Path(output_path).write_text(text.upper(), encoding="utf-8")
 
     monkeypatch.setattr(conversion_service_module, "get_registry", lambda: fake_converter_registry)
-    service = ConversionService(queue_port=fake_queue_port)
+    service = ConversionService(queue_port=fake_queue_port, db_repository=fake_repository_port)
     asyncio.run(service.push_conversion_job(conversion_job))
 
     context = WorkerContext(

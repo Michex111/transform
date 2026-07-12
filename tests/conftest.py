@@ -3,12 +3,13 @@ from pathlib import Path
 
 import pytest
 
-from src.infrastructure.converters.converter_registry import ConverterRegistry
+from infrastructure.converters.converter_registry import ConverterRegistry
 from tests.fakes.fake_converter_registry import FakeConverterRegistry
 from tests.fakes.fake_event_publisher import FakeEventPublisher
 from tests.fakes.fake_logger import FakeLogger
 from tests.fakes.fake_queue import FakeQueuePort
 from tests.fakes.fake_storage import FakeStoragePort
+from tests.fakes.fake_db_repository import FakeDatabaseRepository
 from workers.converter_workers.context.worker_context import WorkerContext
 
 
@@ -36,6 +37,10 @@ def fake_queue_port() -> FakeQueuePort:
 @pytest.fixture
 def fake_storage_port() -> FakeStoragePort:
     return FakeStoragePort(seed_files={"s3-file_store/input.txt": b"hello world"})
+
+@pytest.fixture
+def fake_repository_port() -> FakeDatabaseRepository:
+    return FakeDatabaseRepository()
 
 
 @pytest.fixture

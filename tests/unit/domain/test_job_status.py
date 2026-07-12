@@ -1,4 +1,4 @@
-from src.domain.value_object.job_status import JobStatus
+from domain.value_object.job_status import JobStatus
 
 
 def test_job_status_defines_expected_members() -> None:

@@ -1,5 +1,5 @@
-from src.domain.value_object.conversion_type import ConversionType
-from src.domain.exceptions import InvalidConversion
+from domain.value_object.conversion_type import ConversionType
+from domain.exceptions import InvalidConversion
 
 def is_supported(conversion_type: ConversionType, supported_conversions: set[ConversionType]):
     if conversion_type not in supported_conversions:
