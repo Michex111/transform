@@ -8,8 +8,8 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from alembic import context
-from infrastructure.database import models  # noqa: F401
-from infrastructure.database.session import Base, resolve_database_url
+from src.infrastructure.database import models  # noqa: F401
+from src.infrastructure.database.session import Base, normalize_database_url, resolve_database_url
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
@@ -18,7 +18,7 @@ config = context.config
 # Interpret the config file for Python logging.
 # This line sets up loggers basically.
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 # add your model's MetaData object here
 # for 'autogenerate' support
@@ -35,12 +35,10 @@ target_metadata = Base.metadata
 def _database_url() -> str:
     env_database_url = os.getenv("DATABASE_URL")
     if env_database_url:
-        if env_database_url.startswith("postgresql://"):
-            return env_database_url.replace("postgresql://", "postgresql+asyncpg://", 1)
-        return env_database_url
+        return normalize_database_url(env_database_url)
     configured_database_url = config.get_main_option("sqlalchemy.url")
     if configured_database_url and not configured_database_url.startswith("driver://"):
-        return configured_database_url
+        return normalize_database_url(configured_database_url)
     return resolve_database_url()
 
 

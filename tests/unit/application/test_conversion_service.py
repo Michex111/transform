@@ -2,10 +2,10 @@ import asyncio
 
 import pytest
 
-import application.services.conversion_service as conversion_service_module
-from application.services.conversion_service import ConversionService
-from domain.exceptions import InvalidConversion
-from domain.value_object.conversion_type import ConversionType
+import src.application.services.conversion_service as conversion_service_module
+from src.application.services.conversion_service import ConversionService
+from src.domain.exceptions import InvalidConversion
+from src.domain.value_object.conversion_type import ConversionType
 
 
 def test_submit_conversion_job_successfully_enqueues_job(

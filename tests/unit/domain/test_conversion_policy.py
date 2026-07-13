@@ -1,8 +1,8 @@
 import pytest
 
-from domain.exceptions import InvalidConversion
-from domain.services.conversion_policy import is_supported
-from domain.value_object.conversion_type import ConversionType
+from src.domain.exceptions import InvalidConversion
+from src.domain.services.conversion_policy import is_supported
+from src.domain.value_object.conversion_type import ConversionType
 
 
 def test_conversion_policy_allows_supported_conversion() -> None:

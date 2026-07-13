@@ -1,12 +1,12 @@
-from infrastructure.redis.client import create_redis_client
-from domain.entities.conversion_job import ConversionJob
-from domain.value_object.conversion_type import ConversionType
+from src.infrastructure.redis.client import create_redis_client
+from src.domain.entities.conversion_job import ConversionJob
+from src.domain.value_object.conversion_type import ConversionType
 from .messages import ConversionJobMessage as JobMessage
 
 from redis.asyncio import Redis
 from redis.exceptions import ResponseError
 import asyncio
-from infrastructure.logging.loggers import worker_logger
+from src.infrastructure.logging.loggers import worker_logger
 
 
 

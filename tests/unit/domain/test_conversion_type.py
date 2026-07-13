@@ -2,7 +2,7 @@ from dataclasses import FrozenInstanceError
 
 import pytest
 
-from domain.value_object.conversion_type import ConversionType
+from src.domain.value_object.conversion_type import ConversionType
 
 
 def test_conversion_type_equality_uses_value_semantics() -> None:

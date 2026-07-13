@@ -4,7 +4,7 @@ from pathlib import Path
 from alembic import command
 from alembic.config import Config
 
-from infrastructure.database.session import resolve_database_url
+from src.infrastructure.database.session import resolve_database_url
 
 
 def _run_database_migrations() -> None:
