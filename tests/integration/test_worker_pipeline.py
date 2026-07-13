@@ -3,8 +3,8 @@ from pathlib import Path
 
 import pytest
 
-import application.services.conversion_service as conversion_service_module
-from application.services.conversion_service import ConversionService
+import src.application.services.conversion_service as conversion_service_module
+from src.application.services.conversion_service import ConversionService
 from tests.fakes.fake_logger import FakeLogger
 from workers.converter_workers.context.worker_context import WorkerContext
 from workers.converter_workers.processor import process_job

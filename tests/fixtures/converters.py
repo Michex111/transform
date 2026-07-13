@@ -2,8 +2,8 @@ from pathlib import Path
 
 import pytest
 
-from domain.value_object.conversion_type import ConversionType
-from infrastructure.converters.converter_registry import ConverterRegistry
+from src.domain.value_object.conversion_type import ConversionType
+from src.infrastructure.converters.converter_registry import ConverterRegistry
 
 
 @pytest.fixture

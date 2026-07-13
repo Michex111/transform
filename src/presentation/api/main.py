@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 import uvicorn
 
 from fastapi import FastAPI
-from infrastructure.database.initializer import initialize_database
+from src.infrastructure.database.initializer import initialize_database
 
 
 @asynccontextmanager
@@ -20,5 +20,5 @@ async def health_check():
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run("src.presentation.api.main:app", host="0.0.0.0", port=8000, reload=True)
     

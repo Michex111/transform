@@ -1,12 +1,12 @@
 import logging
 
-from application.ports.object_storage_port import StorageUrlGateway
-from application.ports.session_cache_port import SessionCache
-from application.exceptions.file_transfer_exceptions import (
+from src.application.ports.object_storage_port import StorageUrlGateway
+from src.application.ports.session_cache_port import SessionCache
+from src.application.exceptions.file_transfer_exceptions import (
     UploadSessionNotFoundError,
     UploadVerificationError,
 )
-from application.dtos.upload_dto import UploadResponse, UploadSession
+from src.application.dtos.upload_dto import UploadResponse, UploadSession
 from uuid import uuid4
 from datetime import timedelta
 

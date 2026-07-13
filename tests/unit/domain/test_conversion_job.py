@@ -1,9 +1,9 @@
 import pytest
 
-from domain.entities.conversion_job import ConversionJob
-from domain.exceptions import InvalidStateTransition
-from domain.value_object.conversion_type import ConversionType
-from domain.value_object.job_status import JobStatus
+from src.domain.entities.conversion_job import ConversionJob
+from src.domain.exceptions import InvalidStateTransition
+from src.domain.value_object.conversion_type import ConversionType
+from src.domain.value_object.job_status import JobStatus
 
 
 def test_valid_job_creation_defaults_to_pending_status() -> None:

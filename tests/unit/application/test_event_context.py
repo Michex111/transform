@@ -1,4 +1,4 @@
-from domain.value_object.job_status import JobStatus
+from src.domain.value_object.job_status import JobStatus
 
 
 def test_event_context_downloading_sets_processing_state(event_context) -> None:

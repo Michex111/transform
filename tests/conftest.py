@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from infrastructure.converters.converter_registry import ConverterRegistry
+from src.infrastructure.converters.converter_registry import ConverterRegistry
 from tests.fakes.fake_converter_registry import FakeConverterRegistry
 from tests.fakes.fake_event_publisher import FakeEventPublisher
 from tests.fakes.fake_logger import FakeLogger

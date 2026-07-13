@@ -1,11 +1,11 @@
 from pathlib import Path
 
-from domain.entities.conversion_job import ConversionJob
+from src.domain.entities.conversion_job import ConversionJob
 from workers.converter_workers.context.worker_context import WorkerContext
 from workers.converter_workers.processor import resolve_path
-from domain.entities.conversion_job import ConversionJob
+from src.domain.entities.conversion_job import ConversionJob
 
-from infrastructure.logging.loggers import worker_logger
+from src.infrastructure.logging.loggers import worker_logger
 
 
 def dev_process_job(context: WorkerContext, job: ConversionJob) -> None:

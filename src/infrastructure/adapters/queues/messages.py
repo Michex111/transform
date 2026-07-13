@@ -1,5 +1,5 @@
 from dataclasses import dataclass, asdict
-from domain.entities.conversion_job import ConversionJob
+from src.domain.entities.conversion_job import ConversionJob
 
 @dataclass
 class ConversionJobMessage:
