@@ -101,6 +101,13 @@ class FastAPIServer:
             "target_format": target_format
         }
         response = self.session.post(f"{self.base_url}/api/conversions/jobs", json=payload)
-        if response.status_code == 500:
-            print(f"[!] Server error during job creation: {response.text}")
+        response.raise_for_status()
+        
+        return response.json()
+    
+    def verify_upload_session(self, upload_id: str, job_id: str | None = None):
+        """Verifies the completion of an upload session."""
+        params = {"job_id": job_id} if job_id else {}
+        response = self.session.post(f"{self.base_url}/api/uploads/sessions/{upload_id}/verify", params=params)
+        response.raise_for_status()
         return response.json()

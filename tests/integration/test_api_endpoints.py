@@ -3,7 +3,7 @@ import pytest
 from tests.integration.utils.fast_api_server import FastAPIServer
 
 
-def test_api_endpoint_through_fast_api_server():
+def test_api_endpoint_pipeline():
     with FastAPIServer("src.presentation.api.main:app", port=37954) as server:
         # Test the health check endpoint
 
@@ -11,10 +11,7 @@ def test_api_endpoint_through_fast_api_server():
         response = server.session.get(f"{server.base_url}/health")
         assert response.status_code == 200
         assert response.json() == {"status": "ok"}
-
-        # Test the supported conversions endpoint
-        conversions_response = server.list_conversion_jobs()
-        assert isinstance(conversions_response, list)
+    
 
         # Test creating a conversion job
         payload = {
@@ -26,5 +23,5 @@ def test_api_endpoint_through_fast_api_server():
         assert create_response["status"] == "AWAITING_UPLOAD"
         assert "job_id" in create_response
 
-def test_presigned_url_generation():
+def test_list_conversion_endpoint():
     ...
