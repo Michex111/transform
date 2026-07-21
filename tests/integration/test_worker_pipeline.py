@@ -27,6 +27,7 @@ def test_worker_pipeline_runs_through_service_queue_and_processor(
 
     monkeypatch.setattr(conversion_service_module, "get_registry", lambda: fake_converter_registry)
     service = ConversionService(queue_port=fake_queue_port, db_repository=fake_repository_port)
+    conversion_job.pending_processing()
     asyncio.run(service.push_conversion_job(conversion_job))
 
     context = WorkerContext(

@@ -1,4 +1,4 @@
-from src.domain.value_object.conversion_type import ConversionType
+from src.domain.conversions.value_object.conversion_type import ConversionType
 
 from typing import Callable
 

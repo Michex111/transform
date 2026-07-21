@@ -1,4 +1,4 @@
-from src.domain.entities.conversion_job import ConversionJob
+from src.domain.conversions.entities.conversion_job import ConversionJob
 
 class FakeDatabaseRepository:
     def __init__(self):

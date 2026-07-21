@@ -1,0 +1,145 @@
+.
+|-- .agents
+|-- .codex
+|-- .env
+|-- .gitignore
+|-- .python-version
+|-- .vscode
+|   `-- settings.json
+|-- Agents.MD
+|-- LICENSE
+|-- README.md
+|-- alembic.ini
+|-- deployment
+|   |-- docker
+|   |   |-- compose.yaml
+|   |   `-- worker.Dockerfile
+|   `-- kubernetes
+|-- plan.MD
+|-- project_structure.txt
+|-- pyproject.toml
+|-- scripts
+|   `-- docker
+|       `-- start_worker.sh
+|-- src
+|   |-- application
+|   |   |-- dtos
+|   |   |   `-- upload_dto.py
+|   |   |-- exceptions
+|   |   |   |-- __init__.py
+|   |   |   |-- conversion_job_exception.py
+|   |   |   `-- file_transfer_exceptions.py
+|   |   |-- ports
+|   |   |   |-- contracts.py
+|   |   |   |-- db_repository.py
+|   |   |   |-- object_storage_port.py
+|   |   |   |-- queue_port.py
+|   |   |   `-- session_cache_port.py
+|   |   `-- services
+|   |       |-- conversion_service.py
+|   |       `-- file_transfer_service.py
+|   |-- domain
+|   |   |-- entities
+|   |   |   `-- conversion_job.py
+|   |   |-- exceptions
+|   |   |   |-- __init__.py
+|   |   |   `-- exceptions.py
+|   |   |-- services
+|   |   |   `-- conversion_policy.py
+|   |   `-- value_object
+|   |       |-- conversion_type.py
+|   |       `-- job_status.py
+|   |-- infrastructure
+|   |   |-- adapters
+|   |   |   |-- cache
+|   |   |   |   `-- redis_session_adapter.py
+|   |   |   |-- queues
+|   |   |   |   |-- messages.py
+|   |   |   |   |-- redis_stream_job_queue.py
+|   |   |   |   `-- redis_stream_status_queue.py
+|   |   |   |-- repository
+|   |   |   |   `-- sql_conversion_job_repo.py
+|   |   |   `-- storage
+|   |   |       |-- exceptions.py
+|   |   |       |-- minio_storage_adapter.py
+|   |   |       `-- minio_storage_factory.py
+|   |   |-- config
+|   |   |   `-- settings.py
+|   |   |-- converters
+|   |   |   |-- converter_registry.py
+|   |   |   `-- functions
+|   |   |       |-- __init__.py
+|   |   |       |-- audio
+|   |   |       |   `-- __init__.py
+|   |   |       `-- document
+|   |   |           |-- __init__.py
+|   |   |           `-- pdf_docs_.py
+|   |   |-- database
+|   |   |   |-- initializer.py
+|   |   |   |-- migrations
+|   |   |   |   |-- README
+|   |   |   |   |-- env.py
+|   |   |   |   |-- script.py.mako
+|   |   |   |   `-- versions
+|   |   |   |       `-- 0001_create_conversion_jobs.py
+|   |   |   |-- models.py
+|   |   |   `-- session.py
+|   |   |-- logging
+|   |   |   `-- loggers.py
+|   |   `-- redis
+|   |       `-- client.py
+|   `-- presentation
+|       |-- api
+|       |   |-- main.py
+|       |   `-- routers
+|       |       `-- upload.py
+|       `-- schemas
+|-- tests
+|   |-- __init__.py
+|   |-- conftest.py
+|   |-- fakes
+|   |   |-- fake_converter_registry.py
+|   |   |-- fake_db_repository.py
+|   |   |-- fake_event_publisher.py
+|   |   |-- fake_logger.py
+|   |   |-- fake_queue.py
+|   |   `-- fake_storage.py
+|   |-- fixtures
+|   |   |-- converters.py
+|   |   |-- events.py
+|   |   |-- files.py
+|   |   `-- jobs.py
+|   |-- integration
+|   |   |-- test_job_pipeline.py
+|   |   |-- test_worker_pipeline.py
+|   |   `-- utils
+|   |       `-- dev_worker_processor.py
+|   `-- unit
+|       |-- application
+|       |   |-- test_conversion_service.py
+|       |   |-- test_event_context.py
+|       |   `-- test_queue_integration.py
+|       |-- domain
+|       |   |-- test_conversion_job.py
+|       |   |-- test_conversion_policy.py
+|       |   |-- test_conversion_type.py
+|       |   `-- test_job_status.py
+|       |-- infrastructure
+|       |   `-- test_database_session.py
+|       `-- workers
+|           |-- test_event_publishing.py
+|           |-- test_processor.py
+|           `-- test_worker.py
+|-- uv.lock
+`-- workers
+    |-- common
+    `-- converter_workers
+        |-- context
+        |   |-- event_context.py
+        |   `-- worker_context.py
+        |-- dependencies.py
+        |-- main.py
+        |-- ports.py
+        |-- processor.py
+        |-- retry.py
+        `-- worker.py

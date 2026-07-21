@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from src.domain.value_object.job_status import JobStatus
+from src.domain.conversions.value_object.job_status import JobStatus
 from workers.converter_workers.context.worker_context import WorkerContext
 from workers.converter_workers.processor import process_job
 
@@ -27,7 +27,7 @@ def test_event_publisher_collects_all_processing_events(
         converter_registry=fake_converter_registry,
         worker_name="event-worker",
     )
-
+    conversion_job.pending_processing()
     asyncio.run(process_job(context, conversion_job))
 
     assert [event["message"] for event in fake_event_publisher.published_events] == [
@@ -58,6 +58,7 @@ def test_event_publisher_reports_completed_status_at_end(
         worker_name="event-worker",
     )
 
+    conversion_job.pending_processing()
     asyncio.run(process_job(context, conversion_job))
 
     last_event = fake_event_publisher.published_events[-1]
@@ -86,6 +87,7 @@ def test_event_publisher_stops_before_completed_event_on_failure(
         worker_name="event-worker",
     )
 
+    conversion_job.pending_processing()
     with pytest.raises(RuntimeError):
         asyncio.run(process_job(context, conversion_job))
 

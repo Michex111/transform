@@ -3,6 +3,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import SecretStr
 
 class Settings(BaseSettings):
+
+    SECRET_KEY: SecretStr
+    ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+
     # Redis configuration
     REDIS_URL: SecretStr
     REDIS_CACHE_TTL: int = 86400  # Cache time-to-live in seconds

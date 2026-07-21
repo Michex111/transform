@@ -1,0 +1,8 @@
+from enum import StrEnum, auto
+
+class JobStatus(StrEnum):
+    AWAITING_UPLOAD = "AWAITING_UPLOAD"
+    PENDING = "PENDING"
+    PROCESSING = "PROCESSING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"

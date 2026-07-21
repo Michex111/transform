@@ -1,6 +1,6 @@
 from src.infrastructure.redis.client import create_redis_client
-from src.domain.entities.conversion_job import ConversionJob
-from src.domain.value_object.conversion_type import ConversionType
+from src.domain.conversions.entities.conversion_job import ConversionJob
+from src.domain.conversions.value_object.conversion_type import ConversionType
 from .messages import ConversionJobMessage as JobMessage
 
 from redis.asyncio import Redis

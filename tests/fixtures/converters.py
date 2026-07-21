@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from src.domain.value_object.conversion_type import ConversionType
+from src.domain.conversions.value_object.conversion_type import ConversionType
 from src.infrastructure.converters.converter_registry import ConverterRegistry
 
 
