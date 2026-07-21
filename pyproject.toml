@@ -9,7 +9,9 @@ dependencies = [
     "asyncpg>=0.31.0",
     "fastapi[standard]>=0.136.3",
     "minio>=7.2.20",
+    "pwdlib>=0.3.0",
     "pydantic-settings>=2.14.1",
+    "pyjwt>=2.13.0",
     "redis[hiredis]>=8.0.0",
     "sqlalchemy>=2.0.51",
 ]
@@ -24,5 +26,6 @@ pythonpath = [
 [dependency-groups]
 dev = [
     "pytest>=9.1.1",
+    "requests>=2.34.2",
 ]
 

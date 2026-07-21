@@ -1,4 +1,4 @@
-from src.domain.entities.conversion_job import ConversionJob
+from src.domain.conversions.entities.conversion_job import ConversionJob
 from src.application.ports.contracts import FileStorageGateway as StoragePort
 from pathlib import Path
 from typing import Optional, Protocol

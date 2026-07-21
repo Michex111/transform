@@ -1,8 +1,8 @@
 from src.application.ports.db_repository import ConversionJobRepository
-from src.domain.entities.conversion_job import ConversionJob
-from src.domain.services.conversion_policy import is_supported
+from src.domain.conversions.entities.conversion_job import ConversionJob
+from src.domain.conversions.policies.conversion_policy import is_supported
 from src.infrastructure.converters.converter_registry import get_registry
-from src.application.ports.contracts import JobQueuePort, JobStoragePort
+from src.application.ports.contracts import JobQueuePort
 from src.application.exceptions.conversion_job_exception import InvalidConversionJobError
 
 from uuid import uuid4
@@ -22,10 +22,14 @@ class ConversionService:
         conversion_type = job.conversion
         is_supported(conversion_type, get_registry().list_conversions())
         await self.queue_port.push_job(job)
+        
         # self.storage_port.save_job(job)
         if not job.job_id:
             raise InvalidConversionJobError("Job ID must be set before pushing the job to the queue.")
         return job.job_id
+    
+    async def get_conversion_job(self, job_id: str) -> ConversionJob | None:
+        return await self.db_repository.get_conversion_job(job_id)
     
    
 

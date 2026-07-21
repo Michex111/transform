@@ -6,8 +6,8 @@ from src.infrastructure.logging.loggers import worker_logger
 from workers.converter_workers.context.worker_context import WorkerContext
 from workers.converter_workers.context.event_context import EventContext
 from workers.converter_workers.retry import retry_on_exception
-from src.domain.entities.conversion_job import ConversionJob, JobStatus
-from src.domain.value_object.conversion_type import ConversionType
+from src.domain.conversions.entities.conversion_job import ConversionJob, JobStatus
+from src.domain.conversions.value_object.conversion_type import ConversionType
 from src.infrastructure.config.settings import get_settings
 
 type JobProcess = Callable[[WorkerContext, ConversionJob], Coroutine[None, None, None]] 

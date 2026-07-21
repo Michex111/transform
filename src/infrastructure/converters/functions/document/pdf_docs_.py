@@ -4,7 +4,7 @@ import subprocess
 from pathlib import Path
 
 from src.infrastructure.converters.converter_registry import converter_registry as registry
-from src.domain.value_object.conversion_type import ConversionType
+from src.domain.conversions.value_object.conversion_type import ConversionType
 
 logger = logging.getLogger(__name__)
 

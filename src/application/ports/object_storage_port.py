@@ -1,4 +1,4 @@
-from src.domain.entities.conversion_job import ConversionJob
+from src.domain.conversions.entities.conversion_job import ConversionJob
 from typing import Protocol
 
 class StorageUrlGateway(Protocol):
@@ -41,17 +41,5 @@ class StorageUrlGateway(Protocol):
 
         Returns:
             bool: True if the object exists, False otherwise.
-        """
-        ...
-
-    async def verify_upload_completion(self, object_key: str) -> bool:
-        """
-        Verify if the upload for the given object key has been completed successfully.
-
-        Args:
-            object_key: The key of the object to verify.
-
-        Returns:
-            bool: True if the upload is complete, False otherwise.
         """
         ...

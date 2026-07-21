@@ -4,8 +4,8 @@ from pathlib import Path
 import pytest
 
 import workers.converter_workers.processor as processor_module
-from src.domain.value_object.conversion_type import ConversionType
-from src.domain.value_object.job_status import JobStatus
+from src.domain.conversions.value_object.conversion_type import ConversionType
+from src.domain.conversions.value_object.job_status import JobStatus
 from tests.fakes.fake_logger import FakeLogger
 from workers.converter_workers.context.worker_context import WorkerContext
 from workers.converter_workers.processor import process_job, resolve_path
@@ -47,6 +47,7 @@ def test_process_job_downloads_converts_and_uploads_successfully(
         worker_name="processor-test",
     )
 
+    conversion_job.pending_processing()
     asyncio.run(process_job(context, conversion_job))
 
     assert conversion_job.status == JobStatus.COMPLETED
@@ -71,6 +72,7 @@ def test_process_job_raises_and_marks_failed_when_converter_missing(
         worker_name="processor-test",
     )
 
+    conversion_job.pending_processing()
     with pytest.raises(RuntimeError, match="No converter found"):
         asyncio.run(process_job(context, conversion_job))
 
@@ -98,6 +100,7 @@ def test_process_job_marks_failed_when_converter_raises(
         worker_name="processor-test",
     )
 
+    conversion_job.pending_processing()
     with pytest.raises(RuntimeError, match="converter exploded"):
         asyncio.run(process_job(context, conversion_job))
 
@@ -125,6 +128,7 @@ def test_process_job_publishes_expected_event_sequence(
         worker_name="processor-test",
     )
 
+    conversion_job.pending_processing()
     asyncio.run(process_job(context, conversion_job))
 
     assert [event["progress"] for event in fake_event_publisher.published_events] == [25, 50, 75, 100]
@@ -150,6 +154,7 @@ def test_process_job_cleans_up_temporary_download_path(
         worker_name="processor-test",
     )
 
+    conversion_job.pending_processing()
     asyncio.run(process_job(context, conversion_job))
 
     _, downloaded_path = fake_storage_port.download_calls[0]
@@ -179,6 +184,7 @@ def test_process_job_emits_start_log_message(
         worker_name="processor-test",
     )
 
+    conversion_job.pending_processing()
     asyncio.run(process_job(context, conversion_job))
 
     assert any(

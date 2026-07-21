@@ -28,7 +28,12 @@ class TransferService:
 
         self._logger.info(f"Created upload session {upload_id} for user {user_id}")
 
-        return UploadResponse(upload_id=upload_id, upload_url=upload_url, object_key=object_key, expires_in_minutes=int(self._ttl.total_seconds()))
+        return UploadResponse(
+            upload_id=upload_id,
+            upload_url=upload_url,
+            object_key=object_key,
+            expires_in_minutes=int(self._ttl.total_seconds() // 60),
+        )
 
     async def get_upload_session(self, upload_id: str) -> UploadSession:
         session_data = await self._cache.get(upload_id)
@@ -44,9 +49,10 @@ class TransferService:
 
     async def verify_upload_completion(self, upload_id: str) -> UploadSession:
         session = await self.get_upload_session(upload_id)
-        if not await self._storage.verify_upload_completion(session.object_key):
+        if not await self._storage.object_exists(session.object_key):
             raise UploadVerificationError(f"Upload for session {upload_id} is not complete or failed.")
 
+        session.status = "completed"
         return session
 
     def _generate_object_key(self, job_id: str, file_extension: str) -> str:
@@ -54,5 +60,5 @@ class TransferService:
         Creates a secure, collision-resistant object path.
         """
 
-        secure_filename = f"{uuid4().hex}{file_extension.lstrip('.')}"
+        secure_filename = f"{uuid4().hex}.{file_extension.lstrip('.')}"
         return f"{job_id}/{secure_filename}"

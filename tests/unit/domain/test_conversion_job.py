@@ -1,9 +1,9 @@
 import pytest
 
-from src.domain.entities.conversion_job import ConversionJob
-from src.domain.exceptions import InvalidStateTransition
-from src.domain.value_object.conversion_type import ConversionType
-from src.domain.value_object.job_status import JobStatus
+from src.domain.conversions.entities.conversion_job import ConversionJob
+from src.domain.conversions.exceptions import InvalidStateTransition
+from src.domain.conversions.value_object.conversion_type import ConversionType
+from src.domain.conversions.value_object.job_status import JobStatus
 
 
 def test_valid_job_creation_defaults_to_pending_status() -> None:
@@ -13,12 +13,13 @@ def test_valid_job_creation_defaults_to_pending_status() -> None:
         input_file="s3-file_store/invoice.pdf",
     )
 
-    assert job.status == JobStatus.PENDING
+    assert job.status == JobStatus.AWAITING_UPLOAD
     assert job.output_file is None
     assert job.error_message is None
 
 
 def test_start_processing_transitions_pending_to_processing(conversion_job: ConversionJob) -> None:
+    conversion_job.pending_processing()
     conversion_job.start_processing()
 
     assert conversion_job.status == JobStatus.PROCESSING
@@ -36,6 +37,7 @@ def test_start_processing_raises_for_invalid_status(
 
 
 def test_complete_sets_output_and_completed_status(conversion_job: ConversionJob) -> None:
+    conversion_job.pending_processing()
     conversion_job.start_processing()
 
     conversion_job.complete("s3-file_store/output.md")

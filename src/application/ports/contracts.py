@@ -1,7 +1,7 @@
 from pathlib import Path
 from typing import Optional, Protocol
 
-from src.domain.entities.conversion_job import ConversionJob
+from src.domain.conversions.entities.conversion_job import ConversionJob
 
 
 class JobQueuePort(Protocol):

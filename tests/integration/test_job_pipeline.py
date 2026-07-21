@@ -5,7 +5,7 @@ import pytest
 
 import src.application.services.conversion_service as conversion_service_module
 from src.application.services.conversion_service import ConversionService
-from src.domain.value_object.job_status import JobStatus
+from src.domain.conversions.value_object.job_status import JobStatus
 from workers.converter_workers.context.worker_context import WorkerContext
 from workers.converter_workers.processor import process_job
 
@@ -26,7 +26,8 @@ def test_job_pipeline_runs_end_to_end_in_memory(
 
     monkeypatch.setattr(conversion_service_module, "get_registry", lambda: fake_converter_registry)
     service = ConversionService(queue_port=fake_queue_port, db_repository=fake_repository_port)
-
+    
+    conversion_job.pending_processing()
     returned_id = asyncio.run(service.push_conversion_job(conversion_job))
     message_id, queued_job = asyncio.run(fake_queue_port.fetch_job())
 

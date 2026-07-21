@@ -1,6 +1,6 @@
 from src.infrastructure.database.models import ConversionJobModel
-from src.domain.entities.conversion_job import ConversionJob
-from src.domain.value_object.conversion_type import ConversionType
+from src.domain.conversions.entities.conversion_job import ConversionJob
+from src.domain.conversions.value_object.conversion_type import ConversionType
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
