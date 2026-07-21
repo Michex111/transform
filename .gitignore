@@ -9,6 +9,9 @@ wheels/
 # Virtual environments
 .venv
 
+#init files
+*.ini
+
 #ENV files
 .env
 
@@ -17,3 +20,4 @@ Agents.MD
 
 #user-specific folders
 scripts/docker/
+alembic.ini
