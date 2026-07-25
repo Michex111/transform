@@ -1,3 +1,4 @@
+
 from collections.abc import Callable
 
 import pytest
