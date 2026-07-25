@@ -62,7 +62,7 @@ async def create_conversion_job(
 ) -> ConversionJobResponse:
     
     job = ConversionJob(
-        job_id="None",
+        job_id="",
         conversion=ConversionType(
             source_format=payload.source_format.lower().strip(),
             target_format=payload.target_format.lower().strip(),

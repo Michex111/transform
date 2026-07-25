@@ -1,8 +1,8 @@
 from pathlib import Path
 
 from src.domain.conversions.entities.conversion_job import ConversionJob
-from src.workers.converter_workers.context.worker_context import WorkerContext
-from src.workers.converter_workers.processor import resolve_path
+from workers.converter_workers.context.worker_context import WorkerContext
+from workers.converter_workers.processor import resolve_path
 from src.domain.conversions.entities.conversion_job import ConversionJob
 
 from src.infrastructure.logging.loggers import worker_logger
