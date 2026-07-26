@@ -16,7 +16,7 @@ from src.presentation.api.dependencies.auth_dependencies import CurrentUser
 from src.presentation.schemas.auth import TokenResponse, UserCreateRequest, UserResponse
 
 
-router = APIRouter(prefix="/api/users", tags=["users"])
+router = APIRouter(prefix="/api/v1/web/users", tags=["web-users"])
 
 
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)

@@ -7,6 +7,7 @@ class ConversionJobMessage:
     source_format: str
     target_format: str
     input_key: str
+    status: str
     retries: int = 0
 
     @classmethod
@@ -15,10 +16,10 @@ class ConversionJobMessage:
             job_id=job.job_id,
             source_format=job.conversion.source_format,
             target_format=job.conversion.target_format,
-            input_key=job.input_file
+            input_key=job.input_file,
+            status=str(job.status),
         )
        
     def to_dict(self) -> dict:
         return asdict(self)
     
-

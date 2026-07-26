@@ -10,7 +10,7 @@ from src.infrastructure.database.models import UserModel
 from src.infrastructure.database.session import get_db_session
 
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/users/token")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/web/users/token")
 
 
 async def get_current_user(

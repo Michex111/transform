@@ -5,10 +5,14 @@ from typing import Generator
 from fastapi.testclient import TestClient
 
 import src.presentation.api.main as api_main
+from src.application.dtos.subscription_dto import ConversionAuthorization
 from src.application.dtos.upload_dto import UploadResponse
 from src.domain.conversions.entities.conversion_job import ConversionJob
+from src.domain.subscriptions.value_object.tier import SubscriptionTier
 from src.presentation.api.dependencies.auth_dependencies import get_current_user
 from src.presentation.api.dependencies.service_dependencies import (
+    get_conversion_access_service,
+    get_subscription_repository,
     get_conversion_service,
     get_transfer_service,
 )
@@ -38,6 +42,23 @@ class FakeTransferService:
         )
 
 
+class FakeConversionAccessService:
+    async def authorize_conversion(self, actor, incoming_file_size_bytes: int):
+        del incoming_file_size_bytes
+        return ConversionAuthorization(
+            actor=actor,
+            period_key="2026-07",
+            credits_remaining=99,
+            queue_stream="conversion_jobs:normal",
+        )
+
+
+class FakeSubscriptionRepository:
+    async def get_actor_tier(self, actor_key: str) -> SubscriptionTier:
+        del actor_key
+        return SubscriptionTier.FREE
+
+
 @dataclass
 class FakeUser:
     id: int
@@ -50,12 +71,20 @@ def create_test_client() -> Generator[TestClient, None, None]:
 
     fake_conversion_service = FakeConversionService()
     fake_transfer_service = FakeTransferService()
+    fake_conversion_access_service = FakeConversionAccessService()
+    fake_subscription_repository = FakeSubscriptionRepository()
     original_initialize_database = api_main.initialize_database
 
     api_main.initialize_database = no_op_initialize_database
     api_main.app.dependency_overrides[get_current_user] = lambda: FakeUser(id=101)
     api_main.app.dependency_overrides[get_conversion_service] = lambda: fake_conversion_service
     api_main.app.dependency_overrides[get_transfer_service] = lambda: fake_transfer_service
+    api_main.app.dependency_overrides[get_conversion_access_service] = (
+        lambda: fake_conversion_access_service
+    )
+    api_main.app.dependency_overrides[get_subscription_repository] = (
+        lambda: fake_subscription_repository
+    )
     api_main.app.state.fake_conversion_service = fake_conversion_service
     api_main.app.state.fake_transfer_service = fake_transfer_service
 

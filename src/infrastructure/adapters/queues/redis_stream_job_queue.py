@@ -1,6 +1,7 @@
 from src.infrastructure.redis.client import create_redis_client
 from src.domain.conversions.entities.conversion_job import ConversionJob
 from src.domain.conversions.value_object.conversion_type import ConversionType
+from src.domain.conversions.value_object.job_status import JobStatus
 from .messages import ConversionJobMessage as JobMessage
 
 from redis.asyncio import Redis
@@ -102,11 +103,17 @@ class JobStreamConsumer(RedisStreamQueue):
             return None
         
         message_id, job = extract_job(jobs)
+        status_raw = str(job.get("status", JobStatus.PENDING))
+        try:
+            status = JobStatus(status_raw)
+        except ValueError:
+            status = JobStatus.PENDING
         conversation_job = ConversionJob(
             job_id=job["job_id"],
             conversion=ConversionType(source_format=job["source_format"], target_format=job["target_format"]),
             input_file=job["input_key"],
-            output_file="" # This will be set later when the job is completed
+            output_file="", # This will be set later when the job is completed
+            status=status,
         )
 
         return message_id, conversation_job

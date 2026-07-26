@@ -21,3 +21,4 @@ Agents.MD
 #user-specific folders
 scripts/docker/
 alembic.ini
+*.txt

@@ -3,63 +3,50 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 
 from src.application.dtos.subscription_dto import ConversionActor
-from src.application.services.conversion_access_service import ConversionAccessService
-from src.application.services.conversion_service import ConversionService
 from src.application.dtos.upload_dto import UploadResponse, UploadSession
 from src.application.exceptions.file_transfer_exceptions import (
     UploadSessionNotFoundError,
     UploadVerificationError,
 )
+from src.application.services.conversion_access_service import ConversionAccessService
+from src.application.services.conversion_service import ConversionService
 from src.application.services.file_transfer_service import TransferService
 from src.application.services.priority_queue_dispatcher import PriorityQueueDispatcher
 from src.domain.conversions.exceptions import InvalidStateTransition
-from src.domain.subscriptions.value_object.tier import SubscriptionTier
 from src.infrastructure.adapters.repository.sql_conversion_job_repo import SQLConversionJobRepository
-from src.infrastructure.adapters.repository.sql_subscription_repo import SQLSubscriptionRepository
-from src.presentation.api.dependencies.auth_dependencies import CurrentUser
+from src.presentation.api.dependencies.api_key_dependencies import SdkClientPrincipal, get_sdk_client
 from src.presentation.api.dependencies.service_dependencies import (
     get_conversion_access_service,
     get_conversion_repository,
     get_conversion_service,
     get_priority_queue_dispatcher,
-    get_subscription_repository,
     get_transfer_service,
 )
 from src.presentation.schemas.upload import CreateUploadSessionRequest
 
 
-router = APIRouter(prefix="/api/v1/web/uploads", tags=["web-uploads"])
-
-
-async def _resolve_user_tier(
-    repository: SQLSubscriptionRepository,
-    user_id: int,
-) -> SubscriptionTier:
-    tier = await repository.get_actor_tier(f"user:{user_id}")
-    if tier == SubscriptionTier.GUEST:
-        return SubscriptionTier.FREE
-    return tier
+router = APIRouter(prefix="/api/v1/sdk/uploads", tags=["sdk-uploads"])
 
 
 @router.post("/sessions", response_model=UploadResponse, status_code=status.HTTP_201_CREATED)
 async def create_upload_session(
     payload: CreateUploadSessionRequest,
-    current_user: CurrentUser,
+    sdk_client: Annotated[SdkClientPrincipal, Depends(get_sdk_client)],
     transfer_service: Annotated[TransferService, Depends(get_transfer_service)],
 ) -> UploadResponse:
     return await transfer_service.create_upload(
         file_extension=payload.file_extension,
-        user_id=str(current_user.id),
+        user_id=sdk_client.actor_key,
     )
 
 
 @router.get("/sessions/{upload_id}", response_model=UploadSession)
 async def get_upload_session(
     upload_id: str,
-    current_user: CurrentUser,
+    sdk_client: Annotated[SdkClientPrincipal, Depends(get_sdk_client)],
     transfer_service: Annotated[TransferService, Depends(get_transfer_service)],
 ) -> UploadSession:
-    del current_user
+    del sdk_client
     try:
         return await transfer_service.get_upload_session(upload_id)
     except UploadSessionNotFoundError as exc:
@@ -69,12 +56,11 @@ async def get_upload_session(
 @router.post("/sessions/{upload_id}/verify", response_model=UploadSession)
 async def verify_upload_session(
     upload_id: str,
-    current_user: CurrentUser,
+    sdk_client: Annotated[SdkClientPrincipal, Depends(get_sdk_client)],
     transfer_service: Annotated[TransferService, Depends(get_transfer_service)],
     conversion_service: Annotated[ConversionService, Depends(get_conversion_service)],
     dispatcher: Annotated[PriorityQueueDispatcher, Depends(get_priority_queue_dispatcher)],
     access_service: Annotated[ConversionAccessService, Depends(get_conversion_access_service)],
-    subscription_repository: Annotated[SQLSubscriptionRepository, Depends(get_subscription_repository)],
     conversion_repository: Annotated[SQLConversionJobRepository, Depends(get_conversion_repository)],
     job_id: str | None = None,
     uploaded_size_bytes: int = 0,
@@ -87,12 +73,11 @@ async def verify_upload_session(
         if job is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
         if uploaded_size_bytes > 0:
-            tier = await _resolve_user_tier(subscription_repository, current_user.id)
             await access_service.commit_storage_usage(
                 actor=ConversionActor(
-                    actor_key=f"user:{current_user.id}",
-                    user_id=str(current_user.id),
-                    tier=tier,
+                    actor_key=sdk_client.actor_key,
+                    user_id=sdk_client.actor_key,
+                    tier=sdk_client.tier,
                 ),
                 added_bytes=uploaded_size_bytes,
             )
@@ -101,8 +86,7 @@ async def verify_upload_session(
         except InvalidStateTransition as exc:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
         await conversion_repository.update_conversion_job(job)
-        tier = await _resolve_user_tier(subscription_repository, current_user.id)
-        await dispatcher.dispatch(job=job, tier=tier)
+        await dispatcher.dispatch(job=job, tier=sdk_client.tier)
         return session
     except UploadSessionNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
@@ -113,9 +97,9 @@ async def verify_upload_session(
 @router.delete("/sessions/{upload_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_upload_session(
     upload_id: str,
-    current_user: CurrentUser,
+    sdk_client: Annotated[SdkClientPrincipal, Depends(get_sdk_client)],
     transfer_service: Annotated[TransferService, Depends(get_transfer_service)],
 ) -> Response:
-    del current_user
+    del sdk_client
     await transfer_service.delete_upload_session(upload_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
