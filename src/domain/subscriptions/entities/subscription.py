@@ -13,11 +13,13 @@ from src.domain.subscriptions.value_object.tier import SubscriptionTier
 
 @dataclass
 class Subscription:
-    """Represents tier and storage state for one actor.
+    """
+    Represents tier and storage state for one actor.
 
     Attributes:
         tier: Active subscription tier.
         used_storage_bytes: Current storage consumed in bytes.
+
     """
 
     tier: SubscriptionTier
@@ -59,7 +61,8 @@ class Subscription:
             )
 
     def allocate_storage(self, additional_bytes: int) -> None:
-        """Allocates storage after quota validation.
+        """
+        Allocates storage after quota validation.
 
         Args:
             additional_bytes: Bytes to add to usage.
@@ -85,7 +88,8 @@ class Subscription:
         self.used_storage_bytes -= released_bytes
 
     def consume_conversion_credit(self, credit: Credit | None) -> None:
-        """Consumes one conversion credit before conversion is allowed.
+        """
+        Consumes one conversion credit before conversion is allowed.
 
         Args:
             credit: Persistent credit bucket for authenticated users.
