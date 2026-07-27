@@ -1,0 +1,235 @@
+Google Stitch Prompt: Build Frontend for File Converter API
+
+Create a responsive web frontend for a file conversion platform using this API.
+Use clean UX, async loading states, clear error messages, and authenticated routes.
+
+NOTE: Take reference from this site https://cloudconvert.com/apis/file-conversion
+
+Product goals:
+- Users can register/login and receive a JWT.
+- Users can see supported conversion pairs.
+- Users can create conversion jobs.
+- Users can upload files through upload sessions (pre-signed URL flow).
+- Users can verify upload completion and optionally trigger queue processing.
+- Users can track job status and download when conversion is complete.
+
+Tech/UI expectations:
+- Framework: your recommended modern stack (React or Next.js preferred).
+- API client module with typed request/response models.
+- Auth token persisted securely (memory + optional localStorage fallback).
+- Route guards for authenticated pages.
+- Reusable components: forms, job cards/table, status badges, toasts.
+- Handle HTTP 400/401/404/409/503 gracefully with user-friendly messages.
+
+
+============================================================
+API Documentation (How the APIs are intended to be used)
+============================================================
+
+Base URL:
+- http://<host>:<port>
+
+Health:
+1) GET /health
+- Purpose: service health check.
+- Auth: none.
+- Success: 200 {"status":"ok"}
+
+
+Authentication & User:
+1) POST /api/users/register
+- Purpose: create user account.
+- Auth: none.
+- Body (JSON):
+  {
+    "username": "alice",
+    "email": "alice@example.com",
+    "password": "strong-password"
+  }
+- Success: 201 with user object.
+- Common errors:
+  - 409 if username/email already exists.
+
+2) POST /api/users/token
+- Purpose: login and get JWT access token.
+- Auth: none.
+- Content-Type: application/x-www-form-urlencoded
+- Form fields:
+  - username
+  - password
+- Success: 200
+  {
+    "access_token": "<jwt>",
+    "token_type": "bearer"
+  }
+- Common errors:
+  - 401 invalid credentials.
+
+3) GET /api/users/me
+- Purpose: get current authenticated user profile.
+- Auth: Bearer token required.
+- Success: 200 user object.
+
+
+Conversions:
+1) GET /api/conversions/supported
+- Purpose: list allowed conversion pairs.
+- Auth: none.
+- Success: 200
+  [
+    {"source_format":"docx","target_format":"pdf"},
+    {"source_format":"pdf","target_format":"docx"}
+  ]
+
+2) POST /api/conversions/jobs
+- Purpose: create conversion job metadata and get upload URL from service.
+- Auth: Bearer token required.
+- Body (JSON):
+  {
+    "source_format": "docx",
+    "target_format": "pdf",
+    "input_key": "uploads/my-file.docx"
+  }
+- Success: 202 ConversionJobResponse
+  {
+    "job_id": "<job-id>",
+    "status": "AWAITING_UPLOAD",
+    "source_format": "docx",
+    "target_format": "pdf",
+    "input_file": "uploads/my-file.docx",
+    "output_file": null,
+    "download_url": "<upload-url-or-null>"
+  }
+- Common errors:
+  - 400 invalid conversion/job payload.
+  - 401 auth failure.
+  - 503 dependency/service unavailable.
+
+3) GET /api/conversions/jobs/{job_id}
+- Purpose: read job status; returns download URL when completed.
+- Auth: Bearer token required.
+- Success: 200 ConversionJobResponse
+- Common errors:
+  - 404 job not found.
+
+Job status lifecycle:
+- AWAITING_UPLOAD -> PENDING -> PROCESSING -> COMPLETED
+- Failure state: FAILED
+
+
+Uploads:
+1) POST /api/uploads/sessions
+- Purpose: create direct upload session.
+- Auth: Bearer token required.
+- Body (JSON):
+  {
+    "file_extension": "docx"
+  }
+- Success: 201
+  {
+    "upload_id": "<upload-id>",
+    "object_key": "<storage-object-key>",
+    "upload_url": "<presigned-put-url>",
+    "expires_in_minutes": 10
+  }
+
+2) GET /api/uploads/sessions/{upload_id}
+- Purpose: fetch upload session info.
+- Auth: Bearer token required.
+- Success: 200
+  {
+    "upload_id":"<upload-id>",
+    "object_key":"<storage-object-key>",
+    "status":"pending|completed"
+  }
+- Common errors:
+  - 404 upload session missing/expired.
+
+3) POST /api/uploads/sessions/{upload_id}/verify?job_id=<optional-job-id>
+- Purpose:
+  - validate uploaded file exists in object storage,
+  - optionally enqueue conversion if job_id provided.
+- Auth: Bearer token required.
+- Success: 200 UploadSession (typically status becomes completed).
+- Common errors:
+  - 404 session not found.
+  - 409 upload not complete/verification conflict.
+
+4) DELETE /api/uploads/sessions/{upload_id}
+- Purpose: remove upload session.
+- Auth: Bearer token required.
+- Success: 204 no content.
+
+
+============================================================
+Frontend Flow (Recommended)
+============================================================
+
+Flow A: First-time user
+1) Register: POST /api/users/register
+2) Login: POST /api/users/token
+3) Store access_token and attach Authorization: Bearer <token>
+
+Flow B: Start a conversion (job-first flow)
+1) Read supported options:
+   GET /api/conversions/supported
+2) User selects source/target + file.
+3) Create job:
+   POST /api/conversions/jobs
+4) Use returned upload URL/session data to upload file (PUT to presigned URL if provided by backend).
+5) Verify upload:
+   POST /api/uploads/sessions/{upload_id}/verify?job_id=<job_id>
+6) Poll job status:
+   GET /api/conversions/jobs/{job_id} every 2-5 seconds.
+7) When status == COMPLETED and download_url exists:
+   show Download button.
+
+Flow C: Upload-session-first flow (alternative)
+1) Create upload session:
+   POST /api/uploads/sessions
+2) Upload file directly to upload_url.
+3) Verify session:
+   POST /api/uploads/sessions/{upload_id}/verify
+4) Create conversion job referencing uploaded key/path.
+5) Poll job until completion.
+
+
+============================================================
+Implementation Notes for Stitch
+============================================================
+
+- Create a central API client:
+  - register()
+  - login()
+  - getMe()
+  - listSupportedConversions()
+  - createConversionJob()
+  - getConversionJob()
+  - createUploadSession()
+  - getUploadSession()
+  - verifyUploadSession()
+  - deleteUploadSession()
+
+- Add interceptors/middleware:
+  - auto-attach Bearer token.
+  - redirect to login on 401.
+
+- UI pages/components:
+  - Auth page (register/login tabs)
+  - Dashboard page
+  - New conversion form (source, target, file)
+  - Job history/list with status chips
+  - Job details with polling and download CTA
+
+- Status mapping:
+  - AWAITING_UPLOAD: waiting for file upload
+  - PENDING: queued
+  - PROCESSING: converting
+  - COMPLETED: ready to download
+  - FAILED: conversion failed
+
+- Validate before submit:
+  - source/target required and not equal
+  - file extension aligns with source format
+  - handle large-file upload UX (progress + retry)
+
