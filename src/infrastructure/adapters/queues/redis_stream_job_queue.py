@@ -18,7 +18,7 @@ class RedisStreamQueue:
 class JobStream(RedisStreamQueue):
     """Implements a Redis Stream for conversion jobs. Used by the producer to push new jobs into the stream."""
 
-    async def push_job(self, job: ConversionJob) -> None:
+    async def publish_job(self, job: ConversionJob) -> None:
         message: dict = JobMessage.from_conversion_job(job).to_dict()
         await self.redis_client.xadd(self.stream_name, message)
 
