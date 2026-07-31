@@ -60,3 +60,10 @@ class CreditRepository(Protocol):
     async def save_credit(self, credit: Credit) -> None:
         """Stores credit state after updates."""
         ...
+
+class ConversionJobRepository(ConversionJobWriteRepository):
+    """Combines read and write operations for conversion jobs."""
+
+    async def get_conversion_job(self, job_id: str) -> ConversionJob | None:
+        """Retrieve a conversion job from the database by its ID."""
+        ...

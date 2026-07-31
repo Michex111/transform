@@ -1,14 +1,14 @@
-from application.ports.database_port import ConversionJobWriteRepository
+from application.ports.database_port import ConversionJobRepository
 from src.domain.conversions.entities.conversion_job import ConversionJob
 from src.domain.conversions.policies.conversion_policy import is_supported
 from src.infrastructure.converters.converter_registry import get_registry
-from src.application.ports.contracts import JobQueuePort
+from src.application.ports.queue_port import JobQueuePort
 from src.application.exceptions.conversion_job_exception import InvalidConversionJobError
 
 from uuid import uuid4
 
 class ConversionService:
-    def __init__(self, queue_port: JobQueuePort, db_repository: ConversionJobWriteRepository):
+    def __init__(self, queue_port: JobQueuePort, db_repository: ConversionJobRepository):
         self.queue_port = queue_port
         self.db_repository = db_repository
 
@@ -21,7 +21,7 @@ class ConversionService:
     async def push_conversion_job(self, job: ConversionJob) -> str:
         conversion_type = job.conversion
         is_supported(conversion_type, get_registry().list_conversions())
-        await self.queue_port.push_job(job)
+        await self.queue_port.publish_job(job)
         
         # self.storage_port.save_job(job)
         if not job.job_id:

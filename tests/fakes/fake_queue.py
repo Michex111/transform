@@ -9,7 +9,7 @@ class FakeQueuePort:
         self.failed_messages: list[tuple[str, str]] = []
         self._sequence = 0
 
-    async def push_job(self, job: ConversionJob) -> None:
+    async def publish_job(self, job: ConversionJob) -> None:
         self._sequence += 1
         self.pending.append((f"message-{self._sequence}", job))
         self.pushed_jobs.append(job)

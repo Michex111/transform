@@ -5,8 +5,8 @@ def test_fake_queue_fetches_jobs_in_fifo_order(conversion_job_factory, fake_queu
     first = conversion_job_factory(job_id="job-a")
     second = conversion_job_factory(job_id="job-b")
 
-    asyncio.run(fake_queue_port.push_job(first))
-    asyncio.run(fake_queue_port.push_job(second))
+    asyncio.run(fake_queue_port.publish_job(first))
+    asyncio.run(fake_queue_port.publish_job(second))
 
     first_message, first_job = asyncio.run(fake_queue_port.fetch_job())
     second_message, second_job = asyncio.run(fake_queue_port.fetch_job())

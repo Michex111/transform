@@ -90,7 +90,7 @@ def test_submit_conversion_job_propagates_queue_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class FailingQueue:
-        async def push_job(self, job):
+        async def publish_job(self, job):
             del job
             raise RuntimeError("queue unavailable")
 
