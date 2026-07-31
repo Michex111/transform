@@ -1,7 +1,7 @@
 import pytest
 
 from src.domain.conversions.exceptions import InvalidConversion
-from src.domain.services.conversion_policy import is_supported
+from src.domain.conversions.policies.conversion_policy import is_supported
 from src.domain.conversions.value_object.conversion_type import ConversionType
 
 
