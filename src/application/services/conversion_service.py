@@ -1,4 +1,4 @@
-from application.ports.database_port import ConversionJobRepository
+from application.ports.database_port import ConversionJobRepositoryPort
 from src.domain.conversions.entities.conversion_job import ConversionJob
 from src.domain.conversions.policies.conversion_policy import is_supported
 from src.infrastructure.converters.converter_registry import get_registry
@@ -8,7 +8,7 @@ from src.application.exceptions.conversion_job_exception import InvalidConversio
 from uuid import uuid4
 
 class ConversionService:
-    def __init__(self, queue_port: JobQueuePort, db_repository: ConversionJobRepository):
+    def __init__(self, queue_port: JobQueuePort, db_repository: ConversionJobRepositoryPort):
         self.queue_port = queue_port
         self.db_repository = db_repository
 

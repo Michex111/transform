@@ -18,6 +18,12 @@ class TierPolicy:
     tier: SubscriptionTier
     storage_quota_bytes: int
     monthly_conversion_credits: int | None
+    monthly_api_conversion_credits: int | None
+
+    @property
+    def api_access(self) -> bool:
+        """Returns True if the tier allows API access."""
+        return self.tier in {SubscriptionTier.FREE, SubscriptionTier.PREMIUM}
 
     @property
     def has_persistent_credits(self) -> bool:
@@ -38,17 +44,20 @@ class TierPolicy:
             SubscriptionTier.GUEST: TierPolicy(
                 tier=SubscriptionTier.GUEST,
                 storage_quota_bytes=50 * MB,
-                monthly_conversion_credits=None
+                monthly_conversion_credits=None,
+                monthly_api_conversion_credits=None
             ),
             SubscriptionTier.FREE: TierPolicy(
                 tier=SubscriptionTier.FREE,
                 storage_quota_bytes=5 * GB,
-                monthly_conversion_credits=50
+                monthly_conversion_credits=50,
+                monthly_api_conversion_credits=10
             ),
             SubscriptionTier.PREMIUM: TierPolicy(
                 tier=SubscriptionTier.PREMIUM,
                 storage_quota_bytes=100 * GB,
-                monthly_conversion_credits=500
+                monthly_conversion_credits=500,
+                monthly_api_conversion_credits=100 # later derive valuses from config
             ),
         }
         
