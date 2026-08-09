@@ -1,25 +1,38 @@
 from collections.abc import Callable
 from datetime import UTC, datetime
+from abc import ABC, abstractmethod
 
 from src.application.dtos.subscription_dto import ConversionActor, ConversionAuthorization
 from src.application.exceptions.subscription_exceptions import (
     GuestRateLimitExceeded, 
     MissingActorIdentity
 )
-from src.application.ports.database_port import CreditRepository, SubscriptionRepository
+from src.application.ports.database_port import CreditRepositoryPort, SubscriptionRepositoryPort
 from src.application.ports.contracts import RateLimiterPort
 from src.application.services.queue_priority_router import QueuePriorityRouter
 from src.domain.subscriptions.entities.credit import Credit
 from src.domain.subscriptions.entities.subscription import Subscription
 from src.domain.subscriptions.value_object.tier import SubscriptionTier
 
-class ConversionAccessService:
+# -- Interface for the conversion access service --  #
+class AccessServicePort(ABC):
+    @abstractmethod
+    async def authorize_conversion(self, actor: ConversionActor, incoming_file_size_bytes: int) -> ConversionAuthorization:
+        """Validates a conversion request and consumes one credit when required."""
+        ...
+
+    @abstractmethod
+    async def commit_storage_used(self, actor: ConversionActor, added_bytes: int) -> int:
+        """Applies consumed storage after successful upload verification."""
+        ...
+
+class ConversionAccessService(AccessServicePort):
     """Authorizes conversion requests against quota, credits, and guest rate limits."""
 
     def __init__(
         self,
-        subscription_repository: SubscriptionRepository,
-        credit_repository: CreditRepository,
+        subscription_repository: SubscriptionRepositoryPort,
+        credit_repository: CreditRepositoryPort,
         rate_limiter: RateLimiterPort,
         queue_router: QueuePriorityRouter,
         now_provider: Callable[[], datetime] | None = None,
@@ -118,3 +131,24 @@ class ConversionAccessService:
     def _period_key(self) -> str:
         """Builds the monthly period key used by credit ledgers."""
         return self._now_provider().strftime("%Y-%m")
+
+class APIConversionAccessService(ConversionAccessService):
+    """Specialized ConversionAccessService for API requests with API key identity."""
+
+    async def authorize_conversion(self, actor: ConversionActor, incoming_file_size_bytes: int) -> ConversionAuthorization:
+        """Validates a conversion request and consumes one credit when required.
+
+        Args:
+            actor: Requesting actor identity and tier.
+            incoming_file_size_bytes: New file size that will be stored.
+
+        Returns:
+            ConversionAuthorization with resulting queue stream and credit state.
+
+        Raises:
+            GuestRateLimitExceeded: If guest actor is over limit.
+            MissingActorIdentity: If a required user/ip identity is absent.
+        """
+        if not actor.user_id:
+            raise MissingActorIdentity("API conversion requires actor.user_id.")
+        return await super().authorize_conversion(actor, incoming_file_size_bytes)
