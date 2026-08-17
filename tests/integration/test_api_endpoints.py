@@ -32,7 +32,8 @@ def test_create_conversion_job_endpoint_returns_accepted() -> None:
     assert payload["download_url"] == "https://storage.test/upload-url"
     assert conversion_service.created_jobs[0].conversion.source_format == "docx"
     assert conversion_service.created_jobs[0].conversion.target_format == "pdf"
-    assert transfer_service.calls == [("uploads/example.docx", "101")]
+    # create_upload receives the normalized source format as the file extension
+    assert transfer_service.calls == [("docx", "101")]
 
 
 def test_list_conversion_endpoint_returns_supported_conversions() -> None:

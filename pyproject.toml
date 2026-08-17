@@ -1,22 +1,27 @@
 [project]
-name = "file-converter"
-version = "0.1.0"
-description = "Add your description here"
+name = "transform-file-converter"
+version = "1.0.0"
+description = "Production-ready file conversion SaaS platform with real-time progress, subscription billing, and secure storage"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
     "alembic>=1.18.5",
     "asyncpg>=0.31.0",
+    "boto3>=1.36.0",
+    "cairosvg>=2.7.1",
+    "cryptography>=44.0.0",
     "fastapi[standard]>=0.136.3",
     "minio>=7.2.20",
+    "pillow>=11.0.0",
+    "prometheus-client>=0.21.0",
     "pwdlib>=0.3.0",
     "pydantic-settings>=2.14.1",
     "pyjwt>=2.13.0",
     "redis[hiredis]>=8.0.0",
     "sqlalchemy>=2.0.51",
+    "stripe>=11.0.0",
+    "structlog>=24.0.0",
 ]
-
-# pyproject.toml
 
 [tool.pytest.ini_options]
 pythonpath = [
@@ -25,7 +30,10 @@ pythonpath = [
 
 [dependency-groups]
 dev = [
+    "aiosqlite>=0.21.0",
     "pytest>=9.1.1",
+    "pytest-asyncio>=0.25.0",
+    "pytest-cov>=6.0.0",
     "requests>=2.34.2",
 ]
 

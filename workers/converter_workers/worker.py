@@ -27,7 +27,16 @@ class ConverterWorker:
                 try:
                     await self.process_job(self.context, job)
                 except Exception as e:
+                    # ACK the pending message, then copy the failed job to the
+                    # dead-letter stream so it can be replayed/inspected.
                     await self.context.queue_port.fail_job(message_id, str(e))
+                    try:
+                        await self.context.queue_port.dead_letter_job(message_id, str(e), job)
+                    except Exception as dlq_error:
+                        worker_logger.error(
+                            f"Failed to dead-letter job {job.job_id}: {dlq_error}",
+                            extra=job_log_context,
+                        )
                     worker_logger.error(f"Error processing job {job.job_id}: {str(e)}", extra=job_log_context)
                     continue
                 else:

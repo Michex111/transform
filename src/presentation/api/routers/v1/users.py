@@ -7,13 +7,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.infrastructure.auth.jwt_provider import (
     create_access_token,
+    create_refresh_token,
     hash_password,
     verify_password,
+    verify_refresh_token,
 )
+from src.infrastructure.config.settings import get_settings
 from src.infrastructure.database.models import UserModel
 from src.infrastructure.database.session import get_db_session
 from src.presentation.api.dependencies.auth_dependencies import CurrentUser
-from src.presentation.schemas.auth import TokenResponse, UserCreateRequest, UserResponse
+from src.presentation.schemas.auth import (
+    RefreshTokenRequest,
+    TokenResponse,
+    UserCreateRequest,
+    UserResponse,
+)
 
 
 router = APIRouter(prefix="/api/users", tags=["users"])
@@ -61,8 +69,53 @@ async def login_for_access_token(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+    settings = get_settings()
     token = create_access_token(data={"sub": str(user.id)})
-    return TokenResponse(access_token=token)
+    return TokenResponse(
+        access_token=token,
+        refresh_token=create_refresh_token(data={"sub": str(user.id)}),
+        expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+    )
+
+
+@router.post("/refresh", response_model=TokenResponse)
+async def refresh_access_token(
+    payload: RefreshTokenRequest,
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> TokenResponse:
+    """Exchange a valid refresh token for a fresh access token."""
+    user_id = verify_refresh_token(payload.refresh_token)
+    if user_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired refresh token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    try:
+        user_id_int = int(user_id)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired refresh token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    result = await db.execute(select(UserModel).where(UserModel.id == user_id_int))
+    user = result.scalars().first()
+    if user is None or not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or inactive user",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    settings = get_settings()
+    return TokenResponse(
+        access_token=create_access_token(data={"sub": str(user.id)}),
+        refresh_token=create_refresh_token(data={"sub": str(user.id)}),
+        expires_in=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+    )
 
 
 @router.get("/me", response_model=UserResponse)

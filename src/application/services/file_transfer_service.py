@@ -17,13 +17,25 @@ class TransferService:
         self._ttl = timedelta(minutes=ttl_minutes)
         self._logger = logger
 
-    async def create_upload(self, file_extension: str, user_id: str) -> UploadResponse:
+    async def create_upload(
+        self,
+        file_extension: str,
+        user_id: str,
+        file_name: str | None = None,
+        folder_id: str | None = None,
+    ) -> UploadResponse:
         upload_id = str(uuid4())
         object_key = self._generate_object_key("upload/" + upload_id, file_extension)
 
         upload_url = self._storage.generate_put_url(object_key)
 
-        session = UploadSession(upload_id=upload_id, object_key=object_key, status="pending")
+        session = UploadSession(
+            upload_id=upload_id,
+            object_key=object_key,
+            status="pending",
+            file_name=file_name,
+            folder_id=folder_id,
+        )
         await self._cache.set(upload_id, session.model_dump_json(), ttl=self._ttl)
 
         self._logger.info(f"Created upload session {upload_id} for user {user_id}")

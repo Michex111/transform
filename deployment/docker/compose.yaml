@@ -1,14 +1,140 @@
 version: "3.9"
 
-worker:
-  build:
-    context: ../../
-    dockerfile: deployment/docker/worker.Dockerfile
-  container_name: converter-worker
-  env_file:
-    - ../../.env
-  networks:
-    - converter-net
+services:
+  api:
+    build:
+      context: ../../
+      dockerfile: deployment/docker/worker.Dockerfile
+    container_name: transform-api
+    command: uv run uvicorn src.presentation.api.main:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    env_file:
+      - ../../.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      - converter-net
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ../../
+      dockerfile: deployment/docker/worker.Dockerfile
+    container_name: transform-worker
+    command: uv run python -m workers.converter_workers.main
+    env_file:
+      - ../../.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      - converter-net
+    restart: unless-stopped
+    deploy:
+      replicas: 3
+
+  worker-cleanup:
+    build:
+      context: ../../
+      dockerfile: deployment/docker/worker.Dockerfile
+    container_name: transform-cleanup
+    command: uv run python -m workers.cleanup_worker.main
+    env_file:
+      - ../../.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - converter-net
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: transform-postgres
+    environment:
+      POSTGRES_USER: transform
+      POSTGRES_PASSWORD: transform_secret
+      POSTGRES_DB: transform
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - converter-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U transform"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: transform-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - converter-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    container_name: transform-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - converter-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:alpine
+    container_name: transform-nginx
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - api
+    networks:
+      - converter-net
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
 
 networks:
   converter-net:
+    driver: bridge

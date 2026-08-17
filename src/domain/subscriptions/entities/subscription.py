@@ -86,12 +86,13 @@ class Subscription:
             )
         self.used_storage_bytes -= bytes_to_release
 
-    def consume_conversion_credits(self, credit: Credit | None) -> None:
+    def consume_conversion_credits(self, credit: Credit | None, units: int = 1) -> None:
         """
-        Consumes one conversion credit before conversion is allowed.
+        Consumes conversion credits before conversion is allowed.
 
         Args:
             credit: Persistent credit bucket for authenticated users.
+            units: Number of credits to consume (default 1 for provisional).
 
         Raises:
             GuestTierRequiresRateLimiting: For guest tier.
@@ -105,6 +106,6 @@ class Subscription:
             raise MissingCreditAccount(
                 f"Tier {self.tier} requires a persistent credit account."
             )
-        credit.consume_for_conversion(1)
+        credit.consume_for_conversion(units)
 
     

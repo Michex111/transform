@@ -1,6 +1,7 @@
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import StreamingResponse
 
 from src.application.services.file_transfer_service import TransferService
 from src.domain.conversions.entities.conversion_job import ConversionJob
@@ -8,11 +9,20 @@ from src.domain.conversions.exceptions import InvalidConversion
 from src.domain.conversions.value_object.conversion_type import ConversionType
 from src.application.exceptions.conversion_job_exception import InvalidConversionJobError
 from src.application.services.conversion_service import ConversionService
+from src.infrastructure.adapters.repository.sql_conversion_job_repo import SQLConversionJobRepository
+from src.infrastructure.adapters.security.encryption import FileEncryptionService
+from src.infrastructure.adapters.storage.minio_storage_adapter import (
+    MinioFileStorageAdapter,
+    MinioUrlStorageAdapter,
+)
 from src.infrastructure.converters.converter_registry import get_registry
 from src.presentation.api.dependencies.auth_dependencies import CurrentUser
+from src.presentation.api.dependencies.download_stream import iter_decrypted_object
 from src.presentation.api.dependencies.service_dependencies import (
     get_conversion_repository,
     get_conversion_service,
+    get_encryption_service,
+    get_minio_download_adapter,
     get_minio_url_storage,
     get_transfer_service,
 )
@@ -60,7 +70,6 @@ async def create_conversion_job(
     conversion_service: Annotated[ConversionService, Depends(get_conversion_service)],
     file_transfer_service: Annotated[TransferService, Depends(get_transfer_service)],
 ) -> ConversionJobResponse:
-    
     job = ConversionJob(
         job_id="",
         conversion=ConversionType(
@@ -68,11 +77,14 @@ async def create_conversion_job(
             target_format=payload.target_format.lower().strip(),
         ),
         input_file=payload.input_key,
+        user_id=current_user.id,
     )
 
     try:
         await conversion_service.create_conversion_job(job)
-        upload_response = await file_transfer_service.create_upload(job.input_file, str(current_user.id))
+        upload_response = await file_transfer_service.create_upload(
+            job.conversion.source_format, str(current_user.id)
+        )
     except InvalidConversion as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     except InvalidConversionJobError as exc:
@@ -87,16 +99,58 @@ async def create_conversion_job(
 async def get_conversion_job(
     job_id: str,
     current_user: CurrentUser,
-    repository=Depends(get_conversion_repository),
-    storage=Depends(get_minio_url_storage),
+    repository: Annotated[SQLConversionJobRepository, Depends(get_conversion_repository)],
+    storage: Annotated[MinioUrlStorageAdapter, Depends(get_minio_url_storage)],
+    encryption_service: Annotated[FileEncryptionService | None, Depends(get_encryption_service)],
 ) -> ConversionJobResponse:
-    del current_user
     job = await repository.get_conversion_job(job_id)
     if job is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
 
+    # Authenticated users may only inspect their own jobs.
+    if job.user_id is not None and job.user_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+
     download_url = None
     if str(job.status).lower() == "completed" and job.output_file:
-        download_url = storage.generate_get_url(job.output_file, expires_in_minutes=15)
+        if encryption_service is not None:
+            # The stored object is ciphertext; serve it decrypted via the API.
+            download_url = f"/api/conversions/jobs/{job_id}/download"
+        else:
+            download_url = storage.generate_get_url(job.output_file, expires_in_minutes=15)
 
     return _to_response(job, download_url=download_url)
+
+
+@router.get("/jobs/{job_id}/download")
+async def download_conversion_output(
+    job_id: str,
+    current_user: CurrentUser,
+    repository: Annotated[SQLConversionJobRepository, Depends(get_conversion_repository)],
+    storage: Annotated[MinioFileStorageAdapter, Depends(get_minio_download_adapter)],
+    encryption_service: Annotated[FileEncryptionService, Depends(get_encryption_service)],
+) -> StreamingResponse:
+    """Stream the decrypted output of a completed job (encryption-enabled)."""
+    if encryption_service is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Streaming is only available when encryption is enabled",
+        )
+
+    job = await repository.get_conversion_job(job_id)
+    if job is None or str(job.status).lower() != "completed" or not job.output_file:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job output not found")
+
+    # Ownership check: authenticated users may only read their own outputs.
+    if job.user_id is not None and job.user_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+
+    actor_key = str(job.user_id) if job.user_id is not None else "guest"
+    return StreamingResponse(
+        iter_decrypted_object(storage, job.output_file, encryption_service, actor_key),
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": f'attachment; filename="{job.output_file.split("/")[-1]}"',
+            "X-Content-Type-Options": "nosniff",
+        },
+    )

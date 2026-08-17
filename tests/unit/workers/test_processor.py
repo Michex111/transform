@@ -191,3 +191,110 @@ def test_process_job_emits_start_log_message(
         level == "info" and "Starting processing job" in message
         for level, message, _ in fake_logger.records
     )
+
+
+def test_process_job_with_encryption_stores_only_ciphertext(
+    conversion_job,
+    fake_queue_port,
+    fake_event_publisher,
+    fake_converter_registry,
+) -> None:
+    """With at-rest encryption, input is decrypted for conversion and the
+    uploaded output is ciphertext that the owner can decrypt."""
+    from src.infrastructure.adapters.security.encryption import FileEncryptionService
+    from tests.fakes.fake_storage import FakeStoragePort
+
+    service = FileEncryptionService()
+    ciphertext = service.encrypt_bytes(b"hello world", "42")
+    storage = FakeStoragePort(seed_files={"s3-file_store/input.txt": ciphertext})
+    conversion_job.user_id = 42
+    conversion_job.pending_processing()
+
+    @fake_converter_registry.register(conversion_job.conversion)
+    def converter(input_path: str, output_path: str) -> None:
+        text = Path(input_path).read_text(encoding="utf-8")
+        Path(output_path).write_text(text.upper(), encoding="utf-8")
+
+    context = WorkerContext(
+        storage_port=storage,
+        queue_port=fake_queue_port,
+        event_port=fake_event_publisher,
+        converter_registry=fake_converter_registry,
+        worker_name="processor-test",
+        encryption_service=service,
+    )
+
+    asyncio.run(process_job(context, conversion_job))
+
+    assert conversion_job.status == JobStatus.COMPLETED
+    stored = storage.objects["s3-file_store/input.md"]
+    # At rest it must be ciphertext, not the converted plaintext
+    assert stored != b"HELLO WORLD"
+    assert stored.startswith(b"TRENC")
+    # The owner can decrypt it back to the converted content
+    assert service.decrypt_bytes(stored, "42") == b"HELLO WORLD"
+
+
+def test_process_job_encryption_guest_job_uses_guest_key(
+    conversion_job,
+    fake_queue_port,
+    fake_event_publisher,
+    fake_converter_registry,
+) -> None:
+    """Jobs without a user id still get encrypted (derived from the 'guest' key)."""
+    from src.infrastructure.adapters.security.encryption import FileEncryptionService
+    from tests.fakes.fake_storage import FakeStoragePort
+
+    service = FileEncryptionService()
+    ciphertext = service.encrypt_bytes(b"guest data", "guest")
+    storage = FakeStoragePort(seed_files={"s3-file_store/input.txt": ciphertext})
+    conversion_job.user_id = None
+    conversion_job.pending_processing()
+
+    @fake_converter_registry.register(conversion_job.conversion)
+    def converter(input_path: str, output_path: str) -> None:
+        text = Path(input_path).read_text(encoding="utf-8")
+        Path(output_path).write_text(text.upper(), encoding="utf-8")
+
+    context = WorkerContext(
+        storage_port=storage,
+        queue_port=fake_queue_port,
+        event_port=fake_event_publisher,
+        converter_registry=fake_converter_registry,
+        worker_name="processor-test",
+        encryption_service=service,
+    )
+
+    asyncio.run(process_job(context, conversion_job))
+
+    stored = storage.objects["s3-file_store/input.md"]
+    assert stored.startswith(b"TRENC")
+    assert service.decrypt_bytes(stored, "guest") == b"GUEST DATA"
+
+
+def test_process_job_without_encryption_stores_plaintext(
+    conversion_job,
+    fake_storage_port,
+    fake_queue_port,
+    fake_event_publisher,
+    fake_converter_registry,
+) -> None:
+    """Without a configured encryption service the pipeline stays plaintext."""
+    @fake_converter_registry.register(conversion_job.conversion)
+    def converter(input_path: str, output_path: str) -> None:
+        text = Path(input_path).read_text(encoding="utf-8")
+        Path(output_path).write_text(text.upper(), encoding="utf-8")
+
+    context = WorkerContext(
+        storage_port=fake_storage_port,
+        queue_port=fake_queue_port,
+        event_port=fake_event_publisher,
+        converter_registry=fake_converter_registry,
+        worker_name="processor-test",
+        encryption_service=None,
+    )
+
+    conversion_job.pending_processing()
+    asyncio.run(process_job(context, conversion_job))
+
+    assert fake_storage_port.objects["s3-file_store/input.md"] == b"HELLO WORLD"

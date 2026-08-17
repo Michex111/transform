@@ -20,5 +20,5 @@ def test_event_context_chained_transitions_end_in_completed(event_context) -> No
 def test_event_context_to_dict_contains_expected_shape(event_context) -> None:
     payload = event_context.processing().to_dict()
 
-    assert set(payload.keys()) == {"job_id", "progress", "status", "message"}
+    assert set(payload.keys()) == {"job_id", "progress", "status", "message", "compute_duration_ms", "credits_used"}
     assert payload["job_id"] == "job-1"

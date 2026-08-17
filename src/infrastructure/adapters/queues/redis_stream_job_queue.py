@@ -1,6 +1,6 @@
-from src.infrastructure.redis.client import create_redis_client
 from src.domain.conversions.entities.conversion_job import ConversionJob
 from src.domain.conversions.value_object.conversion_type import ConversionType
+from src.domain.conversions.value_object.job_status import JobStatus
 from .messages import ConversionJobMessage as JobMessage
 
 from redis.asyncio import Redis
@@ -18,17 +18,26 @@ class RedisStreamQueue:
 class JobStream(RedisStreamQueue):
     """Implements a Redis Stream for conversion jobs. Used by the producer to push new jobs into the stream."""
 
-    async def publish_job(self, job: ConversionJob) -> None:
+    async def publish_job(self, job: ConversionJob, stream: str | None = None) -> None:
         message: dict = JobMessage.from_conversion_job(job).to_dict()
-        await self.redis_client.xadd(self.stream_name, message)
+        await self.redis_client.xadd(stream or self.stream_name, message)
 
 class JobStreamConsumer(RedisStreamQueue):
     """Implements a Redis Stream consumer for conversion jobs. Used by the worker to fetch jobs from the stream."""
-    
+
+    # Tier streams consumed by workers, in priority order (high first).
+    STREAMS = (
+        "conversion_jobs:high",
+        "conversion_jobs:normal",
+        "conversion_jobs:low",
+        "conversion_jobs",
+    )
+
     def __init__(self, consumer_group: str, consumer_name: str, redis_client: Redis):
         super().__init__(redis_client)
         self.consumer_group = consumer_group
         self.consumer_name = consumer_name
+        self._message_streams: dict[str, str] = {}
 
     @classmethod
     async def create(cls, consumer_group: str, consumer_name: str, redis_client: Redis, max_retries: int = 12, base_delay: float = 5.0) -> 'JobStreamConsumer':
@@ -56,7 +65,7 @@ class JobStreamConsumer(RedisStreamQueue):
         
         Args:
             max_retries: Maximum number of connection attempts
-            base_delay: Initial delay between retries in seconds
+            base_delay: Initial delay between attempts in seconds
         """
         last_error = None
         for attempt in range(max_retries):
@@ -82,53 +91,67 @@ class JobStreamConsumer(RedisStreamQueue):
                     raise
 
     async def _ensure_consumer_group(self):
-        try:
-            await self.redis_client.xgroup_create(self.stream_name, self.consumer_group, id='0', mkstream=True)
-        except ResponseError as e:
-            if "BUSYGROUP" in str(e):
-                pass  # Consumer group already exists
-            else:
-                raise
+        for stream in self.STREAMS:
+            try:
+                await self.redis_client.xgroup_create(stream, self.consumer_group, id='0', mkstream=True)
+            except ResponseError as e:
+                if "BUSYGROUP" in str(e):
+                    pass  # Consumer group already exists
+                else:
+                    raise
 
     async def fetch_job(self) -> tuple[str, ConversionJob] | None:
-        jobs = await self.redis_client.xreadgroup(
-            self.consumer_group, 
-            self.consumer_name, 
-            {self.stream_name: '>'}, 
-            count=1, block=10000
+        response = await self.redis_client.xreadgroup(  # type: ignore[arg-type]
+            self.consumer_group,
+            self.consumer_name,
+            {stream: '>' for stream in self.STREAMS},
+            count=1,
+            block=10000,
         )
 
-        if not jobs:
+        if not response:
             return None
-        
-        message_id, job = extract_job(jobs)
+
+        stream_name, messages = response[0]  # type: ignore[index]
+        message_id, fields = messages[0]  # type: ignore[index]
+        raw = dict(fields)  # type: ignore[arg-type]
+        job = {str(k): str(v) for k, v in raw.items()}
+
+        self._message_streams[str(message_id)] = str(stream_name)
+
         conversation_job = ConversionJob(
-            job_id=job["job_id"],
-            conversion=ConversionType(source_format=job["source_format"], target_format=job["target_format"]),
-            input_file=job["input_key"],
-            output_file="" # This will be set later when the job is completed
+            job_id=str(job["job_id"]),
+            conversion=ConversionType(
+                source_format=str(job["source_format"]),
+                target_format=str(job["target_format"]),
+            ),
+            input_file=str(job["input_key"]),
+            output_file="",  # This will be set later when the job is completed
+            status=JobStatus.PENDING,
+            user_id=int(job["user_id"]) if job.get("user_id") else None,
         )
 
-        return message_id, conversation_job
-    
+        return str(message_id), conversation_job
+    def _stream_for_message(self, message_id: str) -> str:
+        return self._message_streams.pop(message_id, "conversion_jobs")
+
     async def acknowledge_job(self, message_id: str):
         await self.redis_client.xack(
-            self.stream_name,
-            self.consumer_group,
-            message_id
-        )
-
-    async def fail_job(self, message_id: str, error_message: str):
-        
-        await self.redis_client.xack(
-            self.stream_name,
+            self._stream_for_message(message_id),
             self.consumer_group,
             message_id,
         )
-   
-def extract_job(job) -> tuple:       
-    _, messages = job[0]
 
-    message_id, data = messages[0]
+    async def fail_job(self, message_id: str, error_message: str):
+        await self.redis_client.xack(
+            self._stream_for_message(message_id),
+            self.consumer_group,
+            message_id,
+        )
 
-    return message_id, data
+    async def dead_letter_job(self, message_id: str, error_message: str, job: ConversionJob):
+        """Copy a failed job to the dead-letter stream for later inspection/replay."""
+        message: dict = JobMessage.from_conversion_job(job).to_dict()
+        message["error"] = error_message
+        message["original_message_id"] = message_id
+        await self.redis_client.xadd("conversion_jobs:dead", message)

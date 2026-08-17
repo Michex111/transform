@@ -38,7 +38,12 @@ def resolve_database_url() -> str:
 
 @lru_cache
 def get_engine():
-    return create_async_engine(resolve_database_url(), echo=True)
+    # echo=False: never log query parameters (PII) in production; enable
+    # explicitly with SQL_ECHO=1 when debugging locally.
+    return create_async_engine(
+        resolve_database_url(),
+        echo=os.getenv("SQL_ECHO", "0") == "1",
+    )
 
 
 @lru_cache

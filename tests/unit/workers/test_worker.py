@@ -72,6 +72,44 @@ def test_worker_marks_queue_message_failed_when_process_raises(
     assert fake_queue_port.failed_messages == [("message-9", "failed in process")]
 
 
+def test_worker_dead_letters_failed_job(
+    conversion_job,
+    fake_queue_port,
+    fake_storage_port,
+    fake_event_publisher,
+    fake_converter_registry,
+) -> None:
+    """Failed jobs must be copied to the dead-letter stream for replay."""
+    fake_queue_port.preload(conversion_job, message_id="message-11")
+
+    async def process_and_fail(context: WorkerContext, job) -> None:
+        del context
+        del job
+        worker.stop()
+        raise RuntimeError("boom")
+
+    worker = ConverterWorker(
+        context=WorkerContext(
+            storage_port=fake_storage_port,
+            queue_port=fake_queue_port,
+            event_port=fake_event_publisher,
+            converter_registry=fake_converter_registry,
+            worker_name="worker-test",
+        ),
+        process_job=process_and_fail,
+    )
+
+    asyncio.run(worker.run())
+
+    assert len(fake_queue_port.dead_lettered) == 1
+    message_id, error, job = fake_queue_port.dead_lettered[0]
+    assert message_id == "message-11"
+    assert error == "boom"
+    assert job.job_id == conversion_job.job_id
+    # The pending message is still acked (fail_job) so it does not redeliver.
+    assert fake_queue_port.failed_messages == [("message-11", "boom")]
+
+
 def test_worker_logs_startup_and_shutdown(
     conversion_job,
     fake_queue_port,

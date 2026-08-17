@@ -3,8 +3,9 @@ from dataclasses import dataclass, field
 from uuid import uuid4
 from typing import Optional
 
-from workers.converter_workers.ports import JobEventPort, QueuePort, StoragePort
+from workers.converter_workers.ports import JobEventPort, JobRepositoryPort, QueuePort, StoragePort
 from src.domain.conversions.value_object.conversion_type import ConversionType
+from src.infrastructure.adapters.security.encryption import FileEncryptionService
 from src.infrastructure.converters.converter_registry import ConverterRegistry
 
 @dataclass(frozen=True)
@@ -14,6 +15,8 @@ class WorkerContext:
     event_port: JobEventPort
     converter_registry: ConverterRegistry
     worker_name: str = "file_converter_worker"
+    job_repository: JobRepositoryPort | None = None
+    encryption_service: FileEncryptionService | None = None
     worker_id: str = field(init=False)
     process_id: int = field(default_factory=os.getpid)
 
