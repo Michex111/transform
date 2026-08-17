@@ -1,0 +1,283 @@
+"""
+File encryption service.
+
+Two layers, both rooted in a server-side master key:
+
+1. **In-memory** (``encrypt_file`` / ``decrypt_file``): Fernet (AES-256-CBC +
+   HMAC) with a per-user key derived via HKDF. Kept for small payloads and
+   backward compatibility.
+
+2. **Streaming** (``encrypt_file_to`` / ``decrypt_file_to``): a chunked
+   AES-256-GCM file format that never loads the whole file into memory.
+   Used by the worker to encrypt files at rest in object storage.
+
+   File layout::
+
+       magic "TRENC" (5) | version (1) | chunk_size u32 BE (4)
+       | salt (16) | nonce_prefix (8) | chunk ciphertexts...
+
+   Each chunk is encrypted with AES-GCM under a per-file key
+   ``HKDF(master, salt=file_salt, info=user_id)`` and a 12-byte nonce made of
+   the 8-byte per-file random prefix plus a 4-byte chunk counter.
+
+.. note::
+   This protects data **at rest** (bucket misconfiguration, leaked S3
+   credentials, backups). The server retains the master key, so it is NOT
+   zero-knowledge — the worker must be able to decrypt to convert.
+"""
+
+import io
+import os
+from base64 import urlsafe_b64encode
+from collections.abc import Callable, Iterator
+from pathlib import Path
+from typing import BinaryIO
+
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+_STREAM_MAGIC = b"TRENC"
+_STREAM_VERSION = b"\x01"
+_SALT_LEN = 16
+_NONCE_PREFIX_LEN = 8
+_STREAM_HEADER_LEN = len(_STREAM_MAGIC) + 1 + 4 + _SALT_LEN + _NONCE_PREFIX_LEN
+DEFAULT_CHUNK_SIZE = 1024 * 1024  # 1 MiB chunks
+
+
+class FileEncryptionService:
+    """Encrypts and decrypts files using AES-256 with per-user key derivation."""
+
+    def __init__(self, master_key: bytes | None = None):
+        """
+        Initialize the encryption service.
+
+        Args:
+            master_key: Fernet-compatible master key bytes, or None to generate.
+        """
+        if master_key is None:
+            master_key = Fernet.generate_key()
+        self._master_fernet = Fernet(master_key)
+        self._master_key = master_key
+
+    # ------------------------------------------------------------------
+    # Key derivation
+    # ------------------------------------------------------------------
+
+    def derive_user_key(self, user_id: str) -> bytes:
+        """
+        Derive a user-specific Fernet key from the master key using HKDF.
+
+        Args:
+            user_id: Unique user identifier used as info.
+
+        Returns:
+            base64-encoded 32-byte key suitable for Fernet.
+        """
+        hkdf = HKDF(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=None,
+            info=user_id.encode("utf-8"),
+        )
+        return urlsafe_b64encode(hkdf.derive(self._master_key))
+
+    def _derive_stream_key(self, salt: bytes, user_id: str) -> bytes:
+        """Derive a per-file raw 32-byte AES key from the master key."""
+        hkdf = HKDF(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=salt,
+            info=user_id.encode("utf-8"),
+        )
+        return hkdf.derive(self._master_key)
+
+    # ------------------------------------------------------------------
+    # In-memory (Fernet) API
+    # ------------------------------------------------------------------
+
+    def encrypt_file(self, data: bytes, user_id: str) -> bytes:
+        """
+        Encrypt file data for a specific user (in memory).
+
+        Args:
+            data: Raw file bytes to encrypt.
+            user_id: User identifier for key derivation.
+
+        Returns:
+            Encrypted ciphertext bytes.
+        """
+        user_key = self.derive_user_key(user_id)
+        f = Fernet(user_key)
+        return f.encrypt(data)
+
+    def decrypt_file(self, ciphertext: bytes, user_id: str) -> bytes:
+        """
+        Decrypt file data for a specific user (in memory).
+
+        Args:
+            ciphertext: Encrypted bytes to decrypt.
+            user_id: User identifier for key derivation.
+
+        Returns:
+            Decrypted plaintext bytes.
+        """
+        user_key = self.derive_user_key(user_id)
+        f = Fernet(user_key)
+        return f.decrypt(ciphertext)
+
+    # ------------------------------------------------------------------
+    # Streaming (AES-256-GCM) API — safe for large files
+    # ------------------------------------------------------------------
+
+    def encrypt_stream(
+        self,
+        src: BinaryIO,
+        dst: BinaryIO,
+        user_id: str,
+        chunk_size: int = DEFAULT_CHUNK_SIZE,
+    ) -> None:
+        """Encrypt ``src`` into ``dst`` in chunks without buffering the file."""
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be a positive integer")
+
+        salt = os.urandom(_SALT_LEN)
+        nonce_prefix = os.urandom(_NONCE_PREFIX_LEN)
+        file_key = self._derive_stream_key(salt, user_id)
+        cipher = AESGCM(file_key)
+
+        dst.write(_STREAM_MAGIC)
+        dst.write(_STREAM_VERSION)
+        dst.write(chunk_size.to_bytes(4, "big"))
+        dst.write(salt)
+        dst.write(nonce_prefix)
+
+        counter = 0
+        while True:
+            chunk = src.read(chunk_size)
+            if not chunk:
+                break
+            if counter >= 2**32:
+                raise OverflowError("File too large: chunk counter exhausted")
+            nonce = nonce_prefix + counter.to_bytes(4, "big")
+            dst.write(cipher.encrypt(nonce, chunk, None))
+            counter += 1
+
+    def decrypt_stream(self, src: BinaryIO, dst: BinaryIO, user_id: str) -> None:
+        """Decrypt a stream produced by :meth:`encrypt_stream` into ``dst``."""
+        for chunk in self.iter_decrypt(src.read, user_id):
+            dst.write(chunk)
+
+    def encrypt_file_to(
+        self,
+        input_path: str | Path,
+        output_path: str | Path,
+        user_id: str,
+        chunk_size: int = DEFAULT_CHUNK_SIZE,
+    ) -> None:
+        """Encrypt a file on disk into a ciphertext file on disk."""
+        with open(input_path, "rb") as src, open(output_path, "wb") as dst:
+            self.encrypt_stream(src, dst, user_id, chunk_size=chunk_size)
+
+    def decrypt_file_to(
+        self,
+        input_path: str | Path,
+        output_path: str | Path,
+        user_id: str,
+    ) -> None:
+        """Decrypt a ciphertext file on disk into a plaintext file on disk."""
+        with open(input_path, "rb") as src, open(output_path, "wb") as dst:
+            self.decrypt_stream(src, dst, user_id)
+
+    def iter_decrypt(
+        self,
+        read_chunk: Callable[[int], bytes],
+        user_id: str,
+    ) -> Iterator[bytes]:
+        """
+        Yield decrypted chunks from an arbitrary chunk-reading callback.
+
+        This enables memory-bounded streaming decryption of objects fetched
+        from storage (e.g. Minio ``get_object`` responses) without writing the
+        whole file to disk.
+
+        Args:
+            read_chunk: Callable that returns exactly ``n`` bytes (or fewer at
+                end of stream).
+            user_id: User identifier for key derivation.
+
+        Raises:
+            ValueError: If the header is missing/invalid.
+        """
+        header = read_chunk(_STREAM_HEADER_LEN)
+        if len(header) != _STREAM_HEADER_LEN or not header.startswith(_STREAM_MAGIC):
+            raise ValueError("Not a Transform-encrypted file (bad header)")
+
+        version = header[len(_STREAM_MAGIC)]
+        if version != _STREAM_VERSION[0]:
+            raise ValueError(f"Unsupported encryption format version: {version}")
+
+        chunk_size = int.from_bytes(
+            header[len(_STREAM_MAGIC) + 1: len(_STREAM_MAGIC) + 5], "big"
+        )
+        salt = header[len(_STREAM_MAGIC) + 5: len(_STREAM_MAGIC) + 5 + _SALT_LEN]
+        nonce_prefix = header[len(_STREAM_MAGIC) + 5 + _SALT_LEN: _STREAM_HEADER_LEN]
+
+        file_key = self._derive_stream_key(salt, user_id)
+        cipher = AESGCM(file_key)
+
+        counter = 0
+        while True:
+            chunk = read_chunk(chunk_size + 16)  # ciphertext + GCM tag
+            if not chunk:
+                break
+            nonce = nonce_prefix + counter.to_bytes(4, "big")
+            yield cipher.decrypt(nonce, chunk, None)
+            counter += 1
+
+    def encrypt_bytes(self, data: bytes, user_id: str) -> bytes:
+        """In-memory wrapper over the streaming format."""
+        src = io.BytesIO(data)
+        dst = io.BytesIO()
+        self.encrypt_stream(src, dst, user_id)
+        return dst.getvalue()
+
+    def decrypt_bytes(self, ciphertext: bytes, user_id: str) -> bytes:
+        """In-memory wrapper over the streaming format."""
+        src = io.BytesIO(ciphertext)
+        dst = io.BytesIO()
+        self.decrypt_stream(src, dst, user_id)
+        return dst.getvalue()
+
+    # ------------------------------------------------------------------
+    # Key management
+    # ------------------------------------------------------------------
+
+    @property
+    def master_key(self) -> bytes:
+        """Return the master key (for secure storage)."""
+        return self._master_key
+
+    @classmethod
+    def from_base64_key(cls, key_b64: str) -> "FileEncryptionService":
+        """Create the service from a base64-encoded Fernet key."""
+        return cls(master_key=key_b64.encode("utf-8"))
+
+
+def get_file_encryption_service() -> "FileEncryptionService | None":
+    """
+    Build the encryption service from ``ENCRYPTION_MASTER_KEY``.
+
+    Returns ``None`` when no master key is configured, which disables
+    encryption at rest (plaintext files in object storage).
+    """
+    from src.infrastructure.config.settings import get_settings
+
+    settings = get_settings()
+    if not settings.ENCRYPTION_MASTER_KEY:
+        return None
+    return FileEncryptionService.from_base64_key(
+        settings.ENCRYPTION_MASTER_KEY.get_secret_value()
+    )
+

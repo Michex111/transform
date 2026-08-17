@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from pydantic import BaseModel, Field
 
 from src.domain.subscriptions.value_object.tier import SubscriptionTier
 

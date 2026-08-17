@@ -1,8 +1,12 @@
 from enum import StrEnum
 
 class SubscriptionTier(StrEnum):
-    """Defines the supported subscription tiers."""
+    """Defines the supported subscription tiers.
 
-    GUEST = "guest"
-    FREE = "free"
-    PREMIUM = "premium"
+    Values match the PostgreSQL ``subscriptiontier`` enum created in
+    migration 0003_subscription_credit.
+    """
+
+    GUEST = "GUEST"
+    FREE = "FREE"
+    PREMIUM = "PREMIUM"

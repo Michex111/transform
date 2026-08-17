@@ -15,7 +15,12 @@ from src.infrastructure.converters.converter_registry import get_registry
 from workers.converter_workers.ports import QueuePort, StoragePort
 from src.infrastructure.logging.loggers import worker_logger
 from src.infrastructure.adapters.storage.minio_storage_factory import get_storage
-from workers.converter_workers.dependencies import get_consumer_queue, get_event_queue
+from workers.converter_workers.dependencies import (
+    get_consumer_queue,
+    get_encryption_service,
+    get_event_queue,
+    get_job_repository,
+)
 from workers.converter_workers.context.worker_context import WorkerContext
 from workers.converter_workers.worker import ConverterWorker
 from workers.converter_workers.processor import process_job
@@ -26,25 +31,21 @@ async def build_worker(worker_name: str = "file_converter_worker") -> ConverterW
     Factory function to create and configure a ConverterWorker.
     
     Args:
-        storage_port: Concrete implementation of StoragePort (e.g., S3Storage, LocalStorage)
-        queue_port: Concrete implementation of QueuePort (e.g., SQSQueue, RedisQueue)
         worker_name: Optional worker identifier for logging
         
     Returns:
         Configured ConverterWorker instance ready to run
     """
-    storage_port: StoragePort = get_storage() 
-    # Replace with concrete implementation
-    
-    # TODO: Instantiate concrete QueuePort implementation
-    queue_port: QueuePort = await get_consumer_queue(consumer_group="conversion-workers", consumer_name=worker_name)  # Replace with concrete implementation
-    
-    event_port = get_event_queue() 
+    storage_port: StoragePort = get_storage()
+    queue_port: QueuePort = await get_consumer_queue(consumer_group="conversion-workers", consumer_name=worker_name)
+    event_port = get_event_queue()
+    job_repository = get_job_repository()
+    encryption_service = get_encryption_service()
 
     if storage_port is None or queue_port is None or event_port is None:
         raise RuntimeError(
             "StoragePort, QueuePort, and JobEventPort implementations must be configured. "
-            "See TODO comments in main() for examples."
+            "See dependencies.py for the concrete implementations."
         )
 
     context = WorkerContext(
@@ -52,7 +53,9 @@ async def build_worker(worker_name: str = "file_converter_worker") -> ConverterW
         queue_port=queue_port,
         event_port=event_port,
         converter_registry=get_registry(),
-        worker_name=worker_name
+        worker_name=worker_name,
+        job_repository=job_repository,
+        encryption_service=encryption_service,
     )
 
     worker = ConverterWorker(context=context, process_job=process_job)
@@ -64,8 +67,6 @@ async def main():
     Main entry point to start the converter worker.
     Instantiates concrete port implementations and runs the worker.
     """
-    # TODO: Instantiate concrete StoragePort implementation
-    
     worker_logger.info("Initializing converter worker...")
     try:
         worker = await build_worker()

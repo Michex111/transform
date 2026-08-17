@@ -1,14 +1,18 @@
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Optional, Set
+from typing import Optional
 
 class APIKeyStatus(StrEnum):
-    """Represents the status of an API key."""
+    """Represents the status of an API key.
 
-    ACTIVE = "active"
-    INACTIVE = "inactive"
-    REVOKED = "revoked"
+    Values match the PostgreSQL ``apikeystatus`` enum created in
+    migration a23fe025bb21.
+    """
+
+    ACTIVE = "ACTIVE"
+    INACTIVE = "INACTIVE"
+    REVOKED = "REVOKED"
 
 @dataclass
 class APIKey:
@@ -28,6 +32,11 @@ class APIKey:
         """Checks if the API key is valid based on its status and expiration."""
         if self.status != APIKeyStatus.ACTIVE:
             return False
-        if self.expires_at and datetime.now() > self.expires_at:
-            return False
+        if self.expires_at:
+            # Normalise naive datetimes (e.g. SQLite) to aware for comparison.
+            expires = self.expires_at
+            if expires.tzinfo is None:
+                expires = expires.replace(tzinfo=UTC)
+            if datetime.now(UTC) > expires:
+                return False
         return True

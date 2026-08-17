@@ -1,4 +1,4 @@
-from enum import StrEnum, auto
+from enum import StrEnum
 
 class JobStatus(StrEnum):
     AWAITING_UPLOAD = "AWAITING_UPLOAD"

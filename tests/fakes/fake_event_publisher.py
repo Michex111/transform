@@ -8,6 +8,7 @@ class FakeEventPublisher:
         status: str,
         progress: int,
         message: str | None = None,
+        **kwargs: object,
     ) -> None:
         self.published_events.append(
             {
@@ -15,5 +16,6 @@ class FakeEventPublisher:
                 "status": str(status),
                 "progress": progress,
                 "message": message,
+                **{k: v for k, v in kwargs.items()},
             }
         )

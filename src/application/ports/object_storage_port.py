@@ -1,4 +1,3 @@
-from src.domain.conversions.entities.conversion_job import ConversionJob
 from typing import Protocol
 
 class StorageUrlGateway(Protocol):

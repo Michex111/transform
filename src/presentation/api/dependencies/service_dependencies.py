@@ -5,12 +5,31 @@ from fastapi import Depends
 from minio import Minio
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.application.services.api_key_service import APIKeyService
 from src.application.services.conversion_service import ConversionService
+from src.application.services.file_service import FileService
 from src.application.services.file_transfer_service import TransferService
+from src.application.services.priority_queue_dispatcher import PriorityQueueDispatcher
+from src.application.services.queue_priority_router import QueuePriorityRouter
 from src.infrastructure.adapters.cache.redis_session_adapter import RedisSessionAdapter
+from src.infrastructure.adapters.payment.stripe_service import StripeService
 from src.infrastructure.adapters.queues.redis_stream_job_queue import JobStream
+from src.infrastructure.adapters.queues.redis_stream_status_queue import JobEventSubscriber
+from src.infrastructure.adapters.repository.sql_api_key_repo import SQLAPIKeyRepository
 from src.infrastructure.adapters.repository.sql_conversion_job_repo import SQLConversionJobRepository
-from src.infrastructure.adapters.storage.minio_storage_adapter import MinioUrlStorageAdapter
+from src.infrastructure.adapters.repository.sql_credit_repo import SQLCreditRepository
+from src.infrastructure.adapters.repository.sql_subscription_repo import SQLSubscriptionRepository
+from src.infrastructure.adapters.repository.sql_user_file_repo import SQLUserFileRepository
+from src.infrastructure.adapters.repository.sql_user_folder_repo import SQLUserFolderRepository
+from src.infrastructure.adapters.security.encryption import (
+    FileEncryptionService,
+    get_file_encryption_service as _build_encryption_service,
+)
+from src.infrastructure.adapters.storage.endpoint import normalize_endpoint
+from src.infrastructure.adapters.storage.minio_storage_adapter import (
+    MinioFileStorageAdapter,
+    MinioUrlStorageAdapter,
+)
 from src.infrastructure.config.settings import get_settings
 from src.infrastructure.database.session import get_db_session
 from src.infrastructure.redis.client import create_redis_client
@@ -28,26 +47,100 @@ def get_conversion_repository(
     return SQLConversionJobRepository(session=db)
 
 
+def get_user_file_repository(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> SQLUserFileRepository:
+    return SQLUserFileRepository(session=db)
+
+
+def get_user_folder_repository(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> SQLUserFolderRepository:
+    return SQLUserFolderRepository(session=db)
+
+
+def get_api_key_repository(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> SQLAPIKeyRepository:
+    return SQLAPIKeyRepository(session=db)
+
+
+def get_subscription_repository(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> SQLSubscriptionRepository:
+    return SQLSubscriptionRepository(session=db)
+
+
+def get_credit_repository(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> SQLCreditRepository:
+    return SQLCreditRepository(session=db)
+
+
+def get_api_key_service(
+    repository: Annotated[SQLAPIKeyRepository, Depends(get_api_key_repository)],
+) -> APIKeyService:
+    return APIKeyService(repository=repository)
+
+
+def get_stripe_service() -> StripeService:
+    return StripeService()
+
+
+def get_event_subscriber() -> JobEventSubscriber:
+    settings = get_settings()
+    redis_client = create_redis_client(settings.REDIS_URL.get_secret_value())
+    return JobEventSubscriber(redis_client=redis_client)
+
+
 def get_conversion_service(
     queue_port: Annotated[JobStream, Depends(get_job_queue_port)],
     repository: Annotated[SQLConversionJobRepository, Depends(get_conversion_repository)],
 ) -> ConversionService:
-    return ConversionService(queue_port=queue_port, db_repository=repository)
+    dispatcher = PriorityQueueDispatcher(
+        queue_port=queue_port,
+        router=QueuePriorityRouter(),
+    )
+    return ConversionService(
+        queue_port=queue_port,
+        db_repository=repository,
+        queue_dispatcher=dispatcher,
+    )
 
 
 def get_minio_url_storage() -> MinioUrlStorageAdapter:
     settings = get_settings()
     client = Minio(
-        endpoint=settings.BACKBLAZE_ENDPOINT,
+        endpoint=normalize_endpoint(settings.BACKBLAZE_ENDPOINT),
         access_key=settings.BACKBLAZE_ACCESS_KEY.get_secret_value(),
         secret_key=settings.BACKBLAZE_SECRET_KEY.get_secret_value(),
-        secure=True,
+        secure=settings.BACKBLAZE_USE_SSL,
     )
     return MinioUrlStorageAdapter(
         minio_client=client,
         bucket_name=settings.S3_BUCKET_NAME,
         ttl_minutes=settings.UPLOAD_URL_TTL_MINUTES,
     )
+
+
+def get_minio_download_adapter() -> MinioFileStorageAdapter:
+    """File storage adapter capable of opening streaming object reads."""
+    settings = get_settings()
+    client = Minio(
+        endpoint=normalize_endpoint(settings.BACKBLAZE_ENDPOINT),
+        access_key=settings.BACKBLAZE_ACCESS_KEY.get_secret_value(),
+        secret_key=settings.BACKBLAZE_SECRET_KEY.get_secret_value(),
+        secure=settings.BACKBLAZE_USE_SSL,
+    )
+    return MinioFileStorageAdapter(
+        bucket_name=settings.S3_BUCKET_NAME,
+        s3_client=client,
+    )
+
+
+def get_encryption_service() -> FileEncryptionService | None:
+    """At-rest encryption service, or None when ENCRYPTION_MASTER_KEY is unset."""
+    return _build_encryption_service()
 
 
 def get_session_cache() -> RedisSessionAdapter:
@@ -66,4 +159,18 @@ def get_transfer_service(
         cache_port=cache_port,
         ttl_minutes=settings.UPLOAD_URL_TTL_MINUTES,
         logger=logging.getLogger("file_converter_api"),
+    )
+
+
+def get_file_service(
+    file_repository: Annotated[SQLUserFileRepository, Depends(get_user_file_repository)],
+    folder_repository: Annotated[SQLUserFolderRepository, Depends(get_user_folder_repository)],
+    storage: Annotated[MinioUrlStorageAdapter, Depends(get_minio_url_storage)],
+    subscription_repository: Annotated[SQLSubscriptionRepository, Depends(get_subscription_repository)],
+) -> FileService:
+    return FileService(
+        file_repository=file_repository,
+        folder_repository=folder_repository,
+        storage=storage,
+        subscription_repository=subscription_repository,
     )

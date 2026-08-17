@@ -1,0 +1,284 @@
+# Transform - File Converter Backend
+
+A production-ready file conversion SaaS platform built with FastAPI, featuring real-time progress tracking, subscription-based billing, secure file storage, and a distributed worker architecture.
+
+## Architecture
+
+```
+┌─────────┐     ┌──────────┐     ┌────────────┐     ┌───────────────┐
+│ Client  │────▶│  Nginx   │────▶│  FastAPI   │────▶│  PostgreSQL   │
+│ (Web)   │     │  (Proxy) │     │  (API)     │     │  (Jobs/Users) │
+└─────────┘     └──────────┘     └─────┬──────┘     └───────────────┘
+                                       │
+                                ┌──────▼──────┐     ┌───────────────┐
+                                │    Redis    │◀────│   Workers     │
+                                │  (Streams)  │     │  (Converter)  │
+                                └──────┬──────┘     └───────┬───────┘
+                                       │                    │
+                                ┌──────▼──────┐     ┌───────▼───────┐
+                                │     SSE     │     │  S3 / Minio   │
+                                │  (Events)   │     │  (Storage)    │
+                                └─────────────┘     └───────────────┘
+```
+
+### Tech Stack
+- **API Framework**: FastAPI (async Python)
+- **Database**: PostgreSQL 15 with SQLAlchemy 2.0 (async)
+- **Queue/Events**: Redis Streams with consumer groups
+- **Storage**: S3-compatible (Minio local, Backblaze B2/AWS S3 production)
+- **Auth**: JWT (access + refresh tokens), API keys, bcrypt passwords
+- **Payments**: Stripe (subscriptions, credit purchases)
+- **Workers**: Async Python workers with retry and backoff
+
+## Features
+
+### File Conversion
+- **Documents**: PDF ↔ DOCX, DOCX ↔ HTML, PDF ↔ HTML, XLSX ↔ CSV
+- **Audio**: MP3 ↔ WAV, WAV ↔ FLAC, MP3 ↔ OGG, MP3 ↔ M4A
+- **Video**: MP4 ↔ AVI, MP4 ↔ MOV, AVI ↔ MKV, Video → GIF
+- **Images**: JPEG ↔ PNG, PNG ↔ WEBP, SVG → PNG
+- **Ebooks**: EPUB ↔ PDF, EPUB ↔ MOBI, EPUB → TXT
+- **Archives**: ZIP ↔ TAR
+
+### User Management
+- Guest access (rate-limited, 50MB limit)
+- Free tier (5GB storage, 50 conversions/month)
+- Pro tier (50GB, 500 conversions, Stripe subscription)
+- Pro Plus tier (100GB, 2000 conversions)
+- Enterprise tier (custom limits)
+- API key authentication
+
+### File Library
+- **Folders**: signed-in users can create nested folders, rename them, move
+  files between folders, and delete folders recursively (files and objects).
+- Files are listed per folder (`?folder_id=`), and uploads can target a folder
+  directly via `folder_id` on the upload-session request.
+
+### Real-time Progress
+- Server-Sent Events (SSE) for conversion progress
+- Redis Streams for event distribution
+- Progress stages: downloading → converting → uploading → complete
+
+### Security
+- **Encryption at rest** (opt-in via `ENCRYPTION_MASTER_KEY`): files in object
+  storage are always ciphertext (chunked AES-256-GCM, per-user keys derived
+  via HKDF). The worker decrypts inputs before converting and re-encrypts
+  outputs; downloads are streamed decrypted through the API. Without the key,
+  everything runs in plaintext for minimal overhead.
+- JWT authentication with refresh tokens
+- API key hashing with SHA-256
+- **Rate limiting**: Redis-backed sliding window per IP (in-memory fallback),
+  stricter limits on auth endpoints, and per-API-key limits for
+  `X-API-Key` traffic
+- **Security headers** (X-Content-Type-Options, X-Frame-Options, …)
+- **Boot-time validation**: in `ENVIRONMENT=production` the app refuses to
+  start with a weak `SECRET_KEY`, wildcard CORS, or plaintext object storage
+- **Tier-based upload size limits** enforced at upload verification (413)
+- CORS configuration
+- Input validation and sanitization
+
+## Quick Start
+
+### Prerequisites
+- Python 3.14+
+- Docker & Docker Compose (for local development)
+
+### Local Development (with Docker)
+
+```bash
+# Clone the repository
+git clone <repo-url>
+cd "File Converter"
+
+# Copy environment config
+cp .env.example .env
+
+# Start all services
+docker compose -f deployment/docker/compose.yaml up -d
+
+# The API is available at http://localhost:8000
+# Swagger docs at http://localhost:8000/docs
+```
+
+### Local Development (without Docker)
+
+```bash
+# Create virtual environment
+python -m venv .venv
+source .venv/bin/activate
+
+# Install dependencies
+pip install uv
+uv sync
+
+# Install system dependencies (Ubuntu/Debian)
+sudo apt-get install -y libreoffice ffmpeg calibre libcairo2
+
+# Start PostgreSQL and Redis (via Docker)
+docker compose -f deployment/docker/compose.yaml up -d postgres redis minio
+
+# Create the Alembic config (point it at your local database)
+cp alembic.ini.example alembic.ini
+
+# Run database migrations
+alembic upgrade head
+
+# Start the API
+uv run uvicorn src.presentation.api.main:app --reload
+
+# In another terminal, start the worker
+uv run python -m workers.converter_workers.main
+
+# Optionally, start the cleanup worker (guest data retention)
+uv run python -m workers.cleanup_worker.main
+```
+
+## Cleanup Worker
+
+The cleanup worker runs as an **independent process** from the converter worker
+and performs scheduled maintenance on guest data:
+
+| Task | What it removes | Default |
+|------|-----------------|---------|
+| Guest conversion jobs | Ownerless jobs (`user_id IS NULL`) older than the window, plus their input/output objects | 24 h |
+| Expired guest files | `user_files` rows whose `expires_at` has passed, plus their objects | 24 h |
+| Temp objects | Objects under the `temp/` prefix older than the window | 1 h |
+| Job history | Conversion records older than the archive window, releasing their objects | 30 d |
+
+Retention windows are configurable via `CLEANUP_INTERVAL_SECONDS`,
+`GUEST_JOB_RETENTION_HOURS`, `GUEST_FILE_RETENTION_HOURS`,
+`TEMP_FILE_RETENTION_HOURS` and `JOB_ARCHIVE_AFTER_DAYS`.
+
+## API Documentation
+
+Full OpenAPI documentation is available at `/docs` when the server is running.
+
+### Key Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/users/register` | Register new user |
+| POST | `/api/users/token` | Login (get JWT + refresh token) |
+| POST | `/api/users/refresh` | Exchange refresh token for a new access token |
+| GET | `/api/users/me` | Get current user |
+| GET | `/api/conversions/supported` | List supported conversions |
+| POST | `/api/conversions/jobs` | Submit conversion job (returns upload URL) |
+| GET | `/api/conversions/jobs/{id}` | Get job status |
+| GET | `/api/conversions/jobs/{id}/download` | Stream decrypted output (encryption enabled) |
+| POST | `/api/uploads/sessions` | Create upload session |
+| POST | `/api/uploads/sessions/{id}/verify?job_id=` | Verify upload and enqueue job |
+| GET | `/api/v1/files` | List files (filter by `folder_id` query param) |
+| POST | `/api/v1/files/folders` | Create a folder (nest with `parent_id`) |
+| GET | `/api/v1/files/folders` | List root-level folders |
+| GET | `/api/v1/files/folders/{id}` | Folder contents (subfolders + files) |
+| PATCH | `/api/v1/files/folders/{id}` | Rename a folder |
+| DELETE | `/api/v1/files/folders/{id}` | Delete folder recursively (files + objects) |
+| POST | `/api/v1/files/{id}/move` | Move a file into a folder (or root) |
+| GET | `/api/v1/files/{id}/download` | Get download URL (or stream endpoint when encrypted) |
+| GET | `/api/v1/files/{id}/stream` | Stream decrypted file content (encryption enabled) |
+| GET | `/api/v1/events/jobs/{id}` | SSE stream of real-time job progress |
+| GET | `/api/v1/subscription/plans` | List plans |
+| POST | `/api/v1/subscription/checkout` | Create Stripe checkout session |
+| GET | `/api/v1/subscription/status` | Current subscription status |
+| GET | `/api/v1/credits/balance` | Credit balance |
+| GET | `/api/v1/credits/history` | Credit transaction history |
+| POST | `/api/v1/credits/purchase` | Purchase credits (Stripe) |
+| POST | `/api/v1/api-keys` | Generate API key (hashed in DB) |
+| GET | `/api/v1/user/dashboard` | Real usage dashboard |
+| POST | `/api/v1/webhooks/stripe` | Stripe webhook (subscriptions) |
+| GET | `/metrics` | Prometheus metrics |
+| GET | `/health`, `/ready` | Liveness / readiness probes |
+
+### Authentication
+
+- **JWT**: send `Authorization: Bearer <token>` (obtained from `/api/users/token`).
+- **API keys**: send `X-API-Key: tr_<key>` (obtained from `POST /api/v1/api-keys`).
+
+## Configuration
+
+All configuration is via environment variables (see `.env.example`):
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `ENVIRONMENT` | No | `development` (default) or `production` — production enforces safety checks at boot |
+| `SECRET_KEY` | Yes | JWT signing secret (>=32 chars, non-default in production) |
+| `DATABASE_URL` | Yes | PostgreSQL connection string |
+| `REDIS_URL` | Yes | Redis connection string |
+| `BACKBLAZE_*` | Yes | S3-compatible storage credentials |
+| `BACKBLAZE_USE_SSL` | No | `true` for HTTPS endpoints (AWS S3/B2), `false` for local Minio (required `true` in production) |
+| `RUN_MIGRATIONS` | No | Run migrations at startup (default `true`); disable for one-shot migration deployments |
+| `STRIPE_SECRET_KEY` | No | Stripe API key for payments |
+| `STRIPE_WEBHOOK_SECRET` | No | Stripe webhook signing secret |
+| `STRIPE_PRICE_*` | No | Stripe price IDs for subscription checkout |
+| `ENCRYPTION_MASTER_KEY` | No | Fernet key for file encryption |
+
+### Production Checklist
+
+- Set `ENVIRONMENT=production`, a strong `SECRET_KEY` (>=32 random chars), and
+  explicit `ALLOWED_ORIGINS` (no `*`) — the app refuses to boot otherwise.
+- Set `BACKBLAZE_USE_SSL=true` with an HTTPS storage endpoint.
+- Run migrations as a one-shot step (`RUN_MIGRATIONS=false` on replicas), or
+  rely on the startup migration with a single API replica.
+- Put the API behind Nginx/TLS; failed conversion jobs are copied to the
+  `conversion_jobs:dead` Redis stream for replay/inspection.
+
+## Project Structure
+
+```
+src/
+├── domain/              # Business logic & entities
+│   ├── conversions/     # Conversion job entities
+│   ├── security/        # API key entities
+│   └── subscriptions/   # Subscription & credit entities
+├── application/         # Use cases & ports
+│   ├── dtos/           # Data transfer objects
+│   ├── ports/          # Interface definitions
+│   └── services/       # Application services
+├── infrastructure/      # External integrations
+│   ├── adapters/       # Queue, storage, payment, security
+│   ├── auth/           # JWT & password hashing
+│   ├── config/         # Settings
+│   ├── converters/     # Converter registry & functions
+│   └── database/       # ORM models & migrations
+├── presentation/        # API layer
+│   ├── api/            # FastAPI routers & middleware
+│   └── schemas/        # Pydantic request/response models
+workers/
+├── converter_workers/   # Async worker, processor, dependencies
+└── cleanup_worker/      # Guest-data cleanup worker (separate process)
+```
+
+## Testing
+
+```bash
+# Run all tests
+uv run pytest
+
+# Run with coverage
+uv run pytest --cov=src --cov-report=term-missing
+
+# Run specific test file
+uv run pytest tests/unit/domain/test_subscription.py -v
+```
+
+## Deployment
+
+### Production Considerations
+- Use AWS S3 or Backblaze B2 instead of Minio
+- Configure a real PostgreSQL instance (RDS, Cloud SQL, etc.)
+- Set up Redis with persistence (AOF)
+- Use a reverse proxy (Nginx, Caddy) with HTTPS
+- Set strong `SECRET_KEY` and `ENCRYPTION_MASTER_KEY`
+- Configure proper CORS origins
+- Set up monitoring (Prometheus + Grafana, Sentry)
+
+### Kubernetes Deployment
+```bash
+# The docker images can be deployed to any Kubernetes cluster
+# Use ConfigMaps for configuration and Secrets for sensitive data
+# Horizontal Pod Autoscaling is recommended for workers
+```
+
+## License
+
+BSD 3-Clause License - see LICENSE file.

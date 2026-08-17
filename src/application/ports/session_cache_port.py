@@ -17,7 +17,7 @@ class SessionCache(Protocol):
         """
         ...
 
-    async def get(self, key: str) -> str:
+    async def get(self, key: str) -> str | None:
         """
         Retrieve a value from the session cache.
 
