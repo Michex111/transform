@@ -26,6 +26,7 @@ class SQLConversionJobRepository:
             target_format=job_data.conversion.target_format,
             input_file=job_data.input_file,
             output_file=job_data.output_file,
+            object_key=job_data.object_key,
             user_id=job_data.user_id,
             error_message=job_data.error_message,
             compute_duration_ms=job_data.compute_duration_ms,
@@ -44,6 +45,7 @@ class SQLConversionJobRepository:
             .where(ConversionJobModel.job_id == job.job_id)
             .values(
                 status=job.status,
+                object_key=job.object_key,
                 output_file=job.output_file,
                 error_message=job.error_message,
                 compute_duration_ms=job.compute_duration_ms,
@@ -154,6 +156,7 @@ class SQLConversionJobRepository:
             conversion=ConversionType(job_model.source_format, job_model.target_format),
             input_file=job_model.input_file,
             output_file=job_model.output_file,
+            object_key=job_model.object_key,
             status=job_model.status,
             error_message=job_model.error_message,
             compute_duration_ms=job_model.compute_duration_ms,

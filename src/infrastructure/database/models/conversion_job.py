@@ -18,6 +18,7 @@ class ConversionJobModel(Base):
     target_format: Mapped[str] = mapped_column(String, nullable=False)
     input_file: Mapped[str] = mapped_column(String, nullable=False)
     output_file: Mapped[str | None] = mapped_column(String, nullable=True)
+    object_key: Mapped[str] = mapped_column(String, nullable=False, default="")
     user_id: Mapped[int | None] = mapped_column(Integer, index=True, nullable=True)
     error_message: Mapped[str | None] = mapped_column(String, nullable=True)
     compute_duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

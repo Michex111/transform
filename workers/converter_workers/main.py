@@ -40,7 +40,7 @@ async def build_worker(worker_name: str = "file_converter_worker") -> ConverterW
     queue_port: QueuePort = await get_consumer_queue(consumer_group="conversion-workers", consumer_name=worker_name)
     event_port = get_event_queue()
     job_repository = get_job_repository()
-    encryption_service = get_encryption_service()
+    encryption_service = None  #get_encryption_service()
 
     if storage_port is None or queue_port is None or event_port is None:
         raise RuntimeError(

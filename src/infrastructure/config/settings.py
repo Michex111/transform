@@ -53,12 +53,20 @@ class Settings(BaseSettings):
     RATE_LIMIT_ENTERPRISE: int = 500
     RATE_LIMIT_API_KEY_DEFAULT: int = 1000
     RATE_LIMIT_AUTH: int = 10  # stricter window for login/register/refresh
+    # Limit for authenticated (JWT) users — higher than the IP-based free limit
+    # so real app usage (many API calls from the SPA) is not throttled.
+    RATE_LIMIT_AUTHENTICATED: int = 600
 
     # CORS
     ALLOWED_ORIGINS: list[str] = ["*"]
 
     # Monitoring
     SENTRY_DSN: SecretStr | None = None
+
+    # Frontend (SPA) static serving
+    # Absolute or project-relative path to the built frontend `dist` folder.
+    # When None, the frontend is not served by the API (frontend runs separately).
+    FRONTEND_DIST_DIR: str | None = "web/dist"
 
     # File size limits (bytes)
     GUEST_MAX_FILE_SIZE: int = 50 * 1024 * 1024     # 50MB

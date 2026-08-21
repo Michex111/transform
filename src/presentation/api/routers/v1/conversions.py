@@ -3,7 +3,6 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 
-from src.application.services.file_transfer_service import TransferService
 from src.domain.conversions.entities.conversion_job import ConversionJob
 from src.domain.conversions.exceptions import InvalidConversion
 from src.domain.conversions.value_object.conversion_type import ConversionType
@@ -24,7 +23,6 @@ from src.presentation.api.dependencies.service_dependencies import (
     get_encryption_service,
     get_minio_download_adapter,
     get_minio_url_storage,
-    get_transfer_service,
 )
 from src.presentation.schemas.conversion import (
     ConversionJobResponse,
@@ -44,6 +42,7 @@ def _to_response(job: ConversionJob, download_url: str | None = None) -> Convers
         target_format=job.conversion.target_format,
         input_file=job.input_file,
         output_file=job.output_file,
+        object_key=job.object_key or None,
         download_url=download_url,
     )
 
@@ -68,7 +67,6 @@ async def create_conversion_job(
     payload: CreateConversionJobRequest,
     current_user: CurrentUser,
     conversion_service: Annotated[ConversionService, Depends(get_conversion_service)],
-    file_transfer_service: Annotated[TransferService, Depends(get_transfer_service)],
 ) -> ConversionJobResponse:
     job = ConversionJob(
         job_id="",
@@ -82,9 +80,6 @@ async def create_conversion_job(
 
     try:
         await conversion_service.create_conversion_job(job)
-        upload_response = await file_transfer_service.create_upload(
-            job.conversion.source_format, str(current_user.id)
-        )
     except InvalidConversion as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
     except InvalidConversionJobError as exc:
@@ -92,7 +87,7 @@ async def create_conversion_job(
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
 
-    return _to_response(job, download_url=upload_response.upload_url)
+    return _to_response(job)
 
 
 @router.get("/jobs/{job_id}", response_model=ConversionJobResponse)

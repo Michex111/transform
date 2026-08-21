@@ -10,6 +10,7 @@ def _job(user_id: int | None = None) -> ConversionJob:
         job_id="job-1",
         conversion=ConversionType("pdf", "docx"),
         input_file="input.pdf",
+        object_key="uploads/input.pdf",
         user_id=user_id,
     )
 

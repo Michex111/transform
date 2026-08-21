@@ -58,6 +58,7 @@ def test_conversion_job_repo_roundtrip() -> None:
                     job_id="job-1",
                     conversion=ConversionType("pdf", "docx"),
                     input_file="input.pdf",
+                    object_key="uploads/input.pdf",
                     user_id=user.id,
                 )
                 await repo.save_conversion_job(job)

@@ -84,6 +84,7 @@ def test_push_requires_job_id_before_publishing(
         job_id="",
         conversion=ConversionType("txt", "md"),
         input_file="input.txt",
+        object_key="uploads/input.txt",
     )
 
     @converter_registry.register(job.conversion)

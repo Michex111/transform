@@ -1,22 +1,27 @@
 from dataclasses import dataclass, asdict
 from src.domain.conversions.entities.conversion_job import ConversionJob
 
+
 @dataclass
 class ConversionJobMessage:
     job_id: str
     source_format: str
     target_format: str
     input_key: str
+    object_key: str
     user_id: str | None = None
     retries: int = 0
 
     @classmethod
     def from_conversion_job(cls, job: ConversionJob):
+        if not job.object_key:
+            raise ValueError("ConversionJob must have an object_key to create a ConversionJobMessage")
         return cls(
             job_id=job.job_id,
             source_format=job.conversion.source_format,
             target_format=job.conversion.target_format,
             input_key=job.input_file,
+            object_key=job.object_key,
             user_id=str(job.user_id) if job.user_id is not None else None,
         )
 

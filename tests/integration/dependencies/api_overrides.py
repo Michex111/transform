@@ -23,6 +23,9 @@ class FakeConversionService:
         self.created_jobs.append(job)
         return job.job_id
 
+    async def update_conversion_job(self, job: ConversionJob) -> None:
+        del job  # object_key is already persisted on the in-memory object
+
 
 class FakeTransferService:
     def __init__(self) -> None:

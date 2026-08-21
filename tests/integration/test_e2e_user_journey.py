@@ -507,10 +507,9 @@ def test_full_user_journey_e2e(tmp_path, monkeypatch) -> None:
         job_id = job_payload["job_id"]
         assert job_payload["source_format"] == "txt"
 
-        # simulate the client uploading through the job's upload session
-        store.objects[job_payload["input_file"]] = b"hello world"
-
-        # create a fresh upload session for the job and verify it, pushing the job
+        # Create an upload session, upload the bytes to it, and verify to push
+        # the job (verify passes the job_id so it gets enqueued). The job's
+        # object_key is set to this session's key on verify.
         job_upload = client.post(
             "/api/uploads/sessions",
             json={"file_extension": "txt", "file_name": "input.txt"},

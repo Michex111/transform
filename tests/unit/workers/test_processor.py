@@ -51,8 +51,8 @@ def test_process_job_downloads_converts_and_uploads_successfully(
     asyncio.run(process_job(context, conversion_job))
 
     assert conversion_job.status == JobStatus.COMPLETED
-    assert conversion_job.output_file == "s3-file_store/input.md"
-    assert fake_storage_port.objects["s3-file_store/input.md"] == b"HELLO WORLD"
+    assert conversion_job.output_file == "output/input.md"
+    assert fake_storage_port.objects["output/input.md"] == b"HELLO WORLD"
     assert len(fake_storage_port.download_calls) == 1
     assert len(fake_storage_port.upload_calls) == 1
 
@@ -227,7 +227,7 @@ def test_process_job_with_encryption_stores_only_ciphertext(
     asyncio.run(process_job(context, conversion_job))
 
     assert conversion_job.status == JobStatus.COMPLETED
-    stored = storage.objects["s3-file_store/input.md"]
+    stored = storage.objects["output/input.md"]
     # At rest it must be ciphertext, not the converted plaintext
     assert stored != b"HELLO WORLD"
     assert stored.startswith(b"TRENC")
@@ -267,7 +267,7 @@ def test_process_job_encryption_guest_job_uses_guest_key(
 
     asyncio.run(process_job(context, conversion_job))
 
-    stored = storage.objects["s3-file_store/input.md"]
+    stored = storage.objects["output/input.md"]
     assert stored.startswith(b"TRENC")
     assert service.decrypt_bytes(stored, "guest") == b"GUEST DATA"
 
@@ -297,4 +297,4 @@ def test_process_job_without_encryption_stores_plaintext(
     conversion_job.pending_processing()
     asyncio.run(process_job(context, conversion_job))
 
-    assert fake_storage_port.objects["s3-file_store/input.md"] == b"HELLO WORLD"
+    assert fake_storage_port.objects["output/input.md"] == b"HELLO WORLD"

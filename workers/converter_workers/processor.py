@@ -19,7 +19,7 @@ settings = get_settings()
 
 
 @retry_on_exception(logger=worker_logger)
-async def _download_input_file(context: WorkerContext, job: ConversionJob, input_file: Path) -> Path:
+async def _download_input_file(context: WorkerContext, job: ConversionJob, input_dest: Path) -> Path:
     """
     Download the job's input object to disk and return the path of the
     plaintext file to feed to the converter.
@@ -27,17 +27,17 @@ async def _download_input_file(context: WorkerContext, job: ConversionJob, input
     When encryption at rest is enabled, the stored object is ciphertext; it is
     decrypted into a sibling temp file before conversion.
     """
-    await asyncio.to_thread(context.storage_port.download, job.input_file, input_file)
+    await asyncio.to_thread(context.storage_port.download, job.object_key, input_dest)
     log_context = context.get_log_context(job_id=job.job_id, conversion_type=job.conversion)
-    worker_logger.debug(f"Downloaded input file for job {job.job_id} to {input_file}", extra=log_context)
+    worker_logger.debug(f"Downloaded input file for job {job.job_id} to {input_dest}", extra=log_context)
 
     if context.encryption_service is None:
-        return input_file
+        return input_dest
 
-    plain_input = input_file.parent / f"plain_{input_file.name}"
+    plain_input = input_dest.parent / f"plain_{input_dest.name}"
     await asyncio.to_thread(
         context.encryption_service.decrypt_file_to,
-        input_file,
+        input_dest,
         plain_input,
         _actor_key(job),
     )

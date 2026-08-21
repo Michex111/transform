@@ -26,17 +26,11 @@ services:
     build:
       context: ../../
       dockerfile: deployment/docker/worker.Dockerfile
-    container_name: transform-worker
     command: uv run python -m workers.converter_workers.main
     env_file:
       - ../../.env
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      minio:
-        condition: service_healthy
+    # Worker connects directly to cloud services via .env (Neon Postgres,
+    # Upstash Redis, Backblaze B2) — no local infra required.
     networks:
       - converter-net
     restart: unless-stopped

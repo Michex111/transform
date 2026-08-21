@@ -1,0 +1,167 @@
+import { useMemo, useState } from "react";
+import { LayoutGroup, motion } from "motion/react";
+import { Download, ArrowCounterClockwise } from "@phosphor-icons/react";
+import { useJobs } from "@/jobs/JobsContext";
+import { useAuth } from "@/auth/AuthContext";
+import { Card, FormatChip, ProgressBar, StatusBadge } from "@/components/ui";
+import { formatDateTime } from "@/lib/format";
+
+type SortKey = "newest" | "oldest" | "status" | "format" | "size";
+
+const SORTS: { key: SortKey; label: string }[] = [
+  { key: "newest", label: "Newest first" },
+  { key: "oldest", label: "Oldest first" },
+  { key: "status", label: "By status" },
+  { key: "format", label: "By format" },
+  { key: "size", label: "By size" },
+];
+
+const STATUS_ORDER: Record<string, number> = {
+  PROCESSING: 0,
+  PENDING: 1,
+  AWAITING_UPLOAD: 2,
+  COMPLETED: 3,
+  FAILED: 4,
+};
+
+export function QueuePage() {
+  const { jobs } = useJobs();
+  const { api: client } = useAuth();
+  const [sort, setSort] = useState<SortKey>("newest");
+
+  const active = jobs.filter((j) => j.status === "PROCESSING" || j.status === "PENDING").length;
+
+  const sorted = useMemo(() => {
+    const arr = [...jobs];
+    switch (sort) {
+      case "newest":
+        return arr.sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? ""));
+      case "oldest":
+        return arr.sort((a, b) => (a.createdAt ?? "").localeCompare(b.createdAt ?? ""));
+      case "status":
+        return arr.sort((a, b) => (STATUS_ORDER[a.status] ?? 9) - (STATUS_ORDER[b.status] ?? 9));
+      case "format":
+        return arr.sort((a, b) => a.source_format.localeCompare(b.source_format));
+      case "size":
+        return arr.sort((a, b) => a.input_file.length - b.input_file.length);
+    }
+  }, [jobs, sort]);
+
+  function retry() {
+    // Simplest reliable retry: open the Convert screen.
+    window.location.href = "/app/convert";
+  }
+
+  return (
+    <div className="mx-auto max-w-5xl space-y-6">
+      <div>
+        <h1 className="font-display text-2xl font-semibold">Queue</h1>
+        <p className="text-sm text-muted">Every conversion, in order.</p>
+      </div>
+
+      {/* Toolbar */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <label className="flex items-center gap-2 text-sm text-muted">
+          Sort
+          <select
+            value={sort}
+            onChange={(e) => setSort(e.target.value as SortKey)}
+            className="h-9 rounded-lg border border-outline-strong bg-surface-variant px-2 text-sm text-on-background focus:border-primary focus:outline-none"
+          >
+            {SORTS.map((s) => (
+              <option key={s.key} value={s.key}>
+                {s.label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <span className="font-mono text-xs text-muted">{active} active</span>
+      </div>
+
+      {/* Table */}
+      <Card className="overflow-hidden">
+        <div className="hidden grid-cols-[2fr_1fr_1fr_140px_auto] gap-4 border-b border-outline bg-surface-variant/40 px-5 py-3 text-xs font-semibold uppercase tracking-wide text-muted sm:grid">
+          <span>File</span>
+          <span>Format</span>
+          <span>Status</span>
+          <span>Progress</span>
+          <span className="text-right">Created</span>
+        </div>
+
+        {sorted.length === 0 ? (
+          <p className="px-5 py-16 text-center text-muted">
+            No conversions yet. Start one from the Convert screen.
+          </p>
+        ) : (
+          <ul className="divide-y divide-outline">
+            <LayoutGroup>
+              {sorted.map((job) => (
+                <motion.li
+                  key={job.job_id}
+                  layout
+                  initial={{ opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ type: "spring", stiffness: 260, damping: 28 }}
+                  className="grid grid-cols-[2fr_1fr_auto] items-center gap-4 px-5 py-3 transition-colors hover:bg-surface-variant/50 sm:grid-cols-[2fr_1fr_1fr_140px_auto]"
+                >
+                  <span className="min-w-0 truncate text-sm text-on-background">
+                    {job.fileName ?? job.input_file}
+                  </span>
+                  <span className="hidden items-center gap-1 sm:flex">
+                    <FormatChip format={job.source_format} />
+                    <FormatChip format={job.target_format} />
+                  </span>
+                  <StatusBadge status={job.status} />
+                  <div className="hidden sm:block">
+                    <ProgressBar
+                      value={
+                        job.progress ??
+                        (job.status === "COMPLETED"
+                          ? 100
+                          : job.status === "PROCESSING"
+                            ? 45
+                            : job.status === "FAILED"
+                              ? 100
+                              : 0)
+                      }
+                      from="var(--color-primary)"
+                      to={job.status === "FAILED" ? "var(--color-error)" : undefined}
+                    />
+                  </div>
+                  <span className="hidden text-right font-mono text-xs text-muted sm:block">
+                    {formatDateTime(job.createdAt)}
+                  </span>
+                  <div className="flex items-center gap-2">
+                    {job.status === "COMPLETED" && (
+                      <a
+                        href={client.getJobDownloadUrl(job.job_id)}
+                        className="text-muted transition-transform hover:scale-110 hover:text-primary"
+                        aria-label="Download"
+                        title="Download"
+                      >
+                        <Download size={18} />
+                      </a>
+                    )}
+                    {job.status === "FAILED" && (
+                      <motion.button
+                        onClick={retry}
+                        whileHover={{ rotate: -180 }}
+                        transition={{ type: "spring", stiffness: 200, damping: 15 }}
+                        className="text-muted hover:text-primary"
+                        aria-label="Retry"
+                        title="Retry"
+                      >
+                        <ArrowCounterClockwise size={18} />
+                      </motion.button>
+                    )}
+                  </div>
+                </motion.li>
+            ))}
+            </LayoutGroup>
+          </ul>
+        )}
+      </Card>
+    </div>
+  );
+}

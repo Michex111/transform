@@ -159,10 +159,45 @@ class ApiClient {
   cancelUpload = (id: string) =>
     this.request<void>(`/uploads/sessions/${id}`, { method: 'DELETE' })
 
-  /** Upload file bytes directly to the presigned URL (no auth header needed). */
-  async putToPresignedUrl(url: string, blob: Blob, contentType: string): Promise<void> {
-    const res = await fetch(url, { method: 'PUT', body: blob, headers: { 'Content-Type': contentType } })
-    if (!res.ok) throw new Error(`Upload failed (${res.status})`)
+  /**
+   * Upload file bytes directly to the presigned URL (no auth header needed).
+   *
+   * IMPORTANT: the backend signs the presigned PUT URL WITHOUT a Content-Type
+   * header. Sending one (e.g. `application/octet-stream`) causes B2/S3 to
+   * reject the request with 403 SignatureDoesNotMatch, and it forces an extra
+   * CORS preflight. So we deliberately omit Content-Type and let the browser
+   * send the body as-is.
+   *
+   * Cross-origin PUT to the object store still requires the bucket's CORS
+   * policy to allow the app origin + `PUT`. If this throws "Failed to fetch",
+   * the bucket CORS rule is missing/incorrect.
+   */
+  async putToPresignedUrl(url: string, blob: Blob): Promise<void> {
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method: "PUT",
+        body: blob,
+        mode: "cors",
+      });
+    } catch (err) {
+      const message =
+        err instanceof Error && err.message === "Failed to fetch"
+          ? "The object store blocked the upload (CORS). Configure the bucket CORS policy to allow this origin and the PUT method."
+          : err instanceof Error
+            ? err.message
+            : "Upload failed";
+      throw new Error(message);
+    }
+    if (!res.ok) {
+      // Distinguish the two common failure modes for a better error message.
+      if (res.status === 403) {
+        throw new Error(
+          "Upload was rejected by the object store (403). This is usually a presigned-URL signature mismatch or a bucket CORS/permission issue.",
+        );
+      }
+      throw new Error(`Upload failed (${res.status})`);
+    }
   }
 
   // ---- Conversions ----

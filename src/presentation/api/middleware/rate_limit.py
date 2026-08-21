@@ -13,16 +13,17 @@ from fastapi import Request, Response
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from src.infrastructure.adapters.security.rate_limiter import (
-    RedisRateLimiter,
-    get_tier_rate_limit,
-)
+from src.infrastructure.adapters.security.rate_limiter import RedisRateLimiter
 from src.infrastructure.config.settings import get_settings
 from src.infrastructure.redis.client import create_redis_client
 
 logger = logging.getLogger(__name__)
 
 _AUTH_PATHS = {"/api/users/token", "/api/users/register", "/api/users/refresh"}
+
+# Every constructed middleware instance. Tests use this to reset the in-memory
+# fallback state so per-IP counters do not accumulate across test cases.
+_INSTANCES: list["RateLimitMiddleware"] = []
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):
@@ -47,10 +48,19 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         self._store: dict[str, list[float]] = {}  # In-memory fallback
         self._redis_unavailable = False
         self._settings = get_settings()
+        _INSTANCES.append(self)
+
+    @classmethod
+    def reset_all(cls) -> None:
+        """Clear all in-memory rate-limit state (used by tests)."""
+        for instance in _INSTANCES:
+            instance._store.clear()
+            instance._redis_unavailable = False
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        # Skip rate limiting for health/ready/metrics/docs endpoints
-        if request.url.path in ("/health", "/ready", "/metrics", "/docs", "/openapi.json"):
+        # Only rate-limit API routes. The SPA (index.html, /assets/*) is served
+        # by this app and must not consume the client's API budget.
+        if not request.url.path.startswith("/api/"):
             return await call_next(request)
 
         key, limit = self._resolve_limit(request)
@@ -70,7 +80,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
     def _resolve_limit(self, request: Request) -> tuple[str, int]:
         """Determine the rate-limit key and window limit for a request."""
-        # Per-API-key limits take priority over IP limits.
+        # Per-API-key limits take priority over everything else.
         api_key = request.headers.get("x-api-key")
         if api_key:
             key = "apikey:" + hashlib.sha256(api_key.encode("utf-8")).hexdigest()
@@ -78,15 +88,24 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
         client_ip = request.client.host if request.client else "unknown"
 
-        # Stricter limit for credential-guessing endpoints.
+        # Authenticated users are keyed by their access token (stable for the
+        # token lifetime) and get a much higher limit than anonymous IPs, so
+        # legitimate SPA usage is not throttled by the shared-IP free limit.
+        authorization = request.headers.get("authorization")
+        if authorization and authorization.lower().startswith("bearer "):
+            token = authorization[7:]
+            key = "user:" + hashlib.sha256(token.encode("utf-8")).hexdigest()
+            return key, self._settings.RATE_LIMIT_AUTHENTICATED
+
+        # Stricter limit for credential-guessing endpoints (anonymous only).
         if request.url.path in _AUTH_PATHS:
             return f"ip:{client_ip}:auth", self._settings.RATE_LIMIT_AUTH
 
         # Guest endpoints get the guest limit.
         if "/guest" in request.url.path:
-            return f"ip:{client_ip}", get_tier_rate_limit("guest")
+            return f"ip:{client_ip}", self._settings.RATE_LIMIT_GUEST
 
-        return f"ip:{client_ip}", get_tier_rate_limit("free")
+        return f"ip:{client_ip}", self._settings.RATE_LIMIT_FREE
 
     async def _is_allowed(self, key: str, limit: int, window: int = 60) -> bool:
         """Check if request is allowed under the rate limit."""
