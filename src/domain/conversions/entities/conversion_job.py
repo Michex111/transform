@@ -10,6 +10,7 @@ class ConversionJob:
     conversion: ConversionType
     input_file: str
     output_file: str | None = None
+    object_key: str = ""  # S3/MinIO object key for the input file
     status: JobStatus = JobStatus.AWAITING_UPLOAD
     error_message: str | None = None
     compute_duration_ms: int = 0          # actual converter wall-clock time
@@ -24,6 +25,8 @@ class ConversionJob:
     def start_processing(self):
         if self.status != JobStatus.PENDING:
             raise InvalidStateTransition(f"Cannot start processing from status {self.status}")
+        if not self.object_key:
+            raise InvalidStateTransition("Cannot start processing without an object_key set")
         self.status = JobStatus.PROCESSING
 
     def complete(self, output_file: str):

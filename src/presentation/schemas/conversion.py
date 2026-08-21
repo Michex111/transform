@@ -14,6 +14,7 @@ class ConversionJobResponse(BaseModel):
     target_format: str
     input_file: str
     output_file: str | None = None
+    object_key: str | None = None
     download_url: str | None = None
 
 

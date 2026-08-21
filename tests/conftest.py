@@ -1,24 +1,28 @@
 import os
 from pathlib import Path
 
-import pytest
-
-from src.infrastructure.converters.converter_registry import ConverterRegistry
-from tests.fakes.fake_converter_registry import FakeConverterRegistry
-from tests.fakes.fake_event_publisher import FakeEventPublisher
-from tests.fakes.fake_logger import FakeLogger
-from tests.fakes.fake_queue import FakeQueuePort
-from tests.fakes.fake_storage import FakeStoragePort
-from tests.fakes.fake_db_repository import FakeDatabaseRepository
-from workers.converter_workers.context.worker_context import WorkerContext
-
-
-# Keep worker processor imports deterministic in tests by ensuring required env vars exist.
+# IMPORTANT: Set the required environment variables BEFORE importing any module
+# that calls get_settings() at import time (e.g. src.infrastructure.redis.client
+# builds its client with get_settings()). Otherwise settings get cached from the
+# .env file (e.g. BASE_TARGET_KEY=output/) instead of these test defaults, which
+# breaks worker/processor tests that assert on the storage key.
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
 os.environ.setdefault("BACKBLAZE_ENDPOINT", "https://example.invalid")
 os.environ.setdefault("BACKBLAZE_ACCESS_KEY", "dummy-access-key")
 os.environ.setdefault("BACKBLAZE_SECRET_KEY", "dummy-secret-key")
-os.environ.setdefault("BASE_TARGET_KEY", "s3-file_store")
+os.environ.setdefault("BASE_TARGET_KEY", "output/")
+
+import pytest  # noqa: E402
+
+from src.infrastructure.converters.converter_registry import ConverterRegistry  # noqa: E402
+from src.presentation.api.middleware.rate_limit import RateLimitMiddleware  # noqa: E402
+from tests.fakes.fake_converter_registry import FakeConverterRegistry  # noqa: E402
+from tests.fakes.fake_event_publisher import FakeEventPublisher  # noqa: E402
+from tests.fakes.fake_logger import FakeLogger  # noqa: E402
+from tests.fakes.fake_queue import FakeQueuePort  # noqa: E402
+from tests.fakes.fake_storage import FakeStoragePort  # noqa: E402
+from tests.fakes.fake_db_repository import FakeDatabaseRepository  # noqa: E402
+from workers.converter_workers.context.worker_context import WorkerContext  # noqa: E402
 
 
 pytest_plugins = [
@@ -27,6 +31,15 @@ pytest_plugins = [
     "tests.fixtures.converters",
     "tests.fixtures.files",
 ]
+
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limit_state():
+    """Reset the shared in-memory rate limiter so per-IP counters do not
+    accumulate across test cases (prevents spurious 429s)."""
+    RateLimitMiddleware.reset_all()
+    yield
+    RateLimitMiddleware.reset_all()
 
 
 @pytest.fixture

@@ -43,7 +43,7 @@ def test_job_pipeline_runs_end_to_end_in_memory(
 
     assert returned_id == conversion_job.job_id
     assert queued_job.status == JobStatus.COMPLETED
-    assert queued_job.output_file == "s3-file_store/input.md"
-    assert fake_storage_port.objects["s3-file_store/input.md"] == b"goodbye world"
+    assert queued_job.output_file == "output/input.md"
+    assert fake_storage_port.objects["output/input.md"] == b"goodbye world"
     assert fake_queue_port.acked_messages == ["message-1"]
     assert fake_event_publisher.published_events[-1]["progress"] == 100

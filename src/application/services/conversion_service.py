@@ -60,3 +60,9 @@ class ConversionService:
     async def get_conversion_job(self, job_id: str) -> ConversionJob | None:
         return await self.db_repository.get_conversion_job(job_id)
 
+    async def update_conversion_job(self, job: ConversionJob) -> None:
+        """Persist progress updates for an existing job (status, output, errors,
+        compute time and credits consumed).
+        """
+        await self.db_repository.update_conversion_job(job)
+

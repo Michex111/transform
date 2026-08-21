@@ -126,6 +126,7 @@ class JobStreamConsumer(RedisStreamQueue):
                 target_format=str(job["target_format"]),
             ),
             input_file=str(job["input_key"]),
+            object_key=str(job["object_key"]),
             output_file="",  # This will be set later when the job is completed
             status=JobStatus.PENDING,
             user_id=int(job["user_id"]) if job.get("user_id") else None,

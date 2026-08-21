@@ -53,16 +53,16 @@ class RedisRateLimiter:
         async with self._redis.pipeline(transaction=True) as pipe:
             # Remove expired entries
             pipe.zremrangebyscore(redis_key, 0, window_start)
-            # Count current entries
-            pipe.zcard(redis_key)
-            # Add current request
+            # Add the current request
             pipe.zadd(redis_key, {str(now_ms): now_ms})
+            # Count entries (now includes this request)
+            pipe.zcard(redis_key)
             # Set expiry on the key
             pipe.expire(redis_key, window_seconds + 1)
             results = await pipe.execute()
 
-        current_count = results[1]  # zcard result (before adding)
-        return max(0, limit - current_count - 1)
+        current_count = results[2]  # zcard result (after adding this request)
+        return max(0, limit - current_count)
 
 
 def get_tier_rate_limit(tier: str) -> int:

@@ -75,6 +75,10 @@ async def verify_upload_session(
 			return session
 		job = await conversion_service.get_conversion_job(job_id)
 		if job:
+			# Point the job at the object key that was actually uploaded so the
+			# worker reads the correct file.
+			job.object_key = session.object_key
+			await conversion_service.update_conversion_job(job)
 			await conversion_service.push_conversion_job(job)
 		return session
 

@@ -59,7 +59,7 @@ def test_worker_pipeline_runs_through_service_queue_and_processor(
 
     assert fake_queue_port.acked_messages == ["message-1"]
     assert fake_queue_port.failed_messages == []
-    assert fake_storage_port.objects["s3-file_store/input.md"] == b"HELLO WORLD"
+    assert fake_storage_port.objects["output/input.md"] == b"HELLO WORLD"
     assert any(event["progress"] == 100 for event in fake_event_publisher.published_events)
     assert any(
         level == "info" and "completed successfully" in message

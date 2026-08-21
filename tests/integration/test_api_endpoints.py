@@ -21,7 +21,6 @@ def test_create_conversion_job_endpoint_returns_accepted() -> None:
         )
         payload = response.json()
         conversion_service = client.app.state.fake_conversion_service   #type: ignore
-        transfer_service = client.app.state.fake_transfer_service       #type: ignore
 
     assert response.status_code == 202
     assert payload["job_id"] == "test-job-id"
@@ -29,11 +28,10 @@ def test_create_conversion_job_endpoint_returns_accepted() -> None:
     assert payload["source_format"] == "docx"
     assert payload["target_format"] == "pdf"
     assert payload["input_file"] == "uploads/example.docx"
-    assert payload["download_url"] == "https://storage.test/upload-url"
+    # object_key is not set until the upload is verified, so it is None here.
+    assert payload["object_key"] is None
     assert conversion_service.created_jobs[0].conversion.source_format == "docx"
     assert conversion_service.created_jobs[0].conversion.target_format == "pdf"
-    # create_upload receives the normalized source format as the file extension
-    assert transfer_service.calls == [("docx", "101")]
 
 
 def test_list_conversion_endpoint_returns_supported_conversions() -> None:

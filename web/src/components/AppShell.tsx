@@ -1,0 +1,136 @@
+import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
+import { AnimatePresence, motion } from "motion/react";
+import {
+  ChartBar,
+  ArrowsClockwise,
+  List,
+  ClockCounterClockwise,
+  FolderOpen,
+  CreditCard,
+  GearSix,
+  Lifebuoy,
+  SignOut,
+} from "@phosphor-icons/react";
+import { useAuth } from "@/auth/AuthContext";
+import { Logo } from "@/components/ui";
+
+const NAV = [
+  { to: "/app/dashboard", label: "Dashboard", icon: ChartBar },
+  { to: "/app/convert", label: "Convert", icon: ArrowsClockwise },
+  { to: "/app/queue", label: "Queue", icon: List },
+  { to: "/app/history", label: "History", icon: ClockCounterClockwise },
+  { to: "/app/files", label: "Files", icon: FolderOpen },
+  { to: "/app/billing", label: "Billing", icon: CreditCard },
+  { to: "/app/settings", label: "Settings", icon: GearSix },
+  { to: "/app/support", label: "Support", icon: Lifebuoy },
+];
+
+export function AppShell() {
+  const { user, logout } = useAuth();
+  const navigate = useNavigate();
+  const location = useLocation();
+
+  const handleLogout = () => {
+    logout();
+    navigate("/login", { replace: true });
+  };
+
+  return (
+    <div className="flex min-h-screen bg-background">
+      {/* Desktop sidebar — stays mounted across route changes */}
+      <aside className="hidden w-64 shrink-0 flex-col border-r border-outline bg-surface lg:flex">
+        <div className="flex h-16 items-center border-b border-outline px-5">
+          <Logo />
+        </div>
+        <nav className="flex-1 space-y-1 p-3" aria-label="Main">
+          {NAV.map(({ to, label, icon: Icon }, i) => (
+            <NavLink
+              key={to}
+              to={to}
+              className={({ isActive }) =>
+                `group relative flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors ${
+                  isActive
+                    ? "bg-primary-container text-on-primary-container"
+                    : "text-muted hover:bg-surface-variant hover:text-on-background"
+                }`
+              }
+            >
+              {({ isActive }) => (
+                <motion.span
+                  className="flex w-full items-center gap-3"
+                  initial={{ x: -8, opacity: 0 }}
+                  animate={{ x: 0, opacity: 1 }}
+                  transition={{ delay: 0.05 * i, duration: 0.3 }}
+                >
+                  <Icon
+                    size={20}
+                    weight={isActive ? "fill" : "regular"}
+                    className={isActive ? "text-on-primary-container" : ""}
+                  />
+                  {label}
+                </motion.span>
+              )}
+            </NavLink>
+          ))}
+        </nav>
+        <div className="border-t border-outline p-3">
+          <div className="flex items-center gap-3 px-3 py-2">
+            <div className="flex h-9 w-9 items-center justify-center rounded-full bg-primary-container font-display text-sm font-semibold text-on-primary-container">
+              {user?.username?.slice(0, 2).toUpperCase() ?? "??"}
+            </div>
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-sm font-medium text-on-background">{user?.username}</p>
+              <p className="truncate text-xs text-muted">{user?.email}</p>
+            </div>
+            <button
+              onClick={handleLogout}
+              aria-label="Log out"
+              title="Log out"
+              className="text-muted transition-colors hover:scale-110 hover:text-error"
+            >
+              <SignOut size={20} />
+            </button>
+          </div>
+        </div>
+      </aside>
+
+      {/* Main content — only this animates between routes */}
+      <div className="flex min-w-0 flex-1 flex-col">
+        <main className="flex-1 px-4 py-6 sm:px-6 lg:px-8">
+          <AnimatePresence mode="wait" initial={false}>
+            <motion.div
+              key={location.pathname}
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -8 }}
+              transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
+            >
+              <Outlet />
+            </motion.div>
+          </AnimatePresence>
+        </main>
+
+        {/* Mobile bottom nav */}
+        <nav
+          className="sticky bottom-0 grid grid-cols-4 border-t border-outline bg-surface lg:hidden"
+          aria-label="Mobile"
+        >
+          {NAV.slice(0, 4).map(({ to, label, icon: Icon }) => (
+            <NavLink
+              key={to}
+              to={to}
+              className={({ isActive }) =>
+                `flex flex-col items-center gap-1 py-3 text-[11px] font-medium ${
+                  isActive ? "text-primary" : "text-muted"
+                }`
+              }
+            >
+              <Icon size={22} />
+              {label}
+            </NavLink>
+          ))}
+        </nav>
+      </div>
+    </div>
+  );
+}

@@ -71,6 +71,9 @@ class FakeConversionService:
         del job
         return ""
 
+    async def update_conversion_job(self, job: ConversionJob) -> None:
+        del job
+
 
 class FakeStorage:
     async def stat_object(self, object_key: str) -> dict:

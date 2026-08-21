@@ -1,16 +1,91 @@
 @import "tailwindcss";
 
-:root {
-  font-family: "Inter", system-ui, Avenir, Helvetica, Arial, sans-serif;
-  line-height: 1.5;
-  font-weight: 400;
+@theme {
+  /* Surfaces & text */
+  --color-background: #121417;
+  --color-surface: #1b1e23;
+  --color-surface-variant: #202429;
+  --color-on-background: #eceef1;
+  --color-on-surface: #eceef1;
+  --color-muted: #8a919b;
+  --color-outline: #2a2e34;
+  --color-outline-strong: #343940;
 
-  color-scheme: light dark;
-  color: rgba(255, 255, 255, 0.87);
-  background-color: #0f172a;
+  /* Brand */
+  --color-primary: #5a6bff;
+  --color-on-primary: #0b0d12;
+  --color-primary-container: #2a2f55;
+  --color-on-primary-container: #d6dcff;
 
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+  /* Status */
+  --color-success: #22c55e;
+  --color-warning: #f5a623;
+  --color-error: #f43f5e;
+
+  /* Format colors */
+  --color-fmt-pdf: #ff5a5f;
+  --color-fmt-word: #2b7cd3;
+  --color-fmt-excel: #1fa463;
+  --color-fmt-image: #e8549c;
+  --color-fmt-audio: #9b59d0;
+  --color-fmt-video: #f97316;
+  --color-fmt-text: #8a919b;
+
+  /* Typography */
+  --font-display: "Space Grotesk", system-ui, sans-serif;
+  --font-body: "Inter", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+}
+
+@layer base {
+  html {
+    color-scheme: dark;
+  }
+  body {
+    background-color: var(--color-background);
+    color: var(--color-on-background);
+    font-family: var(--font-body);
+    -webkit-font-smoothing: antialiased;
+  }
+  h1, h2, h3, h4 {
+    font-family: var(--font-display);
+  }
+  /* Visible, brand-colored keyboard focus */
+  :focus-visible {
+    outline: 2px solid var(--color-primary);
+    outline-offset: 2px;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+/* Ambient format glyph field (background of public + convert screens) */
+.format-glyph-field {
+  background-image:
+    radial-gradient(circle at 20% 20%, rgba(90,107,255,0.10), transparent 40%),
+    radial-gradient(circle at 80% 60%, rgba(255,90,95,0.07), transparent 40%),
+    radial-gradient(circle at 50% 85%, rgba(43,124,211,0.08), transparent 40%);
+}
+
+@keyframes morph-flow {
+  from {
+    background-position: 0 0;
+  }
+  to {
+    background-position: 100% 0;
+  }
+}
+
+@keyframes pulse-dot {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.4;
+  }
 }

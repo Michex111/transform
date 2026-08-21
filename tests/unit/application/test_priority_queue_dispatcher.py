@@ -18,6 +18,7 @@ def job() -> ConversionJob:
         job_id="job-1",
         conversion=ConversionType("pdf", "docx"),
         input_file="input.pdf",
+        object_key="uploads/input.pdf",
     )
 
 
