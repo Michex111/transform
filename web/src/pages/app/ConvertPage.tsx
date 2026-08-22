@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import { motion } from "motion/react";
 import { ArrowRight, UploadSimple, Swap } from "@phosphor-icons/react";
 import { api } from "@/api/client";
 import { useAuth } from "@/auth/AuthContext";
 import { useToast } from "@/auth/ToastContext";
 import { useJobs } from "@/jobs/JobsContext";
+import { cacheFileForJob } from "@/lib/fileCache";
 import { Button, Card, FormatMorph, FormatChip, ProgressBar, StatusBadge } from "@/components/ui";
 
 export function ConvertPage() {
@@ -13,10 +14,12 @@ export function ConvertPage() {
   const { addJob } = useJobs();
   const { success, error } = useToast();
   const fileInput = useRef<HTMLInputElement>(null);
+  const location = useLocation();
+  const prefill = (location.state as { source?: string; target?: string } | null) ?? {};
 
   const [formats, setFormats] = useState<string[]>(["pdf", "docx", "xlsx", "png", "jpg", "mp3", "mp4", "txt"]);
-  const [from, setFrom] = useState("pdf");
-  const [to, setTo] = useState("docx");
+  const [from, setFrom] = useState(prefill.source ?? "pdf");
+  const [to, setTo] = useState(prefill.target ?? "docx");
   const [file, setFile] = useState<File | null>(null);
   const [busy, setBusy] = useState(false);
   const { jobs } = useJobs();
@@ -45,24 +48,15 @@ export function ConvertPage() {
       error("Choose a file first.");
       return;
     }
-    const ext = from;
 
     setBusy(true);
     try {
-      // 1. Create the conversion job.
-      const job = await client.createConversion({
-        source_format: from,
-        target_format: to,
-        input_key: file.name,
-      });
-      // 2. Create an upload session.
-      const upload = await client.createUploadSession({ file_extension: ext, file_name: file.name });
-      // 3. Upload bytes directly to the presigned URL.
-      //    No Content-Type header: the URL is signed without one, so sending
-      //    it would cause a 403 SignatureDoesNotMatch on B2/S3.
-      await client.putToPresignedUrl(upload.upload_url, file);
-      // 4. Verify upload completion and enqueue the job.
-      await client.verifyUpload(upload.upload_id, job.job_id);
+      // Run the full conversion flow: create job, upload file, verify/enqueue.
+      const job = await client.convertWithFile(from, to, file);
+
+      // Cache the file against the job id so a later retry can re-upload it
+      // without the user re-selecting the file.
+      cacheFileForJob(job.job_id, { file, source: from, target: to });
 
       addJob({
         ...job,

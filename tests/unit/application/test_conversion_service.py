@@ -161,3 +161,89 @@ def test_submit_conversion_job_propagates_queue_failure(
 
     with pytest.raises(RuntimeError, match="queue unavailable"):
         asyncio.run(service.push_conversion_job(conversion_job))
+
+
+def test_retry_conversion_job_resets_failed_job_and_reenqueues(
+    conversion_job,
+    fake_queue_port,
+    fake_repository_port,
+    converter_registry,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.application.exceptions.conversion_job_exception import InvalidConversionJobError
+    from src.domain.conversions.value_object.job_status import JobStatus
+    from src.domain.conversions.entities.conversion_job import ConversionJob
+
+    monkeypatch.setattr(conversion_service_module, "get_registry", lambda: converter_registry)
+    service = ConversionService(queue_port=fake_queue_port, db_repository=fake_repository_port)
+
+    # Store a FAILED job with an object_key (as a real failed job would have).
+    failed = ConversionJob(
+        job_id=conversion_job.job_id,
+        conversion=conversion_job.conversion,
+        input_file=conversion_job.input_file,
+        object_key="uploads/input.pdf",
+        status=JobStatus.FAILED,
+        error_message="boom",
+        user_id=conversion_job.user_id,
+    )
+    asyncio.run(fake_repository_port.save_conversion_job(failed))
+    fake_queue_port.pending.clear()
+
+    returned = asyncio.run(service.retry_conversion_job(failed.job_id, failed.user_id))
+
+    # The service returns the retried job directly (no extra DB fetch needed).
+    assert returned is failed
+    assert returned.status == JobStatus.PENDING
+    assert returned.error_message is None
+    assert returned.object_key == "uploads/input.pdf"
+    # The stored job is reset to PENDING with error cleared and re-enqueued.
+    stored = fake_repository_port.job_table[failed.job_id]
+    assert stored.status == JobStatus.PENDING
+    assert stored.error_message is None
+    assert stored.object_key == "uploads/input.pdf"
+    assert len(fake_queue_port.pushed_jobs) == 1
+    assert fake_queue_port.pushed_jobs[0].object_key == "uploads/input.pdf"
+
+
+def test_retry_conversion_job_raises_when_job_not_owned(
+    conversion_job,
+    fake_queue_port,
+    fake_repository_port,
+    converter_registry,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.application.exceptions.conversion_job_exception import InvalidConversionJobError
+    from src.domain.conversions.value_object.job_status import JobStatus
+    from src.domain.conversions.entities.conversion_job import ConversionJob
+
+    monkeypatch.setattr(conversion_service_module, "get_registry", lambda: converter_registry)
+    service = ConversionService(queue_port=fake_queue_port, db_repository=fake_repository_port)
+
+    failed = ConversionJob(
+        job_id=conversion_job.job_id,
+        conversion=conversion_job.conversion,
+        input_file=conversion_job.input_file,
+        object_key="uploads/input.pdf",
+        status=JobStatus.FAILED,
+        user_id=7,
+    )
+    asyncio.run(fake_repository_port.save_conversion_job(failed))
+
+    with pytest.raises(InvalidConversionJobError, match="Job not found"):
+        asyncio.run(service.retry_conversion_job(failed.job_id, user_id=999))
+
+
+def test_retry_conversion_job_raises_when_job_missing(
+    fake_queue_port,
+    fake_repository_port,
+    converter_registry,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.application.exceptions.conversion_job_exception import InvalidConversionJobError
+
+    monkeypatch.setattr(conversion_service_module, "get_registry", lambda: converter_registry)
+    service = ConversionService(queue_port=fake_queue_port, db_repository=fake_repository_port)
+
+    with pytest.raises(InvalidConversionJobError, match="Job not found"):
+        asyncio.run(service.retry_conversion_job("missing", user_id=None))

@@ -75,3 +75,44 @@ def test_fail_raises_if_job_already_completed(conversion_job: ConversionJob) -> 
 
     with pytest.raises(InvalidStateTransition):
         conversion_job.fail("late failure")
+
+
+def test_retry_resets_failed_job_to_pending_keeping_object_key(conversion_job: ConversionJob) -> None:
+    conversion_job.object_key = "uploads/input.pdf"
+    conversion_job.pending_processing()
+    conversion_job.start_processing()
+    conversion_job.fail("transient error")
+    conversion_job.set_compute_result(duration_ms=500, credits=3)
+
+    conversion_job.retry()
+
+    assert conversion_job.status == JobStatus.PENDING
+    assert conversion_job.error_message is None
+    assert conversion_job.output_file is None
+    assert conversion_job.compute_duration_ms == 0
+    assert conversion_job.credits_used == 0
+    # The input object key is preserved so the worker reuses the existing file.
+    assert conversion_job.object_key == "uploads/input.pdf"
+
+
+@pytest.mark.parametrize(
+    "status",
+    [JobStatus.PENDING, JobStatus.PROCESSING, JobStatus.COMPLETED, JobStatus.AWAITING_UPLOAD],
+)
+def test_retry_raises_when_job_is_not_failed(
+    conversion_job: ConversionJob,
+    status: JobStatus,
+) -> None:
+    conversion_job.status = status
+    conversion_job.object_key = "uploads/input.pdf"
+
+    with pytest.raises(InvalidStateTransition):
+        conversion_job.retry()
+
+
+def test_retry_raises_without_object_key(conversion_job: ConversionJob) -> None:
+    conversion_job.status = JobStatus.FAILED
+    conversion_job.object_key = ""
+
+    with pytest.raises(InvalidStateTransition, match="object_key"):
+        conversion_job.retry()

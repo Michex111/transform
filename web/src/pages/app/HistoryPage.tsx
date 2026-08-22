@@ -1,18 +1,71 @@
 import { useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { Download, ArrowCounterClockwise } from "@phosphor-icons/react";
-import { useJobs } from "@/jobs/JobsContext";
+import { useJobs, type UiJob } from "@/jobs/JobsContext";
 import { useAuth } from "@/auth/AuthContext";
+import { useToast } from "@/auth/ToastContext";
+import { getCachedFile, dropCachedFile } from "@/lib/fileCache";
 import { Card, FormatChip, StatusBadge } from "@/components/ui";
 import { formatDateTime } from "@/lib/format";
 
 const FILTERS = ["pdf", "docx", "xlsx", "png", "mp3", "mp4"] as const;
 
 export function HistoryPage() {
-  const { jobs } = useJobs();
+  const { jobs, updateJob } = useJobs();
   const { api: client } = useAuth();
+  const { success, error } = useToast();
+  const navigate = useNavigate();
   const [format, setFormat] = useState<string | null>(null);
   const [status, setStatus] = useState<string>("all");
+
+  async function handleDownload(jobId: string) {
+    try {
+      await client.downloadConvertedFile(jobId);
+    } catch (err) {
+      error(err instanceof Error ? err.message : "Could not download file");
+    }
+  }
+
+  async function handleRetry(job: UiJob) {
+    // 1. If the input object is gone from storage, fall back to a full
+    //    re-upload via the normal conversion route.
+    const exists = await client.objectExists(job.object_key || job.input_file);
+    if (!exists) {
+      const cached = getCachedFile(job.job_id);
+      if (cached) {
+        try {
+          const newJob = await client.convertWithFile(cached.source, cached.target, cached.file);
+          updateJob(job.job_id, {
+            ...newJob,
+            fileName: cached.file.name,
+            status: "PENDING",
+            progress: 0,
+            createdAt: new Date().toISOString(),
+          });
+          dropCachedFile(job.job_id);
+          success("Input file was missing — re-uploaded and re-queued.");
+        } catch (err) {
+          error(err instanceof Error ? err.message : "Could not re-upload file");
+        }
+        return;
+      }
+      // No cached file — send the user to Convert pre-filled.
+      navigate("/app/convert", {
+        state: { source: job.source_format, target: job.target_format },
+      });
+      error("The input file is no longer in storage. Re-select it to convert.");
+      return;
+    }
+
+    // 2. Input still exists — re-enqueue server-side without re-uploading.
+    try {
+      const updated = await client.retryJob(job.job_id);
+      updateJob(job.job_id, { status: "PENDING", progress: 0, output_file: updated.output_file, download_url: updated.download_url });
+      success("Conversion re-queued — tracking it now.");
+    } catch (err) {
+      error(err instanceof Error ? err.message : "Could not retry conversion");
+    }
+  }
 
   const filtered = useMemo(() => {
     return jobs.filter((j) => {
@@ -97,21 +150,21 @@ export function HistoryPage() {
                     {formatDateTime(job.createdAt)}
                   </span>
                   {job.status === "COMPLETED" && (
-                    <a
-                      href={client.getJobDownloadUrl(job.job_id)}
-                      className="text-muted hover:text-primary"
+                    <button
+                      onClick={() => handleDownload(job.job_id)}
+                      className="text-muted transition-transform hover:scale-110 hover:text-primary"
                       aria-label="Download"
                     >
                       <Download size={18} />
-                    </a>
+                    </button>
                   )}
                   {job.status === "FAILED" && (
-                    <Link
-                      to="/app/convert"
-                      className="inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
+                    <button
+                      onClick={() => handleRetry(job)}
+                      className="inline-flex items-center gap-1 text-xs font-medium text-primary transition-transform hover:scale-105 hover:underline"
                     >
                       <ArrowCounterClockwise size={14} /> Retry
-                    </Link>
+                    </button>
                   )}
                 </div>
               </li>

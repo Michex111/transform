@@ -121,3 +121,5 @@ async def refresh_access_token(
 @router.get("/me", response_model=UserResponse)
 async def get_me(current_user: CurrentUser) -> UserResponse:
     return UserResponse.model_validate(current_user)
+
+

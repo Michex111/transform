@@ -84,6 +84,7 @@ export interface ConversionJobResponse {
   target_format: string
   input_file: string
   output_file: string | null
+  object_key: string | null
   download_url: string | null
 }
 

@@ -1,5 +1,5 @@
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
-import { AnimatePresence, motion } from "motion/react";
+import { motion } from "motion/react";
 import {
   ChartBar,
   ArrowsClockwise,
@@ -97,17 +97,19 @@ export function AppShell() {
       {/* Main content — only this animates between routes */}
       <div className="flex min-w-0 flex-1 flex-col">
         <main className="flex-1 px-4 py-6 sm:px-6 lg:px-8">
-          <AnimatePresence mode="wait" initial={false}>
-            <motion.div
-              key={location.pathname}
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -8 }}
-              transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
-            >
-              <Outlet />
-            </motion.div>
-          </AnimatePresence>
+          {/* Animate each page in on mount. We deliberately do NOT use
+              AnimatePresence mode="wait" here: when SSE job updates or the
+              Queue's layout animations re-render the exiting page, the exit
+              can get interrupted and mode="wait" never mounts the new page
+              (blank screen). Mounting-only animation always renders. */}
+          <motion.div
+            key={location.pathname}
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
+          >
+            <Outlet />
+          </motion.div>
         </main>
 
         {/* Mobile bottom nav */}

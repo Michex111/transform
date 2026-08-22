@@ -28,6 +28,14 @@ export function DashboardPage() {
     };
   }, [error]);
 
+  async function handleDownload(jobId: string) {
+    try {
+      await api.downloadConvertedFile(jobId);
+    } catch (err) {
+      error(err instanceof Error ? err.message : "Could not download file");
+    }
+  }
+
   const recent = useMemo(() => jobs.slice(0, 5), [jobs]);
 
   const total = stats?.conversion_stats.total_jobs ?? jobs.length;
@@ -109,13 +117,13 @@ export function DashboardPage() {
                   {formatDateTime(job.createdAt)}
                 </span>
                 {job.status === "COMPLETED" && (
-                  <a
-                    href={api.getJobDownloadUrl(job.job_id)}
+                  <button
+                    onClick={() => handleDownload(job.job_id)}
                     className="text-muted transition-colors hover:scale-110 hover:text-primary"
                     aria-label="Download"
                   >
                     <Download size={18} />
-                  </a>
+                  </button>
                 )}
               </motion.li>
             ))}

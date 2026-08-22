@@ -66,3 +66,36 @@ class ConversionService:
         """
         await self.db_repository.update_conversion_job(job)
 
+    async def retry_conversion_job(
+        self,
+        job_id: str,
+        user_id: int | None,
+        tier: SubscriptionTier = SubscriptionTier.FREE,
+    ) -> ConversionJob:
+        """Re-enqueue a failed job without re-uploading its input file.
+
+        The input object is already stored at ``object_key``, so retrying only
+        resets the job to PENDING and pushes it back to the queue. The worker
+        downloads the existing object and tries again.
+
+        Raises:
+            InvalidConversionJobError: If the job does not exist, is not owned
+                by the caller, or is not in a retryable (FAILED) state.
+        """
+        job = await self.db_repository.get_conversion_job(job_id)
+        if job is None:
+            raise InvalidConversionJobError("Job not found")
+        if job.user_id is not None and job.user_id != user_id:
+            raise InvalidConversionJobError("Job not found")
+
+        # Reset FAILED -> PENDING (keeps object_key so the existing file is reused).
+        job.retry()
+        await self.db_repository.update_conversion_job(job)
+
+        # Re-enqueue with the same object_key.
+        if self.queue_dispatcher is not None:
+            await self.queue_dispatcher.dispatch(job, tier=tier)
+        else:
+            await self.queue_port.publish_job(job)
+        return job
+
