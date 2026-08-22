@@ -67,6 +67,25 @@ class TransferService:
         session.status = "completed"
         return session
 
+    async def create_download_url(
+        self,
+        object_key: str,
+        *,
+        expires_in_minutes: int | None = None,
+    ) -> str:
+        """Generate a time-limited pre-signed URL for downloading an object.
+
+        Args:
+            object_key: The key of the stored object to download.
+            expires_in_minutes: URL validity in minutes. Defaults to the
+                service's configured TTL.
+
+        Returns:
+            A pre-signed GET URL the client can use to download the object.
+        """
+        ttl_minutes = expires_in_minutes or int(self._ttl.total_seconds() // 60)
+        return self._storage.generate_get_url(object_key, ttl_minutes)
+
     def _generate_object_key(self, job_id: str, file_extension: str) -> str:
         """
         Creates a secure, collision-resistant object path.

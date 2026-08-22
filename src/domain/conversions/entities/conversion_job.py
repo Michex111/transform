@@ -41,6 +41,23 @@ class ConversionJob:
         self.error_message = error_message
         self.status = JobStatus.FAILED
 
+    def retry(self):
+        """Re-enqueue a failed job without re-uploading its input file.
+
+        The input object is already stored at ``object_key``, so we only reset
+        the job state back to PENDING and clear the previous failure. The
+        worker will download the existing object and try again.
+        """
+        if self.status != JobStatus.FAILED:
+            raise InvalidStateTransition(f"Cannot retry job from status {self.status}")
+        if not self.object_key:
+            raise InvalidStateTransition("Cannot retry a job without an object_key set")
+        self.status = JobStatus.PENDING
+        self.error_message = None
+        self.output_file = None
+        self.compute_duration_ms = 0
+        self.credits_used = 0
+
     def set_compute_result(self, *, duration_ms: int, credits: int) -> None:
         """Record the actual compute time and credits charged."""
         if duration_ms < 0:

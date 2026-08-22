@@ -1,8 +1,11 @@
 import { useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { LayoutGroup, motion } from "motion/react";
 import { Download, ArrowCounterClockwise } from "@phosphor-icons/react";
-import { useJobs } from "@/jobs/JobsContext";
+import { useJobs, type UiJob } from "@/jobs/JobsContext";
 import { useAuth } from "@/auth/AuthContext";
+import { useToast } from "@/auth/ToastContext";
+import { getCachedFile, dropCachedFile } from "@/lib/fileCache";
 import { Card, FormatChip, ProgressBar, StatusBadge } from "@/components/ui";
 import { formatDateTime } from "@/lib/format";
 
@@ -25,9 +28,60 @@ const STATUS_ORDER: Record<string, number> = {
 };
 
 export function QueuePage() {
-  const { jobs } = useJobs();
+  const { jobs, updateJob } = useJobs();
   const { api: client } = useAuth();
+  const { success, error } = useToast();
+  const navigate = useNavigate();
   const [sort, setSort] = useState<SortKey>("newest");
+
+  async function handleDownload(jobId: string) {
+    try {
+      await client.downloadConvertedFile(jobId);
+    } catch (err) {
+      error(err instanceof Error ? err.message : "Could not download file");
+    }
+  }
+
+  async function handleRetry(job: UiJob) {
+    // 1. If the input object is gone from storage, fall back to a full
+    //    re-upload via the normal conversion route.
+    const exists = await client.objectExists(job.object_key || job.input_file);
+    if (!exists) {
+      const cached = getCachedFile(job.job_id);
+      if (cached) {
+        try {
+          const newJob = await client.convertWithFile(cached.source, cached.target, cached.file);
+          updateJob(job.job_id, {
+            ...newJob,
+            fileName: cached.file.name,
+            status: "PENDING",
+            progress: 0,
+            createdAt: new Date().toISOString(),
+          });
+          dropCachedFile(job.job_id);
+          success("Input file was missing — re-uploaded and re-queued.");
+        } catch (err) {
+          error(err instanceof Error ? err.message : "Could not re-upload file");
+        }
+        return;
+      }
+      // No cached file — send the user to Convert pre-filled.
+      navigate("/app/convert", {
+        state: { source: job.source_format, target: job.target_format },
+      });
+      error("The input file is no longer in storage. Re-select it to convert.");
+      return;
+    }
+
+    // 2. Input still exists — re-enqueue server-side without re-uploading.
+    try {
+      const updated = await client.retryJob(job.job_id);
+      updateJob(job.job_id, { status: "PENDING", progress: 0, output_file: updated.output_file, download_url: updated.download_url });
+      success("Conversion re-queued — tracking it now.");
+    } catch (err) {
+      error(err instanceof Error ? err.message : "Could not retry conversion");
+    }
+  }
 
   const active = jobs.filter((j) => j.status === "PROCESSING" || j.status === "PENDING").length;
 
@@ -46,11 +100,6 @@ export function QueuePage() {
         return arr.sort((a, b) => a.input_file.length - b.input_file.length);
     }
   }, [jobs, sort]);
-
-  function retry() {
-    // Simplest reliable retry: open the Convert screen.
-    window.location.href = "/app/convert";
-  }
 
   return (
     <div className="mx-auto max-w-5xl space-y-6">
@@ -134,18 +183,18 @@ export function QueuePage() {
                   </span>
                   <div className="flex items-center gap-2">
                     {job.status === "COMPLETED" && (
-                      <a
-                        href={client.getJobDownloadUrl(job.job_id)}
+                      <button
+                        onClick={() => handleDownload(job.job_id)}
                         className="text-muted transition-transform hover:scale-110 hover:text-primary"
                         aria-label="Download"
                         title="Download"
                       >
                         <Download size={18} />
-                      </a>
+                      </button>
                     )}
                     {job.status === "FAILED" && (
                       <motion.button
-                        onClick={retry}
+                        onClick={() => handleRetry(job)}
                         whileHover={{ rotate: -180 }}
                         transition={{ type: "spring", stiffness: 200, damping: 15 }}
                         className="text-muted hover:text-primary"

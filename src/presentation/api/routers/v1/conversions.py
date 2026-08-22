@@ -8,12 +8,10 @@ from src.domain.conversions.exceptions import InvalidConversion
 from src.domain.conversions.value_object.conversion_type import ConversionType
 from src.application.exceptions.conversion_job_exception import InvalidConversionJobError
 from src.application.services.conversion_service import ConversionService
+from src.application.services.file_transfer_service import TransferService
 from src.infrastructure.adapters.repository.sql_conversion_job_repo import SQLConversionJobRepository
 from src.infrastructure.adapters.security.encryption import FileEncryptionService
-from src.infrastructure.adapters.storage.minio_storage_adapter import (
-    MinioFileStorageAdapter,
-    MinioUrlStorageAdapter,
-)
+from src.infrastructure.adapters.storage.minio_storage_adapter import MinioFileStorageAdapter
 from src.infrastructure.converters.converter_registry import get_registry
 from src.presentation.api.dependencies.auth_dependencies import CurrentUser
 from src.presentation.api.dependencies.download_stream import iter_decrypted_object
@@ -22,7 +20,7 @@ from src.presentation.api.dependencies.service_dependencies import (
     get_conversion_service,
     get_encryption_service,
     get_minio_download_adapter,
-    get_minio_url_storage,
+    get_transfer_service,
 )
 from src.presentation.schemas.conversion import (
     ConversionJobResponse,
@@ -95,7 +93,7 @@ async def get_conversion_job(
     job_id: str,
     current_user: CurrentUser,
     repository: Annotated[SQLConversionJobRepository, Depends(get_conversion_repository)],
-    storage: Annotated[MinioUrlStorageAdapter, Depends(get_minio_url_storage)],
+    transfer_service: Annotated[TransferService, Depends(get_transfer_service)],
     encryption_service: Annotated[FileEncryptionService | None, Depends(get_encryption_service)],
 ) -> ConversionJobResponse:
     job = await repository.get_conversion_job(job_id)
@@ -112,9 +110,34 @@ async def get_conversion_job(
             # The stored object is ciphertext; serve it decrypted via the API.
             download_url = f"/api/conversions/jobs/{job_id}/download"
         else:
-            download_url = storage.generate_get_url(job.output_file, expires_in_minutes=15)
+            # Pre-signed GET URL via the transfer service + storage URL gateway.
+            download_url = await transfer_service.create_download_url(
+                job.output_file, expires_in_minutes=15
+            )
 
     return _to_response(job, download_url=download_url)
+
+
+@router.post("/jobs/{job_id}/retry", response_model=ConversionJobResponse)
+async def retry_conversion_job(
+    job_id: str,
+    current_user: CurrentUser,
+    conversion_service: Annotated[ConversionService, Depends(get_conversion_service)],
+) -> ConversionJobResponse:
+    """Retry a failed job without re-uploading its input file.
+
+    The input object is already in object storage at the job's ``object_key``,
+    so retrying just resets the job to PENDING and re-enqueues it. The worker
+    downloads the existing file and tries again.
+    """
+    try:
+        job = await conversion_service.retry_conversion_job(job_id, current_user.id)
+    except InvalidConversionJobError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+
+    return _to_response(job)
 
 
 @router.get("/jobs/{job_id}/download")

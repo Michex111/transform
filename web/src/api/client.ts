@@ -1,3 +1,4 @@
+import { downloadFromUrl, saveBlob } from '@/lib/download'
 import type {
   APIKeyCreateRequest,
   APIKeyCreateResponse,
@@ -205,7 +206,82 @@ class ApiClient {
   createConversion = (body: CreateConversionJobRequest) =>
     this.request<ConversionJobResponse>('/conversions/jobs', { method: 'POST', body: JSON.stringify(body) })
   getJob = (id: string) => this.request<ConversionJobResponse>(`/conversions/jobs/${id}`)
+  /** Retry a failed job without re-uploading its input file. */
+  retryJob = (id: string) =>
+    this.request<ConversionJobResponse>(`/conversions/jobs/${id}/retry`, { method: 'POST' })
+
+  /**
+   * Run the full "normal conversion" flow with a file: create the job, open an
+   * upload session, PUT the bytes to the presigned URL, then verify/enqueue.
+   * Used for the retry fallback when a job's input object is gone from storage.
+   */
+  async convertWithFile(
+    source: string,
+    target: string,
+    file: Blob,
+    fileName?: string,
+  ): Promise<ConversionJobResponse> {
+    const name = fileName || (file instanceof File ? file.name : 'file')
+    // 1. Create the conversion job.
+    const job = await this.createConversion({
+      source_format: source,
+      target_format: target,
+      input_key: name,
+    })
+    // 2. Create an upload session.
+    const upload = await this.createUploadSession({ file_extension: source, file_name: name })
+    // 3. Upload bytes directly to the presigned URL (no Content-Type header —
+    //    the URL is signed without one, so sending it would 403 on B2/S3).
+    await this.putToPresignedUrl(upload.upload_url, file)
+    // 4. Verify upload completion and enqueue the job.
+    await this.verifyUpload(upload.upload_id, job.job_id)
+    return job
+  }
+
+  /**
+   * Check whether an object still exists in object storage. Returns true if it
+   * does, false if it's missing (used to decide retry vs. re-upload fallback).
+   */
+  async objectExists(objectKey: string | null): Promise<boolean> {
+    if (!objectKey) return false
+    try {
+      await this.getPresignedUrls({ object_keys: [objectKey] })
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  /** Relative path to the (auth-required) streaming download endpoint. */
   getJobDownloadUrl = (id: string) => `/conversions/jobs/${id}/download`
+
+  /**
+   * Download the converted output of a completed job.
+   *
+   * Fetches the job's download URL from the download endpoint (a pre-signed GET
+   * URL when encryption is off, or the authed streaming endpoint when on), then
+   * triggers a browser download of the converted file.
+   */
+  async downloadConvertedFile(jobId: string, filename?: string): Promise<void> {
+    const job = await this.getJob(jobId)
+    if (job.status !== 'COMPLETED' || !job.download_url) {
+      throw new Error('This conversion is not ready to download yet.')
+    }
+    const url = job.download_url
+
+    if (url.startsWith('http')) {
+      // Pre-signed GET URL — no auth header needed, download directly.
+      downloadFromUrl(url, filename ?? defaultJobFilename(job))
+    } else {
+      // Same-origin streaming endpoint — requires the Authorization header.
+      const res = await fetch(`${API_BASE}${url}`, {
+        headers: this.token ? { Authorization: `Bearer ${this.token}` } : {},
+      })
+      if (!res.ok) throw new Error(`Download failed (${res.status})`)
+      const blob = await res.blob()
+      saveBlob(blob, filename ?? defaultJobFilename(job))
+    }
+  }
 
   // ---- Files ----
   listFolders = () => this.request<FolderListResponse>('/v1/files/folders')
@@ -332,6 +408,12 @@ class ApiClient {
 
     return () => controller.abort()
   }
+}
+
+/** Build a sensible output filename for a completed job's download. */
+function defaultJobFilename(job: ConversionJobResponse): string {
+  const base = job.input_file.split('/').pop()?.replace(/\.[^.]+$/, '') || 'converted'
+  return `${base}.${job.target_format}`
 }
 
 export const api = new ApiClient()

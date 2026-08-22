@@ -291,14 +291,15 @@ async def download_file(
     file_id: str,
     current_user: CurrentUser,
     file_service: Annotated[FileService, Depends(get_file_service)],
-    storage: Annotated[MinioUrlStorageAdapter, Depends(get_minio_url_storage)],
+    transfer_service: Annotated[TransferService, Depends(get_transfer_service)],
     encryption_service: Annotated[FileEncryptionService | None, Depends(get_encryption_service)],
 ) -> FileDownloadResponse:
-    """Generate a time-limited download for the file.
+    """Generate a time-limited download URL for the file.
 
-    When encryption at rest is enabled the file is served decrypted through the
-    API (the presigned URL would expose ciphertext); otherwise a presigned GET
-    URL is returned for direct object-storage download.
+    Uses the transfer service + storage URL gateway to create a pre-signed GET
+    URL the frontend can download directly. When encryption at rest is enabled
+    the stored object is ciphertext, so the file is instead served decrypted
+    through the API streaming endpoint.
     """
     try:
         row = await file_service.get_file(current_user.id, file_id)
@@ -312,7 +313,9 @@ async def download_file(
         )
 
     expiry_minutes = 15
-    url = storage.generate_get_url(row.file_key, expires_in_minutes=expiry_minutes)
+    url = await transfer_service.create_download_url(
+        row.file_key, expires_in_minutes=expiry_minutes
+    )
     return FileDownloadResponse(
         download_url=url,
         expires_in_seconds=expiry_minutes * 60,

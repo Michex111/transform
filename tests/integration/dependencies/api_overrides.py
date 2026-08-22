@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 import src.presentation.api.main as api_main
 from src.application.dtos.upload_dto import UploadResponse
+from src.application.exceptions.conversion_job_exception import InvalidConversionJobError
 from src.domain.conversions.entities.conversion_job import ConversionJob
 from src.presentation.api.dependencies.auth_dependencies import get_current_user
 from src.presentation.api.dependencies.service_dependencies import (
@@ -25,6 +26,20 @@ class FakeConversionService:
 
     async def update_conversion_job(self, job: ConversionJob) -> None:
         del job  # object_key is already persisted on the in-memory object
+
+    async def retry_conversion_job(
+        self,
+        job_id: str,
+        user_id: int | None,
+        tier: "SubscriptionTier | None" = None,
+    ) -> ConversionJob:
+        del user_id
+        del tier
+        for job in self.created_jobs:
+            if job.job_id == job_id:
+                job.retry()
+                return job
+        raise InvalidConversionJobError("Job not found")
 
 
 class FakeTransferService:

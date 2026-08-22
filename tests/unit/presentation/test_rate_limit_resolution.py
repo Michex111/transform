@@ -70,10 +70,10 @@ def test_different_bearer_tokens_map_to_different_keys() -> None:
     mw._settings = type("S", (), {"RATE_LIMIT_AUTHENTICATED": 600})()  # type: ignore[assignment]
 
     key_a, _ = mw._resolve_limit(  # type: ignore[arg-type]
-        _FakeRequest("/api/v1/files", headers={"authorization": "Bearer token-a"})
+        _FakeRequest("/api/v1/files", headers={"authorization": "Bearer token-a"}) #type: ignore[arg-type]
     )
     key_b, _ = mw._resolve_limit(  # type: ignore[arg-type]
-        _FakeRequest("/api/v1/files", headers={"authorization": "Bearer token-b"})
+        _FakeRequest("/api/v1/files", headers={"authorization": "Bearer token-b"})  #type: ignore[arg-type]
     )
     assert key_a != key_b
 
@@ -117,7 +117,7 @@ def test_dispatch_applies_to_api_paths() -> None:
 
     mw = _middleware()
     # Force a limit of 1 so the single request is consumed and a second is blocked.
-    mw._settings = type("S", (), {"RATE_LIMIT_FREE": 1, "RATE_LIMIT_AUTH": 1})()
+    mw._settings = type("S", (), {"RATE_LIMIT_FREE": 1, "RATE_LIMIT_AUTH": 1})() # type: ignore[assignment]
 
     req = _FakeRequest("/api/conversions/supported")
 
@@ -128,7 +128,7 @@ def test_dispatch_applies_to_api_paths() -> None:
     async def _run() -> tuple[str, str]:
         first = await mw.dispatch(req, call_next)  # type: ignore[arg-type]
         second = await mw.dispatch(req, call_next)  # type: ignore[arg-type]
-        return first, second
+        return first, second    # type: ignore[no-untyped-return]
 
     first, second = asyncio.run(_run())
     assert first == "ok"

@@ -1,5 +1,5 @@
 import { Link, Outlet, useLocation } from "react-router-dom";
-import { AnimatePresence, motion } from "motion/react";
+import { motion } from "motion/react";
 import { Logo } from "@/components/ui";
 
 export function PublicLayout() {
@@ -7,18 +7,17 @@ export function PublicLayout() {
   return (
     <div className="min-h-screen bg-background text-on-background">
       <PublicHeader />
-      {/* Only the page content animates; header + footer stay mounted. */}
-      <AnimatePresence mode="wait" initial={false}>
-        <motion.div
-          key={location.pathname}
-          initial={{ opacity: 0, y: 10 }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: -8 }}
-          transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
-        >
-          <Outlet />
-        </motion.div>
-      </AnimatePresence>
+      {/* Only the page content animates; header + footer stay mounted.
+          Mounting-only animation (no AnimatePresence mode="wait") so pages
+          always render reliably. */}
+      <motion.div
+        key={location.pathname}
+        initial={{ opacity: 0, y: 10 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
+      >
+        <Outlet />
+      </motion.div>
       <PublicFooter />
     </div>
   );
