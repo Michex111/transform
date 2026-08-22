@@ -3,61 +3,29 @@ import { Link } from "react-router-dom";
 import { Check } from "@phosphor-icons/react";
 import { api } from "@/api/client";
 import { useToast } from "@/auth/ToastContext";
-import { Button } from "@/components/ui";
+import { Button, Skeleton } from "@/components/ui";
 import { Stagger, Item, Reveal } from "@/lib/motion";
 import type { SubscriptionPlanResponse } from "@/api/types";
 
 export function PricingPage() {
-  const [plans, setPlans] = useState<SubscriptionPlanResponse[] | null>(null);
+  const [plans, setPlans] = useState<SubscriptionPlanResponse[]>([]);
+  const [loading, setLoading] = useState(true);
   const { error } = useToast();
 
   useEffect(() => {
     let active = true;
+    setLoading(true);
     api
       .subscriptionPlans()
       .then((p) => active && setPlans(p))
-      .catch((e: Error) => error(e.message));
+      .catch((e: Error) => error(e.message))
+      .finally(() => active && setLoading(false));
     return () => {
       active = false;
     };
   }, [error]);
 
-  const fallback: SubscriptionPlanResponse[] = [
-    {
-      tier: "FREE",
-      name: "Free",
-      price_monthly_usd: null,
-      storage_gb: 5,
-      monthly_credits: 50,
-      features: ["5 GB storage", "50 conversions/month", "10 API calls/month", "Community support"],
-    },
-    {
-      tier: "PRO",
-      name: "Pro",
-      price_monthly_usd: 9.99,
-      storage_gb: 50,
-      monthly_credits: 500,
-      features: ["50 GB storage", "500 conversions/month", "100 API calls/month", "Priority support"],
-    },
-    {
-      tier: "PRO_PLUS",
-      name: "Pro Plus",
-      price_monthly_usd: 24.99,
-      storage_gb: 100,
-      monthly_credits: 2000,
-      features: ["100 GB storage", "2000 conversions/month", "1000 API calls/month", "Priority processing", "24/7 support"],
-    },
-    {
-      tier: "ENTERPRISE",
-      name: "Enterprise",
-      price_monthly_usd: null,
-      storage_gb: 1000,
-      monthly_credits: null,
-      features: ["Custom storage", "Unlimited conversions", "Unlimited API access", "Dedicated support", "SLA guarantee", "Custom integrations"],
-    },
-  ];
-
-  const list = plans ?? fallback;
+  const list = plans;
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-16 sm:px-6">
@@ -67,6 +35,22 @@ export function PricingPage() {
         <p className="mt-3 text-muted">Start free. Upgrade when the work demands it.</p>
       </Reveal>
 
+      {loading ? (
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <div key={i} className="relative flex h-full flex-col rounded-2xl border border-outline bg-surface p-6">
+              <Skeleton className="h-5 w-24" />
+              <Skeleton className="mt-3 h-8 w-20" />
+              <div className="mt-6 flex-1 space-y-2.5">
+                {Array.from({ length: 4 }).map((_, j) => (
+                  <Skeleton key={j} className="h-3 w-full" />
+                ))}
+              </div>
+              <Skeleton className="mt-6 h-10 w-full" />
+            </div>
+          ))}
+        </div>
+      ) : (
       <Stagger className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         {list.map((plan) => {
           const popular = plan.tier === "PRO_PLUS";
@@ -115,6 +99,7 @@ export function PricingPage() {
           );
         })}
       </Stagger>
+      )}
     </div>
   );
 }

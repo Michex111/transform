@@ -6,6 +6,8 @@ import { useJobs, type UiJob } from "@/jobs/JobsContext";
 import { useAuth } from "@/auth/AuthContext";
 import { useToast } from "@/auth/ToastContext";
 import { getCachedFile, dropCachedFile } from "@/lib/fileCache";
+import { Dropdown } from "@/components/Dropdown";
+import { ErrorButton } from "@/components/ErrorButton";
 import { Card, FormatChip, ProgressBar, StatusBadge } from "@/components/ui";
 import { formatDateTime } from "@/lib/format";
 
@@ -110,20 +112,16 @@ export function QueuePage() {
 
       {/* Toolbar */}
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <label className="flex items-center gap-2 text-sm text-muted">
-          Sort
-          <select
+        <div className="flex items-center gap-2 text-sm text-muted">
+          <Dropdown
+            label="Sort"
             value={sort}
-            onChange={(e) => setSort(e.target.value as SortKey)}
-            className="h-9 rounded-lg border border-outline-strong bg-surface-variant px-2 text-sm text-on-background focus:border-primary focus:outline-none"
-          >
-            {SORTS.map((s) => (
-              <option key={s.key} value={s.key}>
-                {s.label}
-              </option>
-            ))}
-          </select>
-        </label>
+            onChange={setSort}
+            options={SORTS.map((s) => ({ value: s.key, label: s.label }))}
+            ariaLabel="Sort conversions"
+            align="left"
+          />
+        </div>
         <span className="font-mono text-xs text-muted">{active} active</span>
       </div>
 
@@ -178,10 +176,10 @@ export function QueuePage() {
                       to={job.status === "FAILED" ? "var(--color-error)" : undefined}
                     />
                   </div>
-                  <span className="hidden text-right font-mono text-xs text-muted sm:block">
-                    {formatDateTime(job.createdAt)}
-                  </span>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center justify-end gap-3">
+                    <span className="hidden font-mono text-xs text-muted lg:block">
+                      {formatDateTime(job.createdAt)}
+                    </span>
                     {job.status === "COMPLETED" && (
                       <button
                         onClick={() => handleDownload(job.job_id)}
@@ -193,16 +191,19 @@ export function QueuePage() {
                       </button>
                     )}
                     {job.status === "FAILED" && (
-                      <motion.button
-                        onClick={() => handleRetry(job)}
-                        whileHover={{ rotate: -180 }}
-                        transition={{ type: "spring", stiffness: 200, damping: 15 }}
-                        className="text-muted hover:text-primary"
-                        aria-label="Retry"
-                        title="Retry"
-                      >
-                        <ArrowCounterClockwise size={18} />
-                      </motion.button>
+                      <>
+                        <ErrorButton message={job.errorMessage} />
+                        <motion.button
+                          onClick={() => handleRetry(job)}
+                          whileHover={{ rotate: -180 }}
+                          transition={{ type: "spring", stiffness: 200, damping: 15 }}
+                          className="text-muted hover:text-primary"
+                          aria-label="Retry"
+                          title="Retry"
+                        >
+                          <ArrowCounterClockwise size={18} />
+                        </motion.button>
+                      </>
                     )}
                   </div>
                 </motion.li>

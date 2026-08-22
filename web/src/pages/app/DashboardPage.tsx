@@ -6,7 +6,8 @@ import { api } from "@/api/client";
 import { useAuth } from "@/auth/AuthContext";
 import { useToast } from "@/auth/ToastContext";
 import { useJobs } from "@/jobs/JobsContext";
-import { Button, Card, FormatMorph, ProgressBar, StatusBadge } from "@/components/ui";
+import { Button, Card, FormatMorph, ProgressBar, StatusBadge, StatCardSkeleton, Skeleton } from "@/components/ui";
+import { ErrorButton } from "@/components/ErrorButton";
 import { Stagger, Item } from "@/lib/motion";
 import { formatBytes, formatDateTime } from "@/lib/format";
 import type { DashboardResponse } from "@/api/types";
@@ -16,13 +17,16 @@ export function DashboardPage() {
   const { jobs } = useJobs();
   const { error } = useToast();
   const [stats, setStats] = useState<DashboardResponse | null>(null);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     let active = true;
+    setLoading(true);
     api
       .dashboard()
       .then((d) => active && setStats(d))
-      .catch((e: Error) => error(e.message));
+      .catch((e: Error) => error(e.message))
+      .finally(() => active && setLoading(false));
     return () => {
       active = false;
     };
@@ -61,25 +65,33 @@ export function DashboardPage() {
       </motion.div>
 
       {/* Stat cards */}
-      <Stagger className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        <Item><StatCard icon={Gauge} label="Total conversions" value={String(total)} /></Item>
-        <Item><StatCard icon={Download} label="Success rate" value={`${successRate}%`} /></Item>
-        <Item>
-          <StatCard
-            icon={Coins}
-            label="Credits remaining"
-            value={stats ? String(stats.credit_balance) : "—"}
-          />
-        </Item>
-        <Item>
-          <StatCard
-            icon={HardDrives}
-            label="Storage used"
-            value={stats ? formatBytes(stats.storage_stats.used_bytes) : "—"}
-            footer={<ProgressBar value={storagePct} from="var(--color-primary)" />}
-          />
-        </Item>
-      </Stagger>
+      {loading ? (
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <StatCardSkeleton key={i} />
+          ))}
+        </div>
+      ) : (
+        <Stagger className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <Item><StatCard icon={Gauge} label="Total conversions" value={String(total)} /></Item>
+          <Item><StatCard icon={Download} label="Success rate" value={`${successRate}%`} /></Item>
+          <Item>
+            <StatCard
+              icon={Coins}
+              label="Credits remaining"
+              value={String(stats?.credit_balance ?? 0)}
+            />
+          </Item>
+          <Item>
+            <StatCard
+              icon={HardDrives}
+              label="Storage used"
+              value={formatBytes(stats?.storage_stats.used_bytes ?? 0)}
+              footer={<ProgressBar value={storagePct} from="var(--color-primary)" />}
+            />
+          </Item>
+        </Stagger>
+      )}
 
       {/* Recent conversions */}
       <Card className="overflow-hidden">
@@ -90,7 +102,17 @@ export function DashboardPage() {
           </Link>
         </div>
 
-        {recent.length === 0 ? (
+        {loading ? (
+          <div className="space-y-3 px-5 py-4">
+            {Array.from({ length: 3 }).map((_, i) => (
+              <div key={i} className="flex items-center gap-4">
+                <Skeleton className="h-4 flex-1" />
+                <Skeleton className="h-6 w-24" />
+                <Skeleton className="h-5 w-16" />
+              </div>
+            ))}
+          </div>
+        ) : recent.length === 0 ? (
           <div className="px-5 py-16 text-center">
             <p className="font-display text-lg font-semibold">No conversions yet</p>
             <p className="mt-1 text-sm text-muted">Add your first file to get started.</p>
@@ -125,6 +147,7 @@ export function DashboardPage() {
                     <Download size={18} />
                   </button>
                 )}
+                {job.status === "FAILED" && <ErrorButton message={job.errorMessage} />}
               </motion.li>
             ))}
           </ul>

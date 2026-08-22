@@ -1,22 +1,29 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { Download, ArrowCounterClockwise } from "@phosphor-icons/react";
 import { useJobs, type UiJob } from "@/jobs/JobsContext";
 import { useAuth } from "@/auth/AuthContext";
 import { useToast } from "@/auth/ToastContext";
 import { getCachedFile, dropCachedFile } from "@/lib/fileCache";
+import { Dropdown } from "@/components/Dropdown";
+import { ErrorButton } from "@/components/ErrorButton";
 import { Card, FormatChip, StatusBadge } from "@/components/ui";
 import { formatDateTime } from "@/lib/format";
 
 const FILTERS = ["pdf", "docx", "xlsx", "png", "mp3", "mp4"] as const;
 
 export function HistoryPage() {
-  const { jobs, updateJob } = useJobs();
+  const { jobs, updateJob, refresh } = useJobs();
   const { api: client } = useAuth();
   const { success, error } = useToast();
   const navigate = useNavigate();
   const [format, setFormat] = useState<string | null>(null);
   const [status, setStatus] = useState<string>("all");
+
+  // Load persisted history from the server on mount.
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
 
   async function handleDownload(jobId: string) {
     try {
@@ -99,18 +106,21 @@ export function HistoryPage() {
             </button>
           ))}
         </div>
-        <select
-          value={status}
-          onChange={(e) => setStatus(e.target.value)}
-          className="ml-auto h-9 rounded-lg border border-outline-strong bg-surface-variant px-2 text-sm text-on-background focus:border-primary focus:outline-none"
-          aria-label="Filter by status"
-        >
-          <option value="all">All statuses</option>
-          <option value="COMPLETED">Ready</option>
-          <option value="PROCESSING">Converting</option>
-          <option value="PENDING">Queued</option>
-          <option value="FAILED">Failed</option>
-        </select>
+        <div className="ml-auto">
+          <Dropdown
+            value={status}
+            onChange={setStatus}
+            ariaLabel="Filter by status"
+            align="right"
+            options={[
+              { value: "all", label: "All statuses" },
+              { value: "COMPLETED", label: "Ready" },
+              { value: "PROCESSING", label: "Converting" },
+              { value: "PENDING", label: "Queued" },
+              { value: "FAILED", label: "Failed" },
+            ]}
+          />
+        </div>
       </div>
 
       {/* Table */}
@@ -159,12 +169,15 @@ export function HistoryPage() {
                     </button>
                   )}
                   {job.status === "FAILED" && (
-                    <button
-                      onClick={() => handleRetry(job)}
-                      className="inline-flex items-center gap-1 text-xs font-medium text-primary transition-transform hover:scale-105 hover:underline"
-                    >
-                      <ArrowCounterClockwise size={14} /> Retry
-                    </button>
+                    <>
+                      <ErrorButton message={job.errorMessage} />
+                      <button
+                        onClick={() => handleRetry(job)}
+                        className="inline-flex items-center gap-1 text-xs font-medium text-primary transition-transform hover:scale-105 hover:underline"
+                      >
+                        <ArrowCounterClockwise size={14} /> Retry
+                      </button>
+                    </>
                   )}
                 </div>
               </li>

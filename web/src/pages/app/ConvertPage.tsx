@@ -2,11 +2,11 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { motion } from "motion/react";
 import { ArrowRight, UploadSimple, Swap } from "@phosphor-icons/react";
-import { api } from "@/api/client";
 import { useAuth } from "@/auth/AuthContext";
 import { useToast } from "@/auth/ToastContext";
 import { useJobs } from "@/jobs/JobsContext";
 import { cacheFileForJob } from "@/lib/fileCache";
+import { FormatPicker } from "@/components/FormatPicker";
 import { Button, Card, FormatMorph, FormatChip, ProgressBar, StatusBadge } from "@/components/ui";
 
 export function ConvertPage() {
@@ -17,31 +17,84 @@ export function ConvertPage() {
   const location = useLocation();
   const prefill = (location.state as { source?: string; target?: string } | null) ?? {};
 
-  const [formats, setFormats] = useState<string[]>(["pdf", "docx", "xlsx", "png", "jpg", "mp3", "mp4", "txt"]);
   const [from, setFrom] = useState(prefill.source ?? "pdf");
   const [to, setTo] = useState(prefill.target ?? "docx");
   const [file, setFile] = useState<File | null>(null);
   const [busy, setBusy] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
   const { jobs } = useJobs();
+
+  // Source → valid target formats from the backend conversion map.
+  const [conversionMap, setConversionMap] = useState<Record<string, string[]>>({});
 
   useEffect(() => {
     let active = true;
-    api
-      .supportedConversions()
-      .then((list) => {
-        if (!active || !list.length) return;
-        const fmts = Array.from(new Set(list.flatMap((c) => [c.source_format, c.target_format])));
-        if (fmts.length) setFormats(fmts);
-      })
+    client
+      .conversionMap()
+      .then((res) => active && setConversionMap(res.conversions))
       .catch(() => {
-        /* fall back to defaults */
+        /* fall back to un-restricted picker */
       });
     return () => {
       active = false;
     };
-  }, []);
+  }, [client]);
+
+  // The target formats currently allowed for the chosen source.
+  const allowedTargets = useMemo(() => conversionMap[from] ?? [], [conversionMap, from]);
+  // The source formats that have at least one valid target.
+  const allowedSources = useMemo(() => Object.keys(conversionMap), [conversionMap]);
+
+  // Keep `to` valid for the selected source, and keep `from` a valid source.
+  useEffect(() => {
+    if (allowedSources.length && !allowedSources.includes(from)) {
+      setFrom(allowedSources[0]);
+    }
+  }, [allowedSources, from]);
+
+  useEffect(() => {
+    if (allowedTargets.length && !allowedTargets.includes(to)) {
+      setTo(allowedTargets[0]);
+    }
+  }, [allowedTargets, to]);
 
   const inlineQueue = useMemo(() => jobs.filter((j) => j.status !== "COMPLETED" && j.status !== "FAILED").slice(0, 4), [jobs]);
+
+  // ---- Drag & drop ----
+  function onDragOver(e: React.DragEvent<HTMLDivElement>) {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+    setDragOver(true);
+  }
+
+  function onDragEnter(e: React.DragEvent<HTMLDivElement>) {
+    e.preventDefault();
+    setDragOver(true);
+  }
+
+  function onDragLeave(e: React.DragEvent<HTMLDivElement>) {
+    e.preventDefault();
+    // Only clear when leaving the zone itself (not a child).
+    if (e.currentTarget.contains(e.relatedTarget as Node)) return;
+    setDragOver(false);
+  }
+
+  function onDrop(e: React.DragEvent<HTMLDivElement>) {
+    e.preventDefault();
+    setDragOver(false);
+    const dropped = e.dataTransfer.files?.[0];
+    if (!dropped) return;
+    // Infer the source format from the file extension and switch to it if it's
+    // a valid source, so the job is created with the correct source format.
+    const ext = dropped.name.split(".").pop()?.toLowerCase();
+    if (ext && allowedSources.includes(ext)) {
+      setFrom(ext);
+    } else if (ext) {
+      error(`".${ext}" isn't a supported source format.`);
+      return;
+    }
+    setFile(dropped);
+  }
 
   async function startConversion() {
     if (!file) {
@@ -83,58 +136,63 @@ export function ConvertPage() {
 
       {/* Conversion panel */}
       <Card className="space-y-6 p-6">
-        {/* Format morph selector */}
-        <div className="flex items-center justify-center gap-3">
-          <label className="text-sm font-medium text-muted">From</label>
-          <select
-            value={from}
-            onChange={(e) => setFrom(e.target.value)}
-            className="h-10 rounded-lg border border-outline-strong bg-surface-variant px-3 font-mono text-sm font-semibold text-on-background focus:border-primary focus:outline-none"
-          >
-            {formats.map((f) => (
-              <option key={f} value={f}>
-                {f.toUpperCase()}
-              </option>
-            ))}
-          </select>
+        {/* Format picker: source → target with a swap control */}
+        <div className="flex items-center justify-center gap-6">
+          <div className="flex flex-col items-center gap-2">
+            <span className="text-xs font-medium uppercase tracking-wide text-muted">From</span>
+            <FormatPicker value={from} onChange={setFrom} ariaLabel="Choose source format" align="left" allowed={allowedSources} />
+          </div>
 
-          <FormatMorph from={from} to={to} animated />
+          <div className="flex flex-col items-center gap-1">
+            <motion.button
+              onClick={() => {
+                // Swap, then ensure the new target is valid for the new source.
+                const newFrom = to;
+                const newTo = from;
+                const targets = conversionMap[newFrom] ?? [];
+                setFrom(newFrom);
+                setTo(targets.includes(newTo) ? newTo : (targets[0] ?? newTo));
+              }}
+              aria-label="Swap formats"
+              className="flex h-9 w-9 items-center justify-center rounded-full border border-outline-strong bg-surface text-muted transition-colors hover:text-primary"
+              whileHover={{ rotate: 180 }}
+              transition={{ type: "spring", stiffness: 260, damping: 18 }}
+            >
+              <Swap size={16} />
+            </motion.button>
+            <span className="text-[10px] uppercase tracking-wide text-muted">To</span>
+          </div>
 
-          <label className="text-sm font-medium text-muted">To</label>
-          <select
-            value={to}
-            onChange={(e) => setTo(e.target.value)}
-            className="h-10 rounded-lg border border-outline-strong bg-surface-variant px-3 font-mono text-sm font-semibold text-on-background focus:border-primary focus:outline-none"
-          >
-            {formats.map((f) => (
-              <option key={f} value={f}>
-                {f.toUpperCase()}
-              </option>
-            ))}
-          </select>
+          <div className="flex flex-col items-center gap-2">
+            <span className="text-xs font-medium uppercase tracking-wide text-muted">To</span>
+            <FormatPicker value={to} onChange={setTo} ariaLabel="Choose target format" align="right" allowed={allowedTargets} />
+          </div>
+        </div>
 
-          <motion.button
-            onClick={() => {
-              setFrom(to);
-              setTo(from);
-            }}
-            aria-label="Swap formats"
-            className="text-muted transition-colors hover:text-primary"
-            whileHover={{ rotate: 180 }}
-            transition={{ type: "spring", stiffness: 260, damping: 18 }}
-          >
-            <Swap size={18} />
-          </motion.button>
+        <div className="flex justify-center">
+          <FormatMorph from={from} to={to} animated size="lg" />
         </div>
 
         {/* Drop zone */}
-        <motion.button
-          type="button"
+        <div
+          role="button"
+          tabIndex={0}
           onClick={() => fileInput.current?.click()}
-          className="flex w-full flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed border-outline-strong bg-surface-variant/40 p-10 text-center transition-colors hover:border-primary"
-          whileHover={{ scale: 1.01 }}
-          whileTap={{ scale: 0.99 }}
-          transition={{ type: "spring", stiffness: 300, damping: 20 }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              fileInput.current?.click();
+            }
+          }}
+          onDragOver={onDragOver}
+          onDragEnter={onDragEnter}
+          onDragLeave={onDragLeave}
+          onDrop={onDrop}
+          className={`flex w-full cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed p-10 text-center transition-colors ${
+            dragOver
+              ? "border-primary bg-primary-container/30"
+              : "border-outline-strong bg-surface-variant/40 hover:border-primary"
+          }`}
         >
           <motion.span
             animate={{ y: [0, -4, 0] }}
@@ -158,7 +216,7 @@ export function ConvertPage() {
             className="hidden"
             onChange={(e) => setFile(e.target.files?.[0] ?? null)}
           />
-        </motion.button>
+        </div>
 
         {/* Submit */}
         <div className="flex flex-col items-center gap-2">

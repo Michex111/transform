@@ -88,9 +88,26 @@ export interface ConversionJobResponse {
   download_url: string | null
 }
 
+/** Paginated list of a user's conversion history. */
+export interface ConversionHistoryResponse {
+  jobs: ConversionJobResponse[]
+  total: number
+  page: number
+  page_size: number
+}
+
 export interface SupportedConversion {
   source_format: string
   target_format: string
+}
+
+export interface ConversionMapResponse {
+  conversions: Record<string, string[]>
+}
+
+/** Map of every supported source format to its valid target formats. */
+export interface ConversionMap {
+  conversions: Record<string, string[]>
 }
 
 // ---- Files ----
@@ -142,6 +159,14 @@ export interface FolderListResponse {
   total: number
   page: number
   page_size: number
+}
+
+export interface FolderContentsResponse {
+  folder: FolderResponse
+  folders: FolderResponse[]
+  files: FileMetadataResponse[]
+  total_folders: number
+  total_files: number
 }
 
 // ---- Credits ----
