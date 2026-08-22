@@ -3,7 +3,7 @@ import { Copy, Key, Trash } from "@phosphor-icons/react";
 import { api } from "@/api/client";
 import { useAuth } from "@/auth/AuthContext";
 import { useToast } from "@/auth/ToastContext";
-import { Button, Card, Field } from "@/components/ui";
+import { Button, Card, Field, Skeleton } from "@/components/ui";
 import type { APIKeyListItem } from "@/api/types";
 
 export function SettingsPage() {
@@ -11,17 +11,20 @@ export function SettingsPage() {
   const { success, error } = useToast();
   const [email, setEmail] = useState(user?.email ?? "");
   const [keys, setKeys] = useState<APIKeyListItem[]>([]);
+  const [loading, setLoading] = useState(true);
   const [newKeyName, setNewKeyName] = useState("");
   const [revealedKey, setRevealedKey] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
+    setLoading(true);
     api
       .listApiKeys()
       .then((res) => active && setKeys(res.keys))
       .catch(() => {
         /* keys may be empty */
-      });
+      })
+      .finally(() => active && setLoading(false));
     return () => {
       active = false;
     };
@@ -126,7 +129,16 @@ export function SettingsPage() {
           </Button>
         </form>
 
-        {keys.length === 0 ? (
+        {loading ? (
+          <div className="space-y-3">
+            {Array.from({ length: 3 }).map((_, i) => (
+              <div key={i} className="flex items-center gap-3">
+                <Skeleton className="h-4 flex-1" />
+                <Skeleton className="h-4 w-16" />
+              </div>
+            ))}
+          </div>
+        ) : keys.length === 0 ? (
           <p className="text-sm text-muted">No API keys yet.</p>
         ) : (
           <ul className="divide-y divide-outline">

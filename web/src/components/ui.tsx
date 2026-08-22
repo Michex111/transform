@@ -2,6 +2,68 @@ import type { InputHTMLAttributes, ReactNode } from "react";
 import { motion, useReducedMotion, type HTMLMotionProps } from "motion/react";
 import { formatMeta, statusMeta } from "@/lib/format";
 
+/* ---------------- Skeleton (loading) ---------------- */
+
+/** A single shimmering gray block. */
+export function Skeleton({ className = "" }: { className?: string }) {
+  return (
+    <div
+      className={`relative overflow-hidden rounded-md bg-surface-variant ${className}`}
+      aria-hidden
+    >
+      <motion.div
+        className="absolute inset-0 bg-gradient-to-r from-transparent via-white/5 to-transparent"
+        animate={{ x: ["-100%", "100%"] }}
+        transition={{ duration: 1.4, repeat: Infinity, ease: "easeInOut" }}
+      />
+    </div>
+  );
+}
+
+/** Two lines of skeleton text (a label + a value). */
+export function SkeletonText({ lines = 2 }: { lines?: number }) {
+  return (
+    <div className="space-y-2">
+      {Array.from({ length: lines }).map((_, i) => (
+        <Skeleton key={i} className={i === lines - 1 ? "h-3 w-2/3" : "h-3 w-full"} />
+      ))}
+    </div>
+  );
+}
+
+/** A skeleton for a stat/analytics card. */
+export function StatCardSkeleton() {
+  return (
+    <div className="rounded-xl border border-outline bg-surface p-5">
+      <div className="mb-2 flex items-center gap-2">
+        <Skeleton className="h-4 w-4" />
+        <Skeleton className="h-3 w-24" />
+      </div>
+      <Skeleton className="h-8 w-16" />
+      <Skeleton className="mt-3 h-1.5 w-full" />
+    </div>
+  );
+}
+
+/** Centered page loader with an animated morph + label. */
+export function PageLoader({ label = "Loading…" }: { label?: string }) {
+  return (
+    <div className="flex min-h-[40vh] flex-col items-center justify-center gap-4">
+      <motion.span
+        className="inline-flex items-center gap-1.5"
+        aria-hidden
+        animate={{ opacity: [0.4, 1, 0.4] }}
+        transition={{ duration: 1.2, repeat: Infinity, ease: "easeInOut" }}
+      >
+        <span className="inline-flex h-7 items-center rounded-md bg-fmt-pdf/20 px-2 font-mono text-xs font-bold text-fmt-pdf">PDF</span>
+        <span className="block h-0.5 w-5 rounded-full bg-gradient-to-r from-fmt-pdf to-fmt-word" />
+        <span className="inline-flex h-7 items-center rounded-md bg-fmt-word/20 px-2 font-mono text-xs font-bold text-fmt-word">DOC</span>
+      </motion.span>
+      <p className="text-sm text-muted">{label}</p>
+    </div>
+  );
+}
+
 /* ---------------- Button ---------------- */
 
 type ButtonVariant = "primary" | "secondary" | "ghost" | "destructive";

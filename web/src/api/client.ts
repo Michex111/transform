@@ -5,7 +5,9 @@ import type {
   APIKeyListResponse,
   CancelSubscriptionResponse,
   CheckoutResponse,
+  ConversionHistoryResponse,
   ConversionJobResponse,
+  ConversionMapResponse,
   CreditBalanceResponse,
   CreditPricingResponse,
   CreditPurchaseRequest,
@@ -16,6 +18,7 @@ import type {
   FileDownloadResponse,
   FileListResponse,
   FileMetadataResponse,
+  FolderContentsResponse,
   FolderListResponse,
   FolderResponse,
   PresignedUrlResponse,
@@ -203,9 +206,16 @@ class ApiClient {
 
   // ---- Conversions ----
   supportedConversions = () => this.request<SupportedConversion[]>('/conversions/supported')
+  /** Map of source format -> valid target formats. */
+  conversionMap = () => this.request<ConversionMapResponse>('/conversions/supported/map')
   createConversion = (body: CreateConversionJobRequest) =>
     this.request<ConversionJobResponse>('/conversions/jobs', { method: 'POST', body: JSON.stringify(body) })
   getJob = (id: string) => this.request<ConversionJobResponse>(`/conversions/jobs/${id}`)
+  /** Paginated conversion history for the current user. */
+  conversionHistory = (page = 1, pageSize = 20) =>
+    this.request<ConversionHistoryResponse>(
+      `/conversions/history?page=${page}&page_size=${pageSize}`,
+    )
   /** Retry a failed job without re-uploading its input file. */
   retryJob = (id: string) =>
     this.request<ConversionJobResponse>(`/conversions/jobs/${id}/retry`, { method: 'POST' })
@@ -285,6 +295,9 @@ class ApiClient {
 
   // ---- Files ----
   listFolders = () => this.request<FolderListResponse>('/v1/files/folders')
+  /** Get the subfolders + files directly inside a folder. */
+  getFolderContents = (folderId: string) =>
+    this.request<FolderContentsResponse>(`/v1/files/folders/${folderId}`)
   createFolder = (name: string, parentId?: string | null) =>
     this.request<FolderResponse>('/v1/files/folders', {
       method: 'POST',
@@ -300,6 +313,11 @@ class ApiClient {
     this.request<FileListResponse>(`/v1/files${folderId ? `?folder_id=${encodeURIComponent(folderId)}` : ''}`)
   getFile = (id: string) => this.request<FileMetadataResponse>(`/v1/files/${id}`)
   deleteFile = (id: string) => this.request<void>(`/v1/files/${id}`, { method: 'DELETE' })
+  renameFile = (id: string, name: string) =>
+    this.request<FileMetadataResponse>(`/v1/files/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ name }),
+    })
   moveFile = (id: string, folderId: string | null) =>
     this.request<FileMetadataResponse>(`/v1/files/${id}/move`, {
       method: 'POST',

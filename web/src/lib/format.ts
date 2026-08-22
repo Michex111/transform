@@ -34,6 +34,17 @@ export function formatMeta(fmt: string): FormatMeta {
   };
 }
 
+/** Derive a file extension from a file name (or mime type fallback). */
+export function formatExt(fileName: string, mimeType?: string): string {
+  const fromName = fileName.split(".").pop()?.toLowerCase().trim();
+  if (fromName && fromName.length <= 5) return fromName;
+  if (mimeType) {
+    const fromMime = mimeType.split("/").pop()?.toLowerCase().trim();
+    if (fromMime) return fromMime === "jpeg" ? "jpg" : fromMime;
+  }
+  return "txt";
+}
+
 export type JobStatus = "AWAITING_UPLOAD" | "PENDING" | "PROCESSING" | "COMPLETED" | "FAILED";
 
 export interface StatusMeta {
