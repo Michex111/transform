@@ -35,6 +35,15 @@ class FileSizeLimitExceededError(FileSystemError):
         super().__init__(message)
 
 
+class FileTypeMismatchError(FileSystemError):
+    """The uploaded content's magic bytes do not match the claimed extension."""
+
+    status_code = 422
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+
+
 class FolderNameConflictError(FileSystemError):
     """A sibling folder with the same name already exists."""
 

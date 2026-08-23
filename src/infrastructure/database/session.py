@@ -38,12 +38,26 @@ def resolve_database_url() -> str:
 
 @lru_cache
 def get_engine():
-    # echo=False: never log query parameters (PII) in production; enable
-    # explicitly with SQL_ECHO=1 when debugging locally.
-    return create_async_engine(
-        resolve_database_url(),
-        echo=os.getenv("SQL_ECHO", "0") == "1",
-    )
+    url = resolve_database_url()
+    is_pooler = "pooler" in url or "neon.tech" in url
+    pool_kwargs: dict = {
+        "echo": os.getenv("SQL_ECHO", "0") == "1",
+        "pool_pre_ping": True,
+    }
+    if is_pooler:
+        # Neon (and PgBouncer-style) poolers close idle connections and reject
+        # long-lived prepared statements. Recycle connections ahead of the
+        # pooler's idle timeout and disable the asyncpg prepared-statement
+        # cache so a recycled connection never fails with a stale
+        # "connection is closed" / "prepared statement already exists" error.
+        pool_kwargs.update({
+            "pool_recycle": 300,  # recycle every 5 min (Neon idle timeout ~ few min)
+            "pool_timeout": 30,
+            "connect_args": {"prepared_statement_cache_size": 0},
+        })
+    else:
+        pool_kwargs["pool_recycle"] = 1800
+    return create_async_engine(url, **pool_kwargs)
 
 
 @lru_cache

@@ -1,4 +1,5 @@
 import logging
+from functools import lru_cache
 from typing import Annotated
 
 from fastapi import Depends
@@ -35,10 +36,24 @@ from src.infrastructure.database.session import get_db_session
 from src.infrastructure.redis.client import create_redis_client
 
 
-def get_job_queue_port() -> JobStream:
+@lru_cache
+def _shared_redis_client():
+    return create_redis_client(get_settings().REDIS_URL.get_secret_value())
+
+
+@lru_cache
+def _shared_minio_client() -> Minio:
     settings = get_settings()
-    redis_client = create_redis_client(settings.REDIS_URL.get_secret_value())
-    return JobStream(redis_client=redis_client)
+    return Minio(
+        endpoint=normalize_endpoint(settings.BACKBLAZE_ENDPOINT),
+        access_key=settings.BACKBLAZE_ACCESS_KEY.get_secret_value(),
+        secret_key=settings.BACKBLAZE_SECRET_KEY.get_secret_value(),
+        secure=settings.BACKBLAZE_USE_SSL,
+    )
+
+
+def get_job_queue_port() -> JobStream:
+    return JobStream(redis_client=_shared_redis_client())
 
 
 def get_conversion_repository(
@@ -88,9 +103,7 @@ def get_stripe_service() -> StripeService:
 
 
 def get_event_subscriber() -> JobEventSubscriber:
-    settings = get_settings()
-    redis_client = create_redis_client(settings.REDIS_URL.get_secret_value())
-    return JobEventSubscriber(redis_client=redis_client)
+    return JobEventSubscriber(redis_client=_shared_redis_client())
 
 
 def get_conversion_service(
@@ -110,14 +123,8 @@ def get_conversion_service(
 
 def get_minio_url_storage() -> MinioUrlStorageAdapter:
     settings = get_settings()
-    client = Minio(
-        endpoint=normalize_endpoint(settings.BACKBLAZE_ENDPOINT),
-        access_key=settings.BACKBLAZE_ACCESS_KEY.get_secret_value(),
-        secret_key=settings.BACKBLAZE_SECRET_KEY.get_secret_value(),
-        secure=settings.BACKBLAZE_USE_SSL,
-    )
     return MinioUrlStorageAdapter(
-        minio_client=client,
+        minio_client=_shared_minio_client(),
         bucket_name=settings.S3_BUCKET_NAME,
         ttl_minutes=settings.UPLOAD_URL_TTL_MINUTES,
     )
@@ -125,16 +132,9 @@ def get_minio_url_storage() -> MinioUrlStorageAdapter:
 
 def get_minio_download_adapter() -> MinioFileStorageAdapter:
     """File storage adapter capable of opening streaming object reads."""
-    settings = get_settings()
-    client = Minio(
-        endpoint=normalize_endpoint(settings.BACKBLAZE_ENDPOINT),
-        access_key=settings.BACKBLAZE_ACCESS_KEY.get_secret_value(),
-        secret_key=settings.BACKBLAZE_SECRET_KEY.get_secret_value(),
-        secure=settings.BACKBLAZE_USE_SSL,
-    )
     return MinioFileStorageAdapter(
-        bucket_name=settings.S3_BUCKET_NAME,
-        s3_client=client,
+        bucket_name=get_settings().S3_BUCKET_NAME,
+        s3_client=_shared_minio_client(),
     )
 
 
@@ -144,9 +144,19 @@ def get_encryption_service() -> FileEncryptionService | None:
 
 
 def get_session_cache() -> RedisSessionAdapter:
-    settings = get_settings()
-    redis_client = create_redis_client(settings.REDIS_URL.get_secret_value())
-    return RedisSessionAdapter(redis_client=redis_client)
+    return RedisSessionAdapter(redis_client=_shared_redis_client())
+
+
+def get_guest_token_cache() -> RedisSessionAdapter:
+    """Redis-backed store for guest access tokens.
+
+    Uses a distinct ``guest_token:`` prefix so guest token → job_id mappings
+    never collide with upload sessions (which live under ``upload_session:``).
+    """
+    return RedisSessionAdapter(
+        redis_client=_shared_redis_client(),
+        prefix="guest_token:",
+    )
 
 
 def get_transfer_service(

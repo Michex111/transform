@@ -11,7 +11,7 @@ from src.domain.subscriptions.value_object.tier import SubscriptionTier
 from tests.fakes.fake_credit_port import FakeCreditPort
 from tests.fakes.fake_logger import FakeLogger
 from workers.converter_workers.context.worker_context import WorkerContext
-from workers.converter_workers.processor import process_job, resolve_path
+from workers.converter_workers.processor import _convert_file, process_job, resolve_path
 
 
 def test_resolve_path_builds_download_and_upload_paths() -> None:
@@ -25,6 +25,56 @@ def test_resolve_path_builds_download_and_upload_paths() -> None:
     assert output_file.name == "manual.md"
     assert input_file.parent.name == "downloads"
     assert output_file.parent.name == "uploads"
+
+
+def test_resolve_path_truncates_very_long_filenames() -> None:
+    """A long source name must not exceed the OS 255-char filename limit once
+    the Minio `.part.minio` suffix / encryption `plain_` prefix is added."""
+    long_name = "Architecture Patterns with Python " * 8 + ".pdf"  # ~300 chars
+    input_file, output_file = resolve_path(
+        f"s3-file_store/{long_name}",
+        ConversionType(source_format="pdf", target_format="docx"),
+        Path("/tmp/work"),
+    )
+
+    assert len(input_file.name) <= 200
+    assert len(output_file.name) <= 200
+    # Extension must be preserved so the converter infers the right source.
+    assert input_file.name.endswith(".pdf")
+    assert output_file.name.endswith(".docx")
+
+
+def test_convert_file_times_out_a_hung_converter(
+    conversion_job,
+    fake_converter_registry,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A converter that never returns must abort via WORKER_CONVERSION_TIMEOUT."""
+    import asyncio
+
+    import workers.converter_workers.processor as processor_module
+
+    # Simulate a converter that takes longer than the configured timeout. Note:
+    # asyncio.wait_for cannot kill the underlying worker thread, so the thread
+    # still completes its sleep; we use a short sleep so the test is fast.
+    import time
+
+    @fake_converter_registry.register(conversion_job.conversion)
+    def slow_converter(input_path: str, output_path: str) -> None:
+        del input_path, output_path
+        time.sleep(2)
+
+    monkeypatch.setattr(processor_module.settings, "WORKER_CONVERSION_TIMEOUT", 0.1)
+
+    context = WorkerContext(
+        storage_port=None,  # type: ignore[arg-type]
+        queue_port=None,    # type: ignore[arg-type]
+        event_port=None,    # type: ignore[arg-type]
+        converter_registry=fake_converter_registry,
+        worker_name="timeout-test",
+    )
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(_convert_file(context, conversion_job, Path("/tmp/in.pdf"), Path("/tmp/out.pdf")))
 
 
 def test_process_job_downloads_converts_and_uploads_successfully(

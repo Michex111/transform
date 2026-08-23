@@ -56,3 +56,11 @@ class CreditTransactionModel(Base):
         nullable=False,
         default=lambda: datetime.now(UTC),
     )
+
+    __table_args__ = (
+        # Idempotency guard: a Stripe reference (e.g. checkout session id) can
+        # only ever grant credits once, even if the webhook is delivered twice.
+        UniqueConstraint(
+            "reference_id", name="uq_credit_transactions_reference_id"
+        ),
+    )

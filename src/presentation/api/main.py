@@ -32,6 +32,7 @@ from src.presentation.api.routers.v1 import (
     dashboard,
     events,
     files,
+    guest,
     subscriptions,
     upload,
     users,
@@ -142,6 +143,7 @@ async def metrics_endpoint() -> Response:
 app.include_router(users.router)
 app.include_router(upload.router)
 app.include_router(conversions.router)
+app.include_router(guest.router)
 app.include_router(files.router)
 app.include_router(credits.router)
 app.include_router(subscriptions.router)

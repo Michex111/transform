@@ -31,8 +31,18 @@ function PublicHeader() {
           <Logo />
         </Link>
         <nav className="flex items-center gap-4" aria-label="Public">
+          <Link to="/convert" className="text-sm font-medium text-muted hover:text-on-background">
+            Convert
+          </Link>
           <Link to="/pricing" className="text-sm font-medium text-muted hover:text-on-background">
             Pricing
+          </Link>
+          <Link
+            to="/security"
+            className="text-sm font-medium text-muted hover:text-on-background"
+            aria-label="Security"
+          >
+            Security
           </Link>
           <Link
             to="/login"
@@ -53,15 +63,22 @@ function PublicHeader() {
 }
 
 function PublicFooter() {
-  const col = (title: string, items: string[]) => (
+  const linkClass = "text-sm text-muted hover:text-on-background";
+  const Col = ({ title, links }: { title: string; links: { label: string; to?: string }[] }) => (
     <div>
       <p className="mb-3 text-sm font-semibold text-on-background">{title}</p>
       <ul className="space-y-2">
-        {items.map((it) => (
-          <li key={it}>
-            <a href="#" className="text-sm text-muted hover:text-on-background">
-              {it}
-            </a>
+        {links.map((it) => (
+          <li key={it.label}>
+            {it.to ? (
+              <Link to={it.to} className={linkClass}>
+                {it.label}
+              </Link>
+            ) : (
+              <a href="#" className={linkClass}>
+                {it.label}
+              </a>
+            )}
           </li>
         ))}
       </ul>
@@ -71,9 +88,25 @@ function PublicFooter() {
   return (
     <footer className="border-t border-outline">
       <div className="mx-auto grid max-w-6xl grid-cols-2 gap-8 px-4 py-12 sm:grid-cols-4 sm:px-6">
-        {col("Product", ["Convert", "Queue", "Pricing", "API keys"])}
-        {col("Company", ["About", "Blog", "Careers", "Contact"])}
-        {col("Legal", ["Privacy", "Terms", "Security", "GDPR"])}
+        <Col
+          title="Product"
+          links={[
+            { label: "Convert", to: "/convert" },
+            { label: "Queue", to: "/app/queue" },
+            { label: "Pricing", to: "/pricing" },
+            { label: "API keys" },
+          ]}
+        />
+        <Col title="Company" links={[{ label: "About" }, { label: "Blog" }, { label: "Careers" }, { label: "Contact" }]} />
+        <Col
+          title="Legal"
+          links={[
+            { label: "Privacy" },
+            { label: "Terms" },
+            { label: "Security", to: "/security" },
+            { label: "GDPR" },
+          ]}
+        />
         <div>
           <p className="mb-3 text-sm font-semibold text-on-background">Transform</p>
           <p className="text-sm text-muted">

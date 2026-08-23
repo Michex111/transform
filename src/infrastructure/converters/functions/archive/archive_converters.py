@@ -27,20 +27,56 @@ ARCHIVE_FORMATS = ["zip", "tar", "tar.gz", "tar.bz2", "tar.xz"]
 # Single-file compression formats (recompression between each other).
 COMPRESSION_FORMATS = ["gz", "bz2", "xz", "lzma"]
 
+# Decompression-bomb guard: a tiny archive must not expand to an enormous,
+# filesystem-exhausting payload. Cap the total uncompressed bytes and the
+# number of entries.
+MAX_ARCHIVE_EXPAND_BYTES = 2 * 1024 * 1024 * 1024  # 2 GiB total uncompressed
+MAX_ARCHIVE_ENTRIES = 10_000
+
+
+def _check_zip_bomb(zip_info: zipfile.ZipInfo) -> None:
+    if zip_info.file_size > MAX_ARCHIVE_EXPAND_BYTES:
+        raise RuntimeError("Archive member is too large after decompression (zip-bomb guard).")
+
 
 def _extract(input_file: str, dest_dir: str) -> None:
-    """Extract a source archive (or decompress a single file) into dest_dir."""
+    """Extract a source archive (or decompress a single file) into dest_dir.
+
+    Guards against decompression bombs: totals are summed before extraction and
+    entry counts are bounded so a tiny malicious archive cannot exhaust disk or
+    CPU.
+    """
     name = input_file.lower()
     if name.endswith(".zip") or zipfile.is_zipfile(input_file):
         with zipfile.ZipFile(input_file, "r") as zf:
+            members = zf.infolist()
+            if len(members) > MAX_ARCHIVE_ENTRIES:
+                raise RuntimeError("Archive has too many entries.")
+            total = sum(m.file_size for m in members)
+            if total > MAX_ARCHIVE_EXPAND_BYTES:
+                raise RuntimeError("Archive expands beyond the permitted size (zip-bomb guard).")
+            for member in members:
+                _check_zip_bomb(member)
             zf.extractall(dest_dir)
     elif tarfile.is_tarfile(input_file):
         with tarfile.open(input_file, "r:*") as tf:
+            members = tf.getmembers()
+            if len(members) > MAX_ARCHIVE_ENTRIES:
+                raise RuntimeError("Archive has too many entries.")
+            total = sum(m.size for m in members)
+            if total > MAX_ARCHIVE_EXPAND_BYTES:
+                raise RuntimeError("Archive expands beyond the permitted size (zip-bomb guard).")
             tf.extractall(dest_dir)
     elif name.endswith((".gz", ".bz2", ".xz", ".lzma")):
         # Single-file compression: decompress to a plain file in dest_dir.
         mode = "r:gz" if name.endswith(".gz") else "r:bz2" if name.endswith(".bz2") else "r:xz"
         with tarfile.open(input_file, mode) as tf:
+            members = tf.getmembers()
+            if len(members) > MAX_ARCHIVE_ENTRIES:
+                raise RuntimeError("Archive has too many entries.")
+            total = sum(m.size for m in members)
+            if total > MAX_ARCHIVE_EXPAND_BYTES:
+                raise RuntimeError("Archive expands beyond the permitted size (zip-bomb guard).")
             tf.extractall(dest_dir)
     else:
         raise RuntimeError(f"Cannot extract archive type: {input_file}")

@@ -1,27 +1,71 @@
+import { Suspense, lazy } from "react";
 import { Routes, Route } from "react-router-dom";
 import { ProtectedRoute, PublicOnlyRoute } from "@/auth/Guards";
 import { AppShell } from "@/components/AppShell";
 import { PublicLayout } from "@/pages/public/PublicLayout";
-import { LandingPage } from "@/pages/public/LandingPage";
-import { PricingPage } from "@/pages/public/PricingPage";
-import { LoginPage } from "@/pages/public/LoginPage";
-import { RegisterPage } from "@/pages/public/RegisterPage";
-import { DashboardPage } from "@/pages/app/DashboardPage";
-import { ConvertPage } from "@/pages/app/ConvertPage";
-import { QueuePage } from "@/pages/app/QueuePage";
-import { HistoryPage } from "@/pages/app/HistoryPage";
-import { FilesPage } from "@/pages/app/FilesPage";
-import { BillingPage } from "@/pages/app/BillingPage";
-import { SettingsPage } from "@/pages/app/SettingsPage";
-import { SupportPage } from "@/pages/app/SupportPage";
+
+// Route-level code splitting: heavy pages load on demand (separate chunks).
+const LandingPage = lazy(() =>
+  import("@/pages/public/LandingPage").then((m) => ({ default: m.LandingPage })),
+);
+const PricingPage = lazy(() =>
+  import("@/pages/public/PricingPage").then((m) => ({ default: m.PricingPage })),
+);
+const SecurityPage = lazy(() =>
+  import("@/pages/public/SecurityPage").then((m) => ({ default: m.SecurityPage })),
+);
+const GuestConvertPage = lazy(() =>
+  import("@/pages/public/GuestConvertPage").then((m) => ({ default: m.GuestConvertPage })),
+);
+const LoginPage = lazy(() =>
+  import("@/pages/public/LoginPage").then((m) => ({ default: m.LoginPage })),
+);
+const RegisterPage = lazy(() =>
+  import("@/pages/public/RegisterPage").then((m) => ({ default: m.RegisterPage })),
+);
+const DashboardPage = lazy(() =>
+  import("@/pages/app/DashboardPage").then((m) => ({ default: m.DashboardPage })),
+);
+const ConvertPage = lazy(() =>
+  import("@/pages/app/ConvertPage").then((m) => ({ default: m.ConvertPage })),
+);
+const QueuePage = lazy(() =>
+  import("@/pages/app/QueuePage").then((m) => ({ default: m.QueuePage })),
+);
+const HistoryPage = lazy(() =>
+  import("@/pages/app/HistoryPage").then((m) => ({ default: m.HistoryPage })),
+);
+const FilesPage = lazy(() =>
+  import("@/pages/app/FilesPage").then((m) => ({ default: m.FilesPage })),
+);
+const BillingPage = lazy(() =>
+  import("@/pages/app/BillingPage").then((m) => ({ default: m.BillingPage })),
+);
+const SettingsPage = lazy(() =>
+  import("@/pages/app/SettingsPage").then((m) => ({ default: m.SettingsPage })),
+);
+const SupportPage = lazy(() =>
+  import("@/pages/app/SupportPage").then((m) => ({ default: m.SupportPage })),
+);
+
+function RouteFallback() {
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-background">
+      <span className="font-mono text-sm text-muted">Loading…</span>
+    </div>
+  );
+}
 
 export default function App() {
   return (
-    <Routes>
+    <Suspense fallback={<RouteFallback />}>
+      <Routes>
       {/* Public marketing routes */}
       <Route element={<PublicLayout />}>
         <Route path="/" element={<LandingPage />} />
         <Route path="/pricing" element={<PricingPage />} />
+        <Route path="/security" element={<SecurityPage />} />
+        <Route path="/convert" element={<GuestConvertPage />} />
       </Route>
 
       {/* Signed-out-only auth routes */}
@@ -46,6 +90,7 @@ export default function App() {
 
       {/* Fallback */}
       <Route path="*" element={<PublicLayout />} />
-    </Routes>
+      </Routes>
+    </Suspense>
   );
 }

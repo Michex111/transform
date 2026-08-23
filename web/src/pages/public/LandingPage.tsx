@@ -1,8 +1,38 @@
 import { Link } from "react-router-dom";
 import { motion } from "motion/react";
-import { ArrowRight, CheckCircle } from "@phosphor-icons/react";
+import {
+  ArrowRight,
+  CheckCircle,
+  ClockCounterClockwise,
+  FileLock,
+  Key,
+  ShieldCheck,
+} from "@phosphor-icons/react";
 import { Button, FormatChip, FormatMorph } from "@/components/ui";
 import { Stagger, Item, Reveal } from "@/lib/motion";
+
+const SECURITY_FEATURES = [
+  {
+    icon: Key,
+    title: "Authentication & access control",
+    body: "Short-lived JWT access tokens, refresh tokens, hashed API keys, and per-resource ownership checks.",
+  },
+  {
+    icon: FileLock,
+    title: "Encryption at rest",
+    body: "Files are encrypted with AES-256-GCM before they land in object storage, keyed per file.",
+  },
+  {
+    icon: ShieldCheck,
+    title: "Edge protections",
+    body: "IP-based and per-key rate limiting, plus security headers like CSP and HSTS on every response.",
+  },
+  {
+    icon: ClockCounterClockwise,
+    title: "Data lifecycle & deletion",
+    body: "Guest and ownerless files are auto-cleaned after 24 hours; your job history is kept for 30 days.",
+  },
+];
 
 const FORMAT_GROUPS: { format: string; label: string }[] = [
   { format: "pdf", label: "Documents" },
@@ -42,9 +72,9 @@ export function LandingPage() {
             Move files between formats with a live queue, real-time progress, and zero friction.
           </p>
           <div className="flex flex-wrap items-center gap-3">
-            <Link to="/register">
+            <Link to="/convert">
               <Button size="lg">
-                Start converting <ArrowRight size={18} />
+                Convert now — no sign-up <ArrowRight size={18} />
               </Button>
             </Link>
             <Link to="/pricing">
@@ -53,6 +83,13 @@ export function LandingPage() {
               </Button>
             </Link>
           </div>
+          <p className="font-mono text-xs text-muted">
+            Try it without an account, or{" "}
+            <Link to="/register" className="text-primary hover:underline">
+              sign up to keep your history
+            </Link>
+            .
+          </p>
           <p className="font-mono text-xs text-muted">
             PDF · DOCX · XLSX · images · audio · video
           </p>
@@ -109,17 +146,58 @@ export function LandingPage() {
         </Stagger>
       </section>
 
+      {/* Security by design */}
+      <section className="mx-auto max-w-6xl px-4 py-12 sm:px-6">
+        <Reveal className="mb-8 max-w-2xl">
+          <p className="mb-2 text-xs font-medium uppercase tracking-wider text-muted">Security</p>
+          <h2 className="font-display text-2xl font-semibold sm:text-3xl">Security by design</h2>
+          <p className="mt-3 text-muted">
+            Built on an ISO/IEC 27001:2022-aligned information security management system, so your
+            files stay private, protected, and under your control.
+          </p>
+        </Reveal>
+
+        <Stagger className="grid gap-4 sm:grid-cols-2">
+          {SECURITY_FEATURES.map(({ icon: Icon, title, body }) => (
+            <Item key={title} as="div">
+              <div className="flex h-full flex-col gap-3 rounded-xl border border-outline bg-surface p-6 transition-colors hover:border-primary/40">
+                <span className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary-container text-on-primary-container">
+                  <Icon size={20} weight="duotone" aria-hidden />
+                </span>
+                <h3 className="font-display text-base font-semibold">{title}</h3>
+                <p className="text-sm text-muted">{body}</p>
+              </div>
+            </Item>
+          ))}
+        </Stagger>
+
+        <Reveal className="mt-8">
+          <Link to="/security">
+            <Button size="lg" variant="secondary">
+              See how we secure your files <ArrowRight size={18} />
+            </Button>
+          </Link>
+        </Reveal>
+      </section>
+
       {/* CTA band */}
       <section className="mx-auto max-w-6xl px-4 py-16 sm:px-6">
         <Reveal>
           <div className="flex flex-col items-center gap-4 rounded-2xl border border-outline bg-surface p-10 text-center">
             <h2 className="font-display text-3xl font-semibold">Ready to transform?</h2>
-            <p className="max-w-md text-muted">Start free in under a minute. No credit card required.</p>
-            <Link to="/register">
-              <Button size="lg">
-                Get started <CheckCircle size={18} />
-              </Button>
-            </Link>
+            <p className="max-w-md text-muted">Convert a file right now — no account required. Or start free in under a minute.</p>
+            <div className="flex flex-wrap items-center justify-center gap-3">
+              <Link to="/convert">
+                <Button size="lg" variant="secondary">
+                  Convert without an account <ArrowRight size={18} />
+                </Button>
+              </Link>
+              <Link to="/register">
+                <Button size="lg">
+                  Get started <CheckCircle size={18} />
+                </Button>
+              </Link>
+            </div>
           </div>
         </Reveal>
       </section>

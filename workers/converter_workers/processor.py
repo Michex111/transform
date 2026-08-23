@@ -63,13 +63,22 @@ async def _download_input_file(context: WorkerContext, job: ConversionJob, input
 
 @retry_on_exception(logger=worker_logger)
 async def _convert_file(context: WorkerContext, job: ConversionJob, input_file: Path, output_file: Path) -> int:
-    """Run the converter and return elapsed wall-clock time in milliseconds."""
+    """Run the converter and return elapsed wall-clock time in milliseconds.
+
+    The conversion is bounded by ``WORKER_CONVERSION_TIMEOUT`` so a hung
+    converter (e.g. a decompression bomb or a stuck subprocess) fails the job
+    with a descriptive error instead of blocking the worker forever.
+    """
     converter = context.converter_registry.get_converter(job.conversion)
     if not converter:
         raise RuntimeError(f"No converter found for conversion type {job.conversion}")
 
+    timeout_seconds = int(getattr(settings, "WORKER_CONVERSION_TIMEOUT", 600))
     start = time.monotonic()
-    await asyncio.to_thread(converter, str(input_file), str(output_file))
+    await asyncio.wait_for(
+        asyncio.to_thread(converter, str(input_file), str(output_file)),
+        timeout=timeout_seconds,
+    )
     elapsed_ms = int((time.monotonic() - start) * 1000)
 
     # Guard: a converter (e.g. LibreOffice headless) can report success without
@@ -256,8 +265,15 @@ async def process_job(context: WorkerContext, job: ConversionJob) -> None:
             ).to_dict()
             if credits_remaining is not None:
                 completed_fields["credits_remaining"] = credits_remaining
+            # Persist the completed row BEFORE emitting the terminal event so
+            # that a client seeing COMPLETED via SSE (and immediately fetching
+            # the job to build its download URL) never observes a job that is
+            # "completed" in the stream but still has no output_file persisted.
+            # Previously the event was published first, causing a race where the
+            # History/Queue/guest download could show "Ready" but fail to find a
+            # downloadable output until a refresh.
+            await _persist()
             await context.event_port.publish(**completed_fields)
-        await _persist()
 
     except Exception as e:
         error_message = str(e)
@@ -267,17 +283,43 @@ async def process_job(context: WorkerContext, job: ConversionJob) -> None:
         raise RuntimeError(error_message)
 
 
+# Maximum length for a single path component. POSIX NAME_MAX is 255; the Minio
+# download path appends a ".part.minio" suffix (10 chars) and encryption adds a
+# "plain_" prefix, so we keep the base name comfortably under the limit.
+_MAX_FILENAME_LEN = 180  # 180 + 10 (".part.minio") + 6 ("plain_") <= 255
+
+
+def _safe_filename(name: str) -> str:
+    """Return a path-component-safe, length-bounded filename.
+
+    Long display names (e.g. e-book titles) can exceed the OS 255-char
+    filename limit once the Minio SDK's ``.part.minio`` suffix (or encryption's
+    ``plain_`` prefix) is added, causing ``Errno 36: File name too long``.
+    Truncate to a safe length while preserving the file extension.
+    """
+    name = name.strip() or "file"
+    if len(name) <= _MAX_FILENAME_LEN:
+        return name
+
+    # Keep the extension (if any) by splitting at the last dot.
+    dot = name.rfind(".")
+    if dot > 0 and dot < len(name) - 1:
+        ext = name[dot:]
+        stem = name[:dot]
+        keep = _MAX_FILENAME_LEN - len(ext)
+        return stem[:keep] + ext
+    return name[:_MAX_FILENAME_LEN]
+
+
 def resolve_path(
     file_location: str,
     conversion: ConversionType,
     directory: Path,
 ) -> tuple[Path, Path]:
-    file_name = Path(file_location).name
+    file_name = _safe_filename(Path(file_location).name)
+    safe_stem = _safe_filename(Path(file_name).stem)
 
-    output_name = (
-        Path(file_name).stem +
-        f".{conversion.target_format}"
-    )
+    output_name = safe_stem + f".{conversion.target_format}"
 
     downloads = directory / "downloads"
     uploads = directory / "uploads"

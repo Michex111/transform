@@ -20,6 +20,7 @@ import type {
   DashboardResponse,
   FavoriteFileRequest,
   FileDownloadResponse,
+  GuestJobResponse,
   FileListResponse,
   FileMetadataResponse,
   FolderContentsResponse,
@@ -42,6 +43,21 @@ import type {
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? '/api').replace(/\/$/, '')
 const TOKEN_KEY = 'transform_access_token'
 const REFRESH_KEY = 'transform_refresh_token'
+
+/**
+ * Resolve a server-relative URL returned in an API payload (e.g. a streaming
+ * `download_url`) to an absolute fetch path.
+ *
+ * The backend returns these paths with a leading `/api/…`. `API_BASE` also
+ * carries the `/api` prefix, so naively concatenating the two produces a
+ * doubled prefix (`/api/api/…`). This helper joins them correctly, and is
+ * safe whether `API_BASE` is a local prefix (`/api`) or an absolute origin
+ * (`https://api.example.com/api`).
+ */
+function resolveServerPath(path: string): string {
+  if (/^https?:\/\//i.test(path)) return path
+  return `${API_BASE}${path.startsWith('/') ? path : `/${path}`}`
+}
 
 class ApiClient {
   private get token() {
@@ -302,12 +318,116 @@ class ApiClient {
       downloadFromUrl(url, filename ?? defaultJobFilename(job))
     } else {
       // Same-origin streaming endpoint — requires the Authorization header.
-      const res = await fetch(`${API_BASE}${url}`, {
+      const res = await fetch(resolveServerPath(url), {
         headers: this.token ? { Authorization: `Bearer ${this.token}` } : {},
       })
       if (!res.ok) throw new Error(`Download failed (${res.status})`)
       const blob = await res.blob()
       saveBlob(blob, filename ?? defaultJobFilename(job))
+    }
+  }
+
+  // ---- Guest (no-account) ----
+  /** Map of source format -> valid target formats for guest conversions. */
+  guestConversionMap = () => this.request<ConversionMapResponse>('/guest/conversions/supported/map')
+
+  /** Create a guest conversion job. Returns the job + its guest token. */
+  guestCreateJob = (body: CreateConversionJobRequest) =>
+    this.request<GuestJobResponse>('/guest/conversions/jobs', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    })
+
+  /** Open a guest upload session (returns the presigned PUT URL). */
+  guestCreateUploadSession = (body: CreateUploadSessionRequest) =>
+    this.request<UploadResponse>('/guest/uploads/sessions', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    })
+
+  /**
+   * Upload guest file bytes directly to the presigned URL (no Content-Type
+   * header — the URL is signed without one, so sending it would 403).
+   */
+  guestPutToPresignedUrl = (url: string, blob: Blob) => this.putToPresignedUrl(url, blob)
+
+  /** Verify a guest upload and enqueue its conversion job. */
+  guestVerifyUpload = (uploadId: string, jobId: string, guestToken: string) =>
+    this.request<UploadSession>(
+      `/guest/uploads/sessions/${uploadId}/verify?job_id=${encodeURIComponent(jobId)}&guest_token=${encodeURIComponent(guestToken)}`,
+      { method: 'POST' },
+    )
+
+  /** Fetch a single guest job by id + token. */
+  guestGetJob = (jobId: string, guestToken: string) =>
+    this.request<GuestJobResponse>(
+      `/guest/conversions/jobs/${jobId}?guest_token=${encodeURIComponent(guestToken)}`,
+    )
+
+  /**
+   * Subscribe to SSE progress for a guest job. No Authorization header — the
+   * guest token travels as a query parameter. Returns a cleanup function.
+   */
+  guestSubscribeToJob(
+    id: string,
+    guestToken: string,
+    handlers: {
+      onProgress: (evt: import('./types').JobProgressEvent) => void
+      onError: (msg: string) => void
+      onDone: () => void
+      onConnected?: () => void
+    },
+  ): () => void {
+    return subscribeToJobStream(
+      `${API_BASE}/guest/events/jobs/${id}?guest_token=${encodeURIComponent(guestToken)}`,
+      handlers,
+    )
+  }
+
+  /**
+   * Download a completed guest conversion's output.
+   *
+   * Mirrors the authed `downloadConvertedFile` download semantics:
+   *   - A pre-signed absolute URL → navigate directly (no CORS / no token).
+   *   - A relative URL → stream via the API with the guest token appended.
+   *
+   * Self-healing: the worker emits the COMPLETED SSE event *before* persisting
+   * the output file, so the UI can show "Ready" before the job has a
+   * downloadable output yet — leaving a stale/absent `download_url` behind. So
+   * when the URL is missing we re-fetch, and retry briefly over the persist
+   * race before giving up.
+   */
+  async guestDownload(job: {
+    job_id?: string | null
+    download_url?: string | null
+    input_file?: string | null
+    target_format: string
+    guest_token: string
+  }): Promise<void> {
+    let url = job.download_url
+
+    // Re-fetch (with a short retry) when the stored URL is missing, to ride out
+    // the COMPLETED-before-persist race in the worker.
+    if (!url && job.job_id) {
+      for (let attempt = 0; attempt < 3 && !url; attempt++) {
+        if (attempt > 0) await new Promise((r) => setTimeout(r, 350))
+        const fresh = await this.guestGetJob(job.job_id, job.guest_token)
+        url = fresh.download_url
+      }
+    }
+    if (!url) {
+      throw new Error('This conversion is not ready to download yet.')
+    }
+
+    if (url.startsWith('http')) {
+      // Pre-signed GET URL — no auth header needed, download directly.
+      downloadFromUrl(url, guestFilename(job))
+    } else {
+      // Same-origin streaming endpoint — requires the guest token.
+      const res = await fetch(`${resolveServerPath(url)}?guest_token=${encodeURIComponent(job.guest_token)}`)
+      if (!res.ok) throw new Error(`Download failed (${res.status})`)
+      const blob = await res.blob()
+      saveBlob(blob, guestFilename(job))
     }
   }
 
@@ -406,74 +526,103 @@ class ApiClient {
     onDone: () => void
     onConnected?: () => void
   }): () => void {
-    const controller = new AbortController()
     const token = this.token
-
-    void (async () => {
-      try {
-        const res = await fetch(`${API_BASE}/v1/events/jobs/${id}`, {
-          headers: token ? { Authorization: `Bearer ${token}` } : {},
-          signal: controller.signal,
-        })
-        if (!res.ok || !res.body) {
-          handlers.onError(`Failed to connect (${res.status})`)
-          return
-        }
-        const reader = res.body.getReader()
-        const decoder = new TextDecoder()
-        let buffer = ''
-
-        const dispatch = (eventName: string, dataStr: string) => {
-          if (eventName === 'progress') {
-            try {
-              handlers.onProgress(JSON.parse(dataStr))
-            } catch {
-              /* ignore malformed progress */
-            }
-          } else if (eventName === 'error') {
-            // The backend sends `data: {"error": "..."}` — surface the message.
-            try {
-              const parsed = JSON.parse(dataStr) as { error?: string }
-              handlers.onError(parsed.error ?? dataStr)
-            } catch {
-              handlers.onError(dataStr)
-            }
-          } else if (eventName === 'connected') {
-            handlers.onConnected?.()
-          }
-        }
-
-        for (;;) {
-          const { done, value } = await reader.read()
-          if (done) break
-          buffer += decoder.decode(value, { stream: true })
-          // SSE events separated by blank lines
-          const blocks = buffer.split('\n\n')
-          buffer = blocks.pop() ?? ''
-          for (const block of blocks) {
-            let eventName = 'message'
-            const dataLines: string[] = []
-            for (const line of block.split('\n')) {
-              if (line.startsWith('event:')) eventName = line.slice(6).trim()
-              else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim())
-            }
-            if (dataLines.length) dispatch(eventName, dataLines.join('\n'))
-          }
-        }
-        handlers.onDone()
-      } catch (err) {
-        if ((err as Error).name !== 'AbortError') handlers.onError((err as Error).message)
-      }
-    })()
-
-    return () => controller.abort()
+    return subscribeToJobStream(
+      `${API_BASE}/v1/events/jobs/${id}`,
+      handlers,
+      token ? { Authorization: `Bearer ${token}` } : {},
+    )
   }
 }
 
+/**
+ * Shared SSE stream reader: fetches a URL, parses `text/event-stream` frames,
+ * and dispatches the parsed events to the handlers. Returns a cleanup function
+ * that aborts the in-flight stream. Used by both the authed and guest flows
+ * (the only differences are the URL and the request headers).
+ */
+function subscribeToJobStream(
+  url: string,
+  handlers: {
+    onProgress: (evt: import('./types').JobProgressEvent) => void
+    onError: (msg: string) => void
+    onDone: () => void
+    onConnected?: () => void
+  },
+  headers: Record<string, string> = {},
+): () => void {
+  const controller = new AbortController()
+
+  void (async () => {
+    try {
+      const res = await fetch(url, {
+        headers,
+        signal: controller.signal,
+      })
+      if (!res.ok || !res.body) {
+        handlers.onError(`Failed to connect (${res.status})`)
+        return
+      }
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      const dispatch = (eventName: string, dataStr: string) => {
+        if (eventName === 'progress') {
+          try {
+            handlers.onProgress(JSON.parse(dataStr))
+          } catch {
+            /* ignore malformed progress */
+          }
+        } else if (eventName === 'error') {
+          // The backend sends `data: {"error": "..."}` — surface the message.
+          try {
+            const parsed = JSON.parse(dataStr) as { error?: string }
+            handlers.onError(parsed.error ?? dataStr)
+          } catch {
+            handlers.onError(dataStr)
+          }
+        } else if (eventName === 'connected') {
+          handlers.onConnected?.()
+        }
+      }
+
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+        // SSE events separated by blank lines
+        const blocks = buffer.split('\n\n')
+        buffer = blocks.pop() ?? ''
+        for (const block of blocks) {
+          let eventName = 'message'
+          const dataLines: string[] = []
+          for (const line of block.split('\n')) {
+            if (line.startsWith('event:')) eventName = line.slice(6).trim()
+            else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim())
+          }
+          if (dataLines.length) dispatch(eventName, dataLines.join('\n'))
+        }
+      }
+      handlers.onDone()
+    } catch (err) {
+      if ((err as Error).name !== 'AbortError') handlers.onError((err as Error).message)
+    }
+  })()
+
+  return () => controller.abort()
+}
+
 /** Build a sensible output filename for a completed job's download. */
-function defaultJobFilename(job: ConversionJobResponse): string {
+function defaultJobFilename(job: { input_file: string; target_format: string }): string {
   const base = job.input_file.split('/').pop()?.replace(/\.[^.]+$/, '') || 'converted'
   return `${base}.${job.target_format}`
+}
+
+/** Build an output filename for a guest download (falls back to the target ext). */
+function guestFilename(job: { input_file?: string | null; target_format: string }): string {
+  const source = job.input_file?.split('/').pop()?.replace(/\.[^.]+$/, '') || 'converted'
+  return `${source}.${job.target_format}`
 }
 
 export const api = new ApiClient()

@@ -15,9 +15,11 @@ from src.application.dtos.upload_dto import UploadSession
 from src.application.exceptions.file_system_exceptions import (
     FileRecordNotFoundError,
     FileSizeLimitExceededError,
+    FileTypeMismatchError,
     FolderNameConflictError,
     FolderNotFoundError,
 )
+from src.application.services.file_magic import validate_upload_signature
 from src.domain.subscriptions.value_object.tier import SubscriptionTier
 from src.infrastructure.config.settings import get_settings
 from src.infrastructure.database.models import UserFileModel, UserFolderModel
@@ -80,6 +82,8 @@ class FileStorageOperations(Protocol):
     """Minimal object-storage surface used by the file system."""
 
     async def stat_object(self, object_key: str) -> dict | None: ...
+
+    async def read_object_head(self, object_key: str, max_bytes: int = 4096) -> bytes: ...
 
     async def remove_object(self, object_key: str) -> bool: ...
 
@@ -334,6 +338,21 @@ class FileService:
         if size > max_size:
             raise FileSizeLimitExceededError(
                 f"File exceeds the maximum size for your tier ({max_size // (1024 * 1024)} MB)."
+            )
+
+        # Reject extension-spoofed uploads (e.g. an executable named ".pdf")
+        # before they reach a converter. Defense-in-depth on top of the size
+        # and per-converter guards.
+        ext = Path(session.file_name or session.object_key).suffix.lstrip(".").lower()
+        try:
+            head = await self._storage.read_object_head(session.object_key)
+        except Exception:
+            head = b""  # If we can't read the head, don't block the upload.
+        if head and not validate_upload_signature(head, ext):
+            # The object is already uploaded; clean it up so no orphan remains.
+            await self._storage.remove_object(session.object_key)
+            raise FileTypeMismatchError(
+                f"Uploaded content does not match the claimed .{ext} type."
             )
 
         if session.folder_id is not None:

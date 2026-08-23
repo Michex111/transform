@@ -15,6 +15,16 @@ from src.domain.conversions.entities.conversion_job import ConversionJob
 from sqlalchemy.exc import IntegrityError
 
 
+from src.domain.conversions.entities.conversion_job import ConversionJob
+from sqlalchemy.exc import IntegrityError, OperationalError, DBAPIError
+
+
+# Exceptions that indicate the DB connection was dropped (e.g. Neon's pooler
+# closed an idle connection). These are transient and safely retried with a
+# fresh session.
+_RETRYABLE_DB_ERRORS = (OperationalError, DBAPIError, ConnectionError, OSError)
+
+
 class WorkerJobRepository(JobRepositoryPort):
     """Persists job status transitions using a fresh DB session per update."""
 
@@ -22,8 +32,18 @@ class WorkerJobRepository(JobRepositoryPort):
         self._session_factory = session_factory
 
     async def update_conversion_job(self, job: ConversionJob) -> None:
-        async with self._session_factory() as session:
-            await SQLConversionJobRepository(session=session).update_conversion_job(job)
+        for attempt in range(2):
+            try:
+                async with self._session_factory() as session:
+                    await SQLConversionJobRepository(session=session).update_conversion_job(job)
+                return
+            except _RETRYABLE_DB_ERRORS:
+                # Connection was dropped (Neon pooler recycle / transient).
+                # Retry once on a fresh session; the engine's pool_pre_ping will
+                # also validate the new connection.
+                if attempt == 1:
+                    raise
+                continue
 
 
 class WorkerCreditRepository(CreditPort):
@@ -39,19 +59,37 @@ class WorkerCreditRepository(CreditPort):
         self._session_factory = session_factory
 
     async def get_remaining(self, user_id: int, period_key: str) -> int | None:
-        async with self._session_factory() as session:
-            credit = await SQLCreditRepository(session=session).get_credit(
-                str(user_id), period_key
-            )
-            return credit.remaining if credit is not None else None
+        for attempt in range(2):
+            try:
+                async with self._session_factory() as session:
+                    credit = await SQLCreditRepository(session=session).get_credit(
+                        str(user_id), period_key
+                    )
+                    return credit.remaining if credit is not None else None
+            except _RETRYABLE_DB_ERRORS:
+                if attempt == 1:
+                    raise
+                continue
 
     async def get_tier(self, user_id: int) -> SubscriptionTier:
-        async with self._session_factory() as session:
-            return await SQLSubscriptionRepository(session=session).get_tier_for_user(user_id)
+        for attempt in range(2):
+            try:
+                async with self._session_factory() as session:
+                    return await SQLSubscriptionRepository(session=session).get_tier_for_user(user_id)
+            except _RETRYABLE_DB_ERRORS:
+                if attempt == 1:
+                    raise
+                continue
 
     async def consume(self, user_id: int, period_key: str, units: int) -> int:
-        async with self._session_factory() as session:
-            return await self._consume_once(session, user_id, period_key, units, retried=False)
+        for attempt in range(2):
+            try:
+                async with self._session_factory() as session:
+                    return await self._consume_once(session, user_id, period_key, units, retried=False)
+            except _RETRYABLE_DB_ERRORS:
+                if attempt == 1:
+                    raise
+                continue
 
     async def _consume_once(
         self,

@@ -156,3 +156,41 @@ class JobStreamConsumer(RedisStreamQueue):
         message["error"] = error_message
         message["original_message_id"] = message_id
         await self.redis_client.xadd("conversion_jobs:dead", message)
+
+    async def reclaim_stale_jobs(self, min_idle_ms: int = 60_000, count: int = 20) -> int:
+        """Reclaim messages that were left pending by crashed workers.
+
+        A message read with ``xreadgroup`` stays in the consumer group's
+        ``pending`` list until it is ACKed. If a worker dies mid-job the
+        message would otherwise be stuck forever. This scans each stream's
+        pending list for entries idle longer than ``min_idle_ms`` and uses
+        ``XAUTOCLAIM`` to transfer them to this consumer so ``fetch_job`` can
+        re-process them.
+
+        Returns the number of messages reclaimed across all streams.
+        """
+        reclaimed = 0
+        for stream in self.STREAMS:
+            try:
+                response = await self.redis_client.xautoclaim(
+                    stream,
+                    self.consumer_group,
+                    self.consumer_name,
+                    min_idle_time=min_idle_ms,
+                    start_id="0-0",
+                    count=count,
+                )
+                # Response: [next_cursor, entries, deleted_ids] (Redis 7+)
+                if response and len(response) > 1 and response[1] is not None:
+                    claimed = response[1]
+                    if isinstance(claimed, list):
+                        for message_id, fields in claimed:
+                            self._message_streams[str(message_id)] = stream
+                            reclaimed += 1
+                        if claimed:
+                            worker_logger.warning(
+                                "Reclaimed %d stale pending job(s) from %s", len(claimed), stream
+                            )
+            except Exception as e:  # noqa: BLE001 — best-effort sweep
+                worker_logger.warning(f"Failed to reclaim stale jobs from {stream}: {e}")
+        return reclaimed

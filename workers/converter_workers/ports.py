@@ -58,6 +58,10 @@ class QueuePort(Protocol):
 
     async def dead_letter_job(self, message_id: str, error_message: str, job: ConversionJob) -> None: ...
 
+    async def reclaim_stale_jobs(self, min_idle_ms: int = 60_000, count: int = 20) -> int:
+        """Best-effort reclaim of pending messages left by crashed workers."""
+        return 0
+
 class JobRepositoryPort(Protocol):
     """Persists job status transitions so the API can track progress."""
 

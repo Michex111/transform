@@ -1,7 +1,16 @@
 import asyncio
+import time
+
 from src.infrastructure.logging.loggers import worker_logger
 from workers.converter_workers.context.worker_context import WorkerContext
 from workers.converter_workers.processor import JobProcess
+
+# How often to sweep for stale pending messages left by crashed workers.
+_STALE_SWEEP_INTERVAL_SECONDS = 60
+# A message is considered "stale" (crashed worker) if it has been pending this
+# long without being ACKed.
+_STALE_MIN_IDLE_MS = 5 * 60_000  # 5 minutes
+
 
 class ConverterWorker:
     def __init__(self, context: WorkerContext, process_job: JobProcess):
@@ -13,11 +22,25 @@ class ConverterWorker:
         self._running = True
         log_context = self.context.get_log_context()
         worker_logger.info("Converter worker started", extra=log_context)
-        
+        last_sweep = time.monotonic()
+
         while self._running:
             try:
                 job = await self.context.queue_port.fetch_job()
                 if job is None:
+                    # Periodically reclaim pending messages that were left in the
+                    # consumer group by a crashed worker, so they are re-processed
+                    # instead of being stuck forever.
+                    if time.monotonic() - last_sweep > _STALE_SWEEP_INTERVAL_SECONDS:
+                        try:
+                            await self.context.queue_port.reclaim_stale_jobs(
+                                min_idle_ms=_STALE_MIN_IDLE_MS
+                            )
+                        except Exception as reclaim_error:
+                            worker_logger.warning(
+                                f"Stale-job reclaim failed: {reclaim_error}", extra=log_context
+                            )
+                        last_sweep = time.monotonic()
                     await asyncio.sleep(1)  # Sleep briefly if no job is available
                     continue
                 

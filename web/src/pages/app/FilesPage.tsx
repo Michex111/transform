@@ -8,6 +8,8 @@ import {
   type FormEvent,
   type ReactNode,
 } from "react";
+import { AnimatePresence, motion, useReducedMotion } from "motion/react";
+import { Item, PopIn, staggerContainer } from "@/lib/motion";
 import {
   FolderSimple,
   CaretRight,
@@ -80,6 +82,7 @@ export function FilesPage() {
   // Favorites view toggle.
   const [showFavorites, setShowFavorites] = useState(false);
 
+  const reduce = useReducedMotion();
   const currentFolderId = path[path.length - 1]?.id ?? null;
 
   const load = useCallback(async () => {
@@ -523,7 +526,13 @@ export function FilesPage() {
           </button>
         </BreadcrumbDrop>
         {path.map((folder, i) => (
-          <span key={folder.id} className="inline-flex items-center">
+          <motion.span
+            key={folder.id}
+            className="inline-flex items-center"
+            initial={reduce ? false : { opacity: 0, x: -6 }}
+            animate={reduce ? undefined : { opacity: 1, x: 0 }}
+            transition={{ duration: 0.2, ease: "easeOut" }}
+          >
             <CaretRight size={13} className="text-muted" />
             <BreadcrumbDrop
               target={folder.id}
@@ -545,12 +554,17 @@ export function FilesPage() {
                 {folder.name}
               </button>
             </BreadcrumbDrop>
-          </span>
+          </motion.span>
         ))}
 
         {/* Favorites-mode indicator + clear-filter control */}
         {showFavorites && (
-          <span className="inline-flex items-center gap-1.5">
+          <motion.span
+            className="inline-flex items-center gap-1.5"
+            initial={reduce ? false : { opacity: 0, x: -6 }}
+            animate={reduce ? undefined : { opacity: 1, x: 0 }}
+            transition={{ duration: 0.2, ease: "easeOut" }}
+          >
             <CaretRight size={13} className="text-muted" />
             <span className="inline-flex items-center gap-1 rounded-md px-2 py-1 font-medium text-primary">
               <Star size={14} weight="fill" className="text-warning" /> Favorites
@@ -566,102 +580,131 @@ export function FilesPage() {
             >
               <X size={12} /> Clear filter
             </button>
-          </span>
+          </motion.span>
         )}
       </div>
 
-      {loading ? (
-        <div className="grid grid-cols-[repeat(auto-fill,12.5rem)] gap-4">
-          {Array.from({ length: 8 }).map((_, i) => (
-            <div key={i} className="w-full overflow-hidden rounded-xl border border-outline bg-surface">
-              <Skeleton className="aspect-square w-full rounded-none" />
-              <div className="p-3">
-                <Skeleton className="h-4 w-3/4" />
-              </div>
-            </div>
-          ))}
-        </div>
-      ) : (
-        <div className="space-y-6">
-          {/* Folders section — horizontal rows stacked in a grid, always on top. */}
-          {(folders.length > 0 || newFolder) && (
-            <div
-              className="grid grid-cols-3 gap-4"
-              {...makeDropHandlers(currentFolderId)}
-            >
-              {/* New-folder placeholder card (inline editable) */}
-              {newFolder && (
-                <div className="flex w-full items-center gap-3 rounded-xl border border-primary/50 bg-surface px-4 py-4">
-                  <FolderSimple size={22} weight="duotone" className="shrink-0 text-primary" />
-                  <form onSubmit={saveNewFolder} className="flex min-w-0 flex-1 items-center gap-1.5">
-                    <input
-                      ref={newFolderInput}
-                      value={newFolder.name}
-                      onChange={(e) => setNewFolder({ ...newFolder, name: e.target.value })}
-                      onFocus={(e) => e.target.select()}
-                      className="min-w-0 flex-1 rounded border border-outline-strong bg-surface-variant px-2 py-1 text-sm text-on-background focus:border-primary focus:outline-none"
-                      aria-label="Folder name"
-                    />
-                    <button type="submit" className="text-primary hover:text-primary/80" aria-label="Save folder">
-                      <Check size={16} weight="bold" />
-                    </button>
-                    <button type="button" onClick={() => setNewFolder(null)} className="text-muted hover:text-error" aria-label="Cancel">
-                      <X size={16} />
-                    </button>
-                  </form>
+      <AnimatePresence mode="wait">
+        {loading ? (
+          <motion.div
+            key="skeleton"
+            className="grid grid-cols-[repeat(auto-fill,12.5rem)] gap-4"
+            initial={reduce ? false : { opacity: 0 }}
+            animate={reduce ? undefined : { opacity: 1 }}
+            exit={reduce ? undefined : { opacity: 0 }}
+            transition={{ duration: 0.18 }}
+          >
+            {Array.from({ length: 8 }).map((_, i) => (
+              <div key={i} className="w-full overflow-hidden rounded-xl border border-outline bg-surface">
+                <Skeleton className="aspect-square w-full rounded-none" />
+                <div className="p-3">
+                  <Skeleton className="h-4 w-3/4" />
                 </div>
-              )}
-              {folders.map((folder) => (
-                <FolderCard
-                  key={folder.id}
-                  folder={folder}
-                  selectionMode={selectionMode}
-                  selected={selectedFolderIds.has(folder.id)}
-                  onToggleSelect={() => toggleFolder(folder.id, false)}
-                  isDragging={draggedFolderId === folder.id}
-                  onDragStartFolder={(id) => setDraggedFolderId(id)}
-                  onDragEnd={() => setDraggedFolderId(null)}
-                  onOpen={() => openFolder(folder)}
-                  onRename={(name) => renameFolder(folder, name)}
-                  onDelete={() => deleteFolder(folder)}
-                  onMove={() => setMoveTarget({ kind: "folder", id: folder.id, name: folder.name, currentParentId: folder.parent_id })}
-                  onDropFile={(fileId) => void handleMove(fileId, folder.id)}
-                  onDropFolder={(folderId) => void handleMoveFolder(folderId, folder.id)}
-                  draggedFileId={draggedFileId}
-                  draggedFolderId={draggedFolderId}
-                />
-              ))}
-            </div>
-          )}
+              </div>
+            ))}
+          </motion.div>
+        ) : (
+          <motion.div
+            key="content"
+            className="space-y-6"
+            initial={reduce ? false : { opacity: 0 }}
+            animate={reduce ? undefined : { opacity: 1 }}
+            exit={reduce ? undefined : { opacity: 0 }}
+            transition={{ duration: 0.18 }}
+          >
+            {/* Folders section — horizontal rows stacked in a grid, always on top. */}
+            {(folders.length > 0 || newFolder) && (
+              <motion.div
+                className="grid grid-cols-3 gap-4"
+                variants={reduce ? undefined : staggerContainer}
+                initial={reduce ? false : "hidden"}
+                animate={reduce ? undefined : "visible"}
+                {...makeDropHandlers(currentFolderId)}
+              >
+                {/* New-folder placeholder card (inline editable) */}
+                {newFolder && (
+                  <Item className="w-full">
+                    <div className="flex w-full items-center gap-3 rounded-xl border border-primary/50 bg-surface px-4 py-4">
+                      <FolderSimple size={22} weight="duotone" className="shrink-0 text-primary" />
+                      <form onSubmit={saveNewFolder} className="flex min-w-0 flex-1 items-center gap-1.5">
+                        <input
+                          ref={newFolderInput}
+                          value={newFolder.name}
+                          onChange={(e) => setNewFolder({ ...newFolder, name: e.target.value })}
+                          onFocus={(e) => e.target.select()}
+                          className="min-w-0 flex-1 rounded border border-outline-strong bg-surface-variant px-2 py-1 text-sm text-on-background focus:border-primary focus:outline-none"
+                          aria-label="Folder name"
+                        />
+                        <button type="submit" className="text-primary hover:text-primary/80" aria-label="Save folder">
+                          <Check size={16} weight="bold" />
+                        </button>
+                        <button type="button" onClick={() => setNewFolder(null)} className="text-muted hover:text-error" aria-label="Cancel">
+                          <X size={16} />
+                        </button>
+                      </form>
+                    </div>
+                  </Item>
+                )}
+                {folders.map((folder) => (
+                  <Item key={folder.id} className="w-full">
+                    <FolderCard
+                      folder={folder}
+                      selectionMode={selectionMode}
+                      selected={selectedFolderIds.has(folder.id)}
+                      onToggleSelect={() => toggleFolder(folder.id, false)}
+                      isDragging={draggedFolderId === folder.id}
+                      onDragStartFolder={(id) => setDraggedFolderId(id)}
+                      onDragEnd={() => setDraggedFolderId(null)}
+                      onOpen={() => openFolder(folder)}
+                      onRename={(name) => renameFolder(folder, name)}
+                      onDelete={() => deleteFolder(folder)}
+                      onMove={() => setMoveTarget({ kind: "folder", id: folder.id, name: folder.name, currentParentId: folder.parent_id })}
+                      onDropFile={(fileId) => void handleMove(fileId, folder.id)}
+                      onDropFolder={(folderId) => void handleMoveFolder(folderId, folder.id)}
+                      draggedFileId={draggedFileId}
+                      draggedFolderId={draggedFolderId}
+                    />
+                  </Item>
+                ))}
+              </motion.div>
+            )}
 
-          {/* Files section — smaller card grid below the folders. */}
-          {files.length > 0 && (
-            <div className="grid grid-cols-[repeat(auto-fill,12.5rem)] gap-4">
-              {files.map((file) => (
-                <FileCard
-                  key={file.id}
-                  file={file}
-                  selectionMode={selectionMode}
-                  selected={selectedFileIds.has(file.id)}
-                  onToggleSelect={() => toggleFile(file.id, false)}
-                  onDownload={() => downloadFile(file)}
-                  onConvert={() => setConvertFile(file)}
-                  onRename={(name) => renameFile(file.id, name)}
-                  onDelete={() => deleteFile(file.id)}
-                  onToggleFavorite={() => toggleFavorite(file)}
-                  onMove={() => setMoveTarget({ kind: "file", id: file.id, name: file.file_name, currentParentId: file.folder_id })}
-                  onDragStart={(id) => setDraggedFileId(id)}
-                  onDragEnd={() => setDraggedFileId(null)}
-                  isDragging={draggedFileId === file.id}
-                />
-              ))}
-            </div>
-          )}
-        </div>
-      )}
+            {/* Files section — smaller card grid below the folders. */}
+            {files.length > 0 && (
+              <motion.div
+                className="grid grid-cols-[repeat(auto-fill,12.5rem)] gap-4"
+                variants={reduce ? undefined : staggerContainer}
+                initial={reduce ? false : "hidden"}
+                animate={reduce ? undefined : "visible"}
+              >
+                {files.map((file) => (
+                  <Item key={file.id} className="w-full">
+                    <FileCard
+                      file={file}
+                      selectionMode={selectionMode}
+                      selected={selectedFileIds.has(file.id)}
+                      onToggleSelect={() => toggleFile(file.id, false)}
+                      onDownload={() => downloadFile(file)}
+                      onConvert={() => setConvertFile(file)}
+                      onRename={(name) => renameFile(file.id, name)}
+                      onDelete={() => deleteFile(file.id)}
+                      onToggleFavorite={() => toggleFavorite(file)}
+                      onMove={() => setMoveTarget({ kind: "file", id: file.id, name: file.file_name, currentParentId: file.folder_id })}
+                      onDragStart={(id) => setDraggedFileId(id)}
+                      onDragEnd={() => setDraggedFileId(null)}
+                      isDragging={draggedFileId === file.id}
+                    />
+                  </Item>
+                ))}
+              </motion.div>
+            )}
+          </motion.div>
+        )}
+      </AnimatePresence>
 
+      {/* Empty state — fades/scale-in gently once loaded. */}
       {!loading && folders.length === 0 && files.length === 0 && !newFolder && (
-        <div className="rounded-xl border border-outline bg-surface py-16 text-center">
+        <PopIn className="rounded-xl border border-outline bg-surface py-16 text-center">
           <p className="font-display text-lg font-semibold">
             {showFavorites ? "No favorites yet" : "This folder is empty"}
           </p>
@@ -670,7 +713,7 @@ export function FilesPage() {
               ? "Star a file to see it here."
               : "Add a file or create a folder to get started."}
           </p>
-        </div>
+        </PopIn>
       )}
 
       {/* Upload-to-library modal */}
@@ -878,20 +921,16 @@ function FolderCard({
   }
 
   const selectable = selectionMode && !editing;
-
+  const reduce = useReducedMotion();
+  // `motion` is layered on an INNER element; the root stays a plain <div> so
+  // HTML5 drag events (onDragStart/onDragEnd/onDragOver/onDrop) are never
+  // intercepted by motion's pan-gesture handlers.
   return (
     <div
       draggable={selectionMode ? false : !editing}
       onDragStart={handleDragStart}
       onDragEnd={onDragEnd}
       onClick={selectable ? onToggleSelect : undefined}
-      className={`group flex w-full items-center gap-3 rounded-xl border px-4 py-4 transition-colors ${
-        selected
-          ? "border-primary bg-primary-container/20 ring-2 ring-primary/40"
-          : over
-            ? "border-primary bg-primary-container/20 ring-2 ring-primary/30"
-            : "border-outline bg-surface hover:border-primary/50"
-      } ${isDragging ? "opacity-40" : ""}`}
       onDragOver={(e) => {
         if (!active || draggingSelf) return;
         e.preventDefault();
@@ -927,61 +966,75 @@ function FolderCard({
         else if (folderId) onDropFolder(folderId);
       }}
     >
-      {selectable && (
-        <SelectionCheckbox selected={selected} ariaLabel={`Select folder ${folder.name}`} />
-      )}
-      <FolderSimple
-        size={22}
-        weight="duotone"
-        className={`shrink-0 ${selectable ? "" : "cursor-pointer"} text-warning ${
-          selectable ? "" : ""
-        }`}
-        onClick={selectable ? undefined : onOpen}
-        aria-label={`Open folder ${folder.name}`}
-      />
+      <motion.div
+        whileHover={reduce || editing || isDragging ? undefined : { y: -3, scale: 1.01 }}
+        whileTap={reduce || editing || isDragging ? undefined : { scale: 0.98 }}
+        animate={reduce || editing ? undefined : { scale: selected ? 1.02 : 1 }}
+        transition={{ type: "spring", stiffness: 300, damping: 26 }}
+        className={`group flex w-full items-center gap-3 rounded-xl border px-4 py-4 transition-colors ${
+          selected
+            ? "border-primary bg-primary-container/20 ring-2 ring-primary/40"
+            : over
+              ? "border-primary bg-primary-container/20 ring-2 ring-primary/30"
+              : "border-outline bg-surface hover:border-primary/50"
+        } ${isDragging ? "opacity-40" : ""}`}
+      >
+        {selectable && (
+          <SelectionCheckbox selected={selected} ariaLabel={`Select folder ${folder.name}`} />
+        )}
+        <FolderSimple
+          size={22}
+          weight="duotone"
+          className={`shrink-0 ${selectable ? "" : "cursor-pointer"} text-warning ${
+            selectable ? "" : ""
+          }`}
+          onClick={selectable ? undefined : onOpen}
+          aria-label={`Open folder ${folder.name}`}
+        />
 
-      {editing ? (
-        <form
-          className="flex min-w-0 flex-1 items-center gap-1.5"
-          onSubmit={(e) => { e.preventDefault(); submit(); }}
-        >
-          <input
-            autoFocus
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            onFocus={(e) => e.target.select()}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") submit();
-              if (e.key === "Escape") { setEditing(false); setDraft(folder.name); }
-            }}
-            className="min-w-0 flex-1 rounded border border-outline-strong bg-surface-variant px-2 py-1 text-sm text-on-background focus:border-primary focus:outline-none"
-            aria-label="Folder name"
-          />
-          <button type="submit" className="text-primary" aria-label="Save">
-            <Check size={16} weight="bold" />
-          </button>
-          <button type="button" onClick={() => { setEditing(false); setDraft(folder.name); }} className="text-muted hover:text-error" aria-label="Cancel">
-            <X size={16} />
-          </button>
-        </form>
-      ) : (
-        <>
-          <button
-            type="button"
-            onClick={selectable ? onToggleSelect : onOpen}
-            className="min-w-0 flex-1 truncate text-left text-sm font-medium text-on-background"
+        {editing ? (
+          <form
+            className="flex min-w-0 flex-1 items-center gap-1.5"
+            onSubmit={(e) => { e.preventDefault(); submit(); }}
           >
-            {folder.name}
-          </button>
-          {!selectable && (
-            <CardMenu
-              onRename={() => { setDraft(folder.name); setEditing(true); }}
-              onDelete={onDelete}
-              onMove={onMove}
+            <input
+              autoFocus
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onFocus={(e) => e.target.select()}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") submit();
+                if (e.key === "Escape") { setEditing(false); setDraft(folder.name); }
+              }}
+              className="min-w-0 flex-1 rounded border border-outline-strong bg-surface-variant px-2 py-1 text-sm text-on-background focus:border-primary focus:outline-none"
+              aria-label="Folder name"
             />
-          )}
-        </>
-      )}
+            <button type="submit" className="text-primary" aria-label="Save">
+              <Check size={16} weight="bold" />
+            </button>
+            <button type="button" onClick={() => { setEditing(false); setDraft(folder.name); }} className="text-muted hover:text-error" aria-label="Cancel">
+              <X size={16} />
+            </button>
+          </form>
+        ) : (
+          <>
+            <button
+              type="button"
+              onClick={selectable ? onToggleSelect : onOpen}
+              className="min-w-0 flex-1 truncate text-left text-sm font-medium text-on-background"
+            >
+              {folder.name}
+            </button>
+            {!selectable && (
+              <CardMenu
+                onRename={() => { setDraft(folder.name); setEditing(true); }}
+                onDelete={onDelete}
+                onMove={onMove}
+              />
+            )}
+          </>
+        )}
+      </motion.div>
     </div>
   );
 }
@@ -1039,6 +1092,10 @@ function FileCard({
   // NOTE: no `overflow-hidden` on the root — the absolutely-positioned CardMenu
   // dropdown (absolute right-0 top-8 z-20) must be able to overflow the card.
   // The rounded clip lives only on the thumbnail wrapper below.
+  const reduce = useReducedMotion();
+  // `motion` is layered on an INNER element; the root stays a plain <div> so
+  // HTML5 drag events (onDragStart/onDragEnd) are never intercepted by motion's
+  // pan-gesture handlers.
   return (
     <div
       draggable={selectable ? false : !editing}
@@ -1053,93 +1110,100 @@ function FileCard({
       } : undefined}
       role={selectable ? "button" : undefined}
       tabIndex={selectable ? 0 : -1}
-      className={`group flex w-full flex-col rounded-xl border transition-opacity ${
-        editing
-          ? "border-outline bg-surface"
-          : selected
-            ? "cursor-default border-primary bg-primary-container/20 ring-2 ring-primary/40"
-            : selectable
-              ? "cursor-default border-outline bg-surface hover:border-primary/50"
-              : `cursor-grab border-outline bg-surface hover:border-primary/50 active:cursor-grabbing ${isDragging ? "opacity-40" : ""}`
-      }`}
     >
-      {/* Whole card is ~0.8cm smaller than the folder rows: slightly shorter
-          thumbnail and tighter padding. */}
-      <div className="px-2 pt-2">
-        <div className="overflow-hidden rounded-lg">
-          <FileThumbnail
-            fileName={file.file_name}
-            mimeType={file.mime_type}
-            url={null}
-            className="aspect-[4/3]"
-          />
-        </div>
-      </div>
-      <div className="flex items-center gap-1 p-2.5">
-        {editing ? (
-          <form
-            className="flex min-w-0 flex-1 items-center gap-1"
-            onSubmit={(e) => { e.preventDefault(); submit(); }}
-          >
-            <input
-              autoFocus
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              onFocus={(e) => e.target.select()}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") submit();
-                if (e.key === "Escape") { setEditing(false); setDraft(file.file_name); }
-              }}
-              className="min-w-0 flex-1 rounded border border-outline-strong bg-surface-variant px-1.5 py-1 text-sm text-on-background focus:border-primary focus:outline-none"
-              aria-label="File name"
+      <motion.div
+        whileHover={reduce || editing || isDragging ? undefined : { y: -3, scale: 1.01 }}
+        whileTap={reduce || editing || isDragging ? undefined : { scale: 0.98 }}
+        animate={reduce || editing ? undefined : { scale: selected ? 1.02 : 1 }}
+        transition={{ type: "spring", stiffness: 300, damping: 26 }}
+        className={`group flex w-full flex-col rounded-xl border transition-opacity ${
+          editing
+            ? "border-outline bg-surface"
+            : selected
+              ? "cursor-default border-primary bg-primary-container/20 ring-2 ring-primary/40"
+              : selectable
+                ? "cursor-default border-outline bg-surface hover:border-primary/50"
+                : `cursor-grab border-outline bg-surface hover:border-primary/50 active:cursor-grabbing ${isDragging ? "opacity-40" : ""}`
+        }`}
+      >
+        {/* Whole card is ~0.8cm smaller than the folder rows: slightly shorter
+            thumbnail and tighter padding. */}
+        <div className="px-2 pt-2">
+          <div className="overflow-hidden rounded-lg">
+            <FileThumbnail
+              fileName={file.file_name}
+              mimeType={file.mime_type}
+              url={null}
+              className="aspect-[4/3]"
             />
-            <button type="submit" className="text-primary" aria-label="Save">
-              <Check size={16} weight="bold" />
-            </button>
-            <button type="button" onClick={() => { setEditing(false); setDraft(file.file_name); }} className="text-muted hover:text-error" aria-label="Cancel">
-              <X size={16} />
-            </button>
-          </form>
-        ) : (
-          <>
-            {selectionMode && (
-              <SelectionCheckbox
-                selected={selected}
-                ariaLabel={`Select file ${file.file_name}`}
-              />
-            )}
-            <div
-              className="min-w-0 flex-1 truncate text-left text-sm font-medium text-on-background"
-              title={file.file_name}
+          </div>
+        </div>
+        <div className="flex items-center gap-1 p-2.5">
+          {editing ? (
+            <form
+              className="flex min-w-0 flex-1 items-center gap-1"
+              onSubmit={(e) => { e.preventDefault(); submit(); }}
             >
-              {file.file_name}
-            </div>
-            {!selectable && (
-              <button
-                type="button"
-                onClick={onToggleFavorite}
-                aria-label={isFavorite ? "Remove from favorites" : "Add to favorites"}
-                aria-pressed={isFavorite}
-                title={isFavorite ? "Remove from favorites" : "Add to favorites"}
-                className="shrink-0 rounded p-1 text-muted transition-colors hover:bg-surface-variant hover:text-primary"
-              >
-                <Star size={16} weight={isFavorite ? "fill" : "regular"} className={isFavorite ? "text-warning" : ""} />
-              </button>
-            )}
-            {!selectable && (
-              <CardMenu
-                onDownload={onDownload}
-                onConvert={onConvert}
-                onRename={() => { setDraft(file.file_name); setEditing(true); }}
-                onMove={onMove}
-                onToggleFavorite={onToggleFavorite}
-                isFavorite={isFavorite}
-                onDelete={onDelete}
+              <input
+                autoFocus
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                onFocus={(e) => e.target.select()}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") submit();
+                  if (e.key === "Escape") { setEditing(false); setDraft(file.file_name); }
+                }}
+                className="min-w-0 flex-1 rounded border border-outline-strong bg-surface-variant px-1.5 py-1 text-sm text-on-background focus:border-primary focus:outline-none"
+                aria-label="File name"
               />
-            )}
-          </>
-        )}
-      </div>
+              <button type="submit" className="text-primary" aria-label="Save">
+                <Check size={16} weight="bold" />
+              </button>
+              <button type="button" onClick={() => { setEditing(false); setDraft(file.file_name); }} className="text-muted hover:text-error" aria-label="Cancel">
+                <X size={16} />
+              </button>
+            </form>
+          ) : (
+            <>
+              {selectionMode && (
+                <SelectionCheckbox
+                  selected={selected}
+                  ariaLabel={`Select file ${file.file_name}`}
+                />
+              )}
+              <div
+                className="min-w-0 flex-1 truncate text-left text-sm font-medium text-on-background"
+                title={file.file_name}
+              >
+                {file.file_name}
+              </div>
+              {!selectable && (
+                <button
+                  type="button"
+                  onClick={onToggleFavorite}
+                  aria-label={isFavorite ? "Remove from favorites" : "Add to favorites"}
+                  aria-pressed={isFavorite}
+                  title={isFavorite ? "Remove from favorites" : "Add to favorites"}
+                  className="shrink-0 rounded p-1 text-muted transition-colors hover:bg-surface-variant hover:text-primary"
+                >
+                  <Star size={16} weight={isFavorite ? "fill" : "regular"} className={isFavorite ? "text-warning" : ""} />
+                </button>
+              )}
+              {!selectable && (
+                <CardMenu
+                  onDownload={onDownload}
+                  onConvert={onConvert}
+                  onRename={() => { setDraft(file.file_name); setEditing(true); }}
+                  onMove={onMove}
+                  onToggleFavorite={onToggleFavorite}
+                  isFavorite={isFavorite}
+                  onDelete={onDelete}
+                />
+              )}
+            </>
+          )}
+        </div>
+      </motion.div>
     </div>
   );
 }

@@ -119,6 +119,30 @@ export interface ConversionMap {
   conversions: Record<string, string[]>
 }
 
+// ---- Guest (no-account) ----
+/** Response from creating a guest conversion job (includes the guest token). */
+export interface GuestJobResponse extends ConversionJobResponse {
+  guest_token: string
+}
+
+/** A locally-stored guest conversion for the no-account history list. */
+export interface GuestHistoryItem {
+  job_id: string
+  guest_token: string
+  fileName: string
+  source_format: string
+  target_format: string
+  status: string
+  progress?: number
+  errorMessage?: string
+  createdAt: string
+  output_file?: string | null
+  download_url?: string | null
+  /** Original input key/path (used to derive the download filename). */
+  input_file?: string | null
+  object_key?: string | null
+}
+
 // ---- Files ----
 export interface FileMetadataResponse {
   id: string
