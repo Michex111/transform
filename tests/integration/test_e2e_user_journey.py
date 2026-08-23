@@ -40,6 +40,7 @@ from src.infrastructure.converters.converter_registry import ConverterRegistry  
 from src.infrastructure.database.session import Base, get_db_session  # noqa: E402
 from src.infrastructure.config.settings import get_settings  # noqa: E402
 from src.presentation.api.dependencies.service_dependencies import (  # noqa: E402
+    get_encryption_service,
     get_event_subscriber,
     get_job_queue_port,
     get_minio_url_storage,
@@ -275,6 +276,12 @@ def e2e_app(tmp_path) -> Generator[tuple[TestClient, dict], None, None]:
     api_main.app.dependency_overrides[get_job_queue_port] = override_queue
     api_main.app.dependency_overrides[get_event_subscriber] = override_subscriber
     api_main.app.dependency_overrides[get_stripe_service] = override_stripe
+    # The e2e journey asserts on pre-signed download URLs, which only appear
+    # when encryption is OFF. Force it off here so the test is deterministic
+    # regardless of whether ENCRYPTION_MASTER_KEY is set in the developer's
+    # .env. Downstream encrypted download/stream is covered by the dedicated
+    # encryption unit tests.
+    api_main.app.dependency_overrides[get_encryption_service] = lambda: None
 
     client = TestClient(api_main.app)
     try:

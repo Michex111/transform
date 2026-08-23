@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.domain.subscriptions.entities.credit import Credit
@@ -29,6 +30,14 @@ _TIER_BY_NAME: dict[str, SubscriptionTier] = {
 }
 
 
+def _resolve_tier(tier_name: str | None) -> SubscriptionTier:
+    """Strictly resolve a tier name; never silently default to PRO."""
+    tier = _TIER_BY_NAME.get((tier_name or "").lower())
+    if tier is None:
+        raise ValueError(f"Unrecognised subscription tier: {tier_name!r}")
+    return tier
+
+
 async def _activate_subscription(
     db: AsyncSession,
     *,
@@ -38,7 +47,7 @@ async def _activate_subscription(
     stripe_subscription_id: str | None,
 ) -> None:
     """Upsert the user's subscription row and grant the tier's monthly credits."""
-    tier = _TIER_BY_NAME.get(tier_name.lower(), SubscriptionTier.PRO)
+    tier = _resolve_tier(tier_name)
     actor_key = f"user:{user_id}"
 
     sub_repo = SQLSubscriptionRepository(db)
@@ -57,8 +66,16 @@ async def _activate_subscription(
         credit_repo = SQLCreditRepository(db)
         existing = await credit_repo.get_credit(user_id, period_key)
         if existing is not None:
+            # Do NOT reset `remaining` to the full allowance — that would wipe
+            # any credits the user purchased on top. Instead raise the allowance
+            # by the delta and carry the remaining balance forward, clamped so it
+            # never exceeds the new allowance.
+            delta = allowance - existing.allowance
             existing.allowance = allowance
-            existing.remaining = allowance
+            if delta > 0:
+                existing.remaining = min(existing.remaining + delta, allowance)
+            elif existing.remaining > allowance:
+                existing.remaining = allowance
             await credit_repo.save_credit(existing)
         else:
             await credit_repo.save_credit(
@@ -89,11 +106,26 @@ async def _grant_purchased_credits(
     Uses the Stripe session id as the transaction reference so repeated
     deliveries of the same webhook don't double-credit the user. For a FREE
     user the purchased credits are added on top of the existing allowance.
+
+    Idempotency is enforced by a UNIQUE constraint on ``credit_transactions.
+    reference_id``: a duplicate delivery attempts to insert a transaction with
+    the same reference, which raises ``IntegrityError`` and is treated as an
+    already-granted credit (race-safe — no TOCTOU window).
     """
+    if not reference_id:
+        logger.warning("Credit purchase webhook missing reference_id; ignoring")
+        return
+    if credits < 1 or credits > 100000:
+        # Bound the granted amount to prevent metadata-driven abuse.
+        logger.warning("Rejecting out-of-range credit grant: %s credits", credits)
+        return
+
     credit_repo = SQLCreditRepository(db)
     period_key = datetime.now(UTC).strftime("%Y-%m")
 
-    existing_txns = await credit_repo.list_transactions(int(user_id), offset=0, limit=100)
+    # Quick pre-check (non-authoritative) to avoid the write path for the common
+    # duplicate case. The unique constraint is the authoritative guard.
+    existing_txns = await credit_repo.list_transactions(int(user_id), offset=0, limit=200)
     if any(
         t.transaction_type == TransactionType.PURCHASE.value
         and t.reference_id == reference_id
@@ -113,14 +145,22 @@ async def _grant_purchased_credits(
     credit.remaining += credits
     await credit_repo.save_credit(credit)
 
-    await credit_repo.record_transaction(
-        transaction_id=str(uuid.uuid4()),
-        user_id=int(user_id),
-        amount=credits,
-        transaction_type=TransactionType.PURCHASE.value,
-        reference_id=reference_id,
-        description=f"Purchased {credits} credits via Stripe",
-    )
+    try:
+        await credit_repo.record_transaction(
+            transaction_id=str(uuid.uuid4()),
+            user_id=int(user_id),
+            amount=credits,
+            transaction_type=TransactionType.PURCHASE.value,
+            reference_id=reference_id,
+            description=f"Purchased {credits} credits via Stripe",
+        )
+    except IntegrityError:
+        # A concurrent/duplicate delivery already recorded this reference. The
+        # unique constraint fired, so we must not have double-credited. Because
+        # we already bumped the bucket above, roll back to undo it.
+        await db.rollback()
+        logger.info("Duplicate credit purchase ignored (unique ref): %s", reference_id)
+        return
 
     logger.info("Granted %s credits to user=%s ref=%s", credits, user_id, reference_id)
 
@@ -250,13 +290,16 @@ async def _handle_checkout_completed(db: AsyncSession, event_data: dict[str, Any
     user_id = metadata.get("user_id")
     tier = metadata.get("tier", "pro")
     if user_id:
-        await _activate_subscription(
-            db,
-            user_id=user_id,
-            tier_name=tier,
-            stripe_customer_id=event_data.get("customer"),
-            stripe_subscription_id=event_data.get("subscription"),
-        )
+        try:
+            await _activate_subscription(
+                db,
+                user_id=user_id,
+                tier_name=tier,
+                stripe_customer_id=event_data.get("customer"),
+                stripe_subscription_id=event_data.get("subscription"),
+            )
+        except ValueError as exc:
+            logger.warning("Skipping subscription activation: %s", exc)
 
 
 async def _refresh_allowance_for_invoice(db: AsyncSession, event_data: dict[str, Any]) -> None:
@@ -291,13 +334,16 @@ async def _refresh_allowance_for_invoice(db: AsyncSession, event_data: dict[str,
         logger.info("Invoice subscription has no user metadata: %s", subscription_id)
         return
 
-    await _activate_subscription(
-        db,
-        user_id=user_id,
-        tier_name=tier_name,
-        stripe_customer_id=event_data.get("customer"),
-        stripe_subscription_id=subscription_id,
-    )
+    try:
+        await _activate_subscription(
+            db,
+            user_id=user_id,
+            tier_name=tier_name,
+            stripe_customer_id=event_data.get("customer"),
+            stripe_subscription_id=subscription_id,
+        )
+    except ValueError as exc:
+        logger.warning("Skipping invoice allowance refresh: %s", exc)
 
 
 async def _handle_subscription_updated(db: AsyncSession, event_data: dict[str, Any]) -> None:
@@ -313,13 +359,16 @@ async def _handle_subscription_updated(db: AsyncSession, event_data: dict[str, A
         return
 
     tier_name = metadata.get("tier", "pro")
-    await _activate_subscription(
-        db,
-        user_id=user_id,
-        tier_name=tier_name,
-        stripe_customer_id=event_data.get("customer"),
-        stripe_subscription_id=event_data.get("id"),
-    )
+    try:
+        await _activate_subscription(
+            db,
+            user_id=user_id,
+            tier_name=tier_name,
+            stripe_customer_id=event_data.get("customer"),
+            stripe_subscription_id=event_data.get("subscription"),
+        )
+    except ValueError as exc:
+        logger.warning("Skipping subscription update: %s", exc)
     logger.info("Subscription updated: user=%s status=%s", user_id, status)
 
 

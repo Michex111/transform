@@ -139,7 +139,15 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
                 return await self._redis_limiter.is_allowed(key, limit, window)
             except Exception as e:  # Redis down — fall back to in-memory
                 self._redis_unavailable = True
-                logger.warning("Redis rate limiter unavailable, using in-memory fallback: %s", e)
+                # Fail-open but alert loudly: with multiple replicas the
+                # per-instance in-memory counters drift, so an attacker can
+                # work around the limit by hitting different instances. Signal
+                # this as an ERROR (not a warning) for operator visibility.
+                logger.error(
+                    "Rate limiter DEGRADED to per-instance in-memory fallback "
+                    "(cluster-wide limits DISABLED). Redis unreachable: %s",
+                    e,
+                )
 
         # In-memory fallback (single-process only)
         now = time.time()

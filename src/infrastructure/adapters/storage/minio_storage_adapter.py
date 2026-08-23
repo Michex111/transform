@@ -182,6 +182,23 @@ class MinioUrlStorageAdapter:
 
         return await asyncio.to_thread(_stat)
 
+    async def read_object_head(self, object_key: str, max_bytes: int = 4096) -> bytes:
+        """Read the first ``max_bytes`` of an object (for magic-byte checks)."""
+        def _read():
+            try:
+                response = self._minio_client.get_object(self._bucket_name, object_key)
+                try:
+                    return response.read(max_bytes)
+                finally:
+                    response.close()
+            except S3Error as e:
+                if e.code == "NoSuchKey":
+                    return b""
+                self._logger.error("minio_read_head_failed", extra={"key": object_key, "error": str(e)})
+                raise StorageOperationError() from e
+
+        return await asyncio.to_thread(_read)
+
     async def remove_object(self, object_key: str) -> bool:
         """
         Delete an object from the MinIO bucket.

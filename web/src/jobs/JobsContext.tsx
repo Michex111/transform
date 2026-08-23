@@ -50,42 +50,63 @@ export function JobsProvider({ children }: { children: ReactNode }) {
     }
   }, [jobs]);
 
+  // Stable primitive key derived from the *set* of active job ids, so the
+  // subscription effect only re-runs when the active set changes — not on every
+  // SSE progress tick (which mutates `jobs` but not the active set).
+  const activeJobIds = jobs
+    .filter((j) => j.status === "PROCESSING" || j.status === "PENDING")
+    .map((j) => j.job_id);
+  const activeKey = activeJobIds.slice().sort().join("\u0001");
+
   // Keep terminal-state jobs subscribed for live progress; drop subscriptions when done.
   useEffect(() => {
-    for (const job of jobs) {
-      const active = job.status === "PROCESSING" || job.status === "PENDING";
-      if (active && !subs.current.has(job.job_id)) {
-        const cleanup = api.subscribeToJob(job.job_id, {
-          onProgress: (evt) => {
-            setJobs((prev) =>
-              prev.map((j) =>
-                j.job_id === job.job_id
-                  ? { ...j, status: evt.status, progress: evt.progress, fileName: evt.message ?? j.fileName }
-                  : j,
-              ),
-            );
-          },
-          onError: (msg) => {
-            setJobs((prev) =>
-              prev.map((j) =>
-                j.job_id === job.job_id
-                  ? { ...j, status: "FAILED", errorMessage: msg || "Conversion failed" }
-                  : j,
-              ),
-            );
-          },
-          onDone: () => {
-            subs.current.delete(job.job_id);
-          },
-        });
-        subs.current.set(job.job_id, cleanup);
-      }
+    const ids = activeKey ? activeKey.split("\u0001") : [];
+    for (const id of ids) {
+      if (subs.current.has(id)) continue;
+      const cleanup = api.subscribeToJob(id, {
+        onProgress: (evt) => {
+          setJobs((prev) =>
+            prev.map((j) =>
+              j.job_id === id
+                ? {
+                    ...j,
+                    status: evt.status,
+                    progress: evt.progress,
+                    // `message` carries status prose ("downloading file", the
+                    // failure reason, …). It must never overwrite the user's
+                    // real filename (which is what the History/Queue file
+                    // column renders via `fileName ?? input_file`). For FAILED
+                    // events, surface the message as the error text so the
+                    // error tooltip is populated without waiting for a refresh.
+                    errorMessage:
+                      evt.status === "FAILED"
+                        ? evt.message ?? j.errorMessage
+                        : j.errorMessage,
+                  }
+                : j,
+            ),
+          );
+        },
+        onError: (msg) => {
+          setJobs((prev) =>
+            prev.map((j) =>
+              j.job_id === id
+                ? { ...j, status: "FAILED", errorMessage: msg || "Conversion failed" }
+                : j,
+            ),
+          );
+        },
+        onDone: () => {
+          subs.current.delete(id);
+        },
+      });
+      subs.current.set(id, cleanup);
     }
-    return () => {
-      // On unmount, clean up all subscriptions.
-      // Note: only the provider unmounts at app level, so this is safe.
-    };
-  }, [jobs]);
+    // No teardown here: subscriptions self-terminate via `onDone` (the server
+    // closes the stream), and the provider only unmounts at the app level.
+    // Keying on `activeKey` means SSE ticks (which change `jobs` but not the
+    // active set) no longer tear down/recreate every subscription.
+  }, [activeKey]);
 
   const addJob = useCallback((job: UiJob) => {
     setJobs((prev) => [{ ...job, createdAt: job.createdAt ?? new Date().toISOString() }, ...prev]);

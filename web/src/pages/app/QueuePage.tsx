@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { LayoutGroup, motion } from "motion/react";
 import { Download, ArrowCounterClockwise } from "@phosphor-icons/react";
@@ -29,6 +29,87 @@ const STATUS_ORDER: Record<string, number> = {
   FAILED: 4,
 };
 
+interface QueueRowProps {
+  job: UiJob;
+  onDownload: (jobId: string) => void;
+  onRetry: (job: UiJob) => void;
+}
+
+/**
+ * Memoized queue row. Keyed by stable props (job id + callback identities) so a
+ * single SSE progress tick on one job does not re-render every other row.
+ */
+const QueueRow = memo(function QueueRow({ job, onDownload, onRetry }: QueueRowProps) {
+  return (
+    <motion.li
+      layout
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      exit={{ opacity: 0 }}
+      transition={{ type: "spring", stiffness: 260, damping: 28 }}
+      className="grid grid-cols-[2fr_1fr_auto] items-center gap-4 px-5 py-3 transition-colors hover:bg-surface-variant/50 sm:grid-cols-[2fr_1fr_1fr_140px_auto]"
+    >
+      <span className="min-w-0 truncate text-sm text-on-background">
+        {job.fileName ?? job.input_file}
+      </span>
+      <span className="hidden items-center gap-1 sm:flex">
+        <FormatChip format={job.source_format} />
+        <FormatChip format={job.target_format} />
+      </span>
+      <StatusBadge status={job.status} />
+      <div className="hidden sm:block">
+        <ProgressBar
+          value={
+            job.progress ??
+            (job.status === "COMPLETED"
+              ? 100
+              : job.status === "PROCESSING"
+                ? 45
+                : job.status === "FAILED"
+                  ? 100
+                  : 0)
+          }
+          from="var(--color-primary)"
+          to={job.status === "FAILED" ? "var(--color-error)" : undefined}
+        />
+      </div>
+      <div className="flex items-center justify-end gap-3">
+        <span className="hidden font-mono text-xs text-muted lg:block">
+          {formatDateTime(job.createdAt)}
+        </span>
+        {job.status === "COMPLETED" && !!job.credits_used && (
+          <CreditsBadge credits={job.credits_used} />
+        )}
+        {job.status === "COMPLETED" && (
+          <button
+            onClick={() => onDownload(job.job_id)}
+            className="text-muted transition-transform hover:scale-110 hover:text-primary"
+            aria-label="Download"
+            title="Download"
+          >
+            <Download size={18} />
+          </button>
+        )}
+        {job.status === "FAILED" && (
+          <>
+            <ErrorButton message={job.errorMessage} />
+            <motion.button
+              onClick={() => onRetry(job)}
+              whileHover={{ rotate: -180 }}
+              transition={{ type: "spring", stiffness: 200, damping: 15 }}
+              className="text-muted hover:text-primary"
+              aria-label="Retry"
+              title="Retry"
+            >
+              <ArrowCounterClockwise size={18} />
+            </motion.button>
+          </>
+        )}
+      </div>
+    </motion.li>
+  );
+});
+
 export function QueuePage() {
   const { jobs, updateJob, refresh } = useJobs();
   const { api: client } = useAuth();
@@ -41,54 +122,60 @@ export function QueuePage() {
     refresh();
   }, [refresh]);
 
-  async function handleDownload(jobId: string) {
-    try {
-      await client.downloadConvertedFile(jobId);
-    } catch (err) {
-      error(err instanceof Error ? err.message : "Could not download file");
-    }
-  }
+  const handleDownload = useCallback(
+    async (jobId: string) => {
+      try {
+        await client.downloadConvertedFile(jobId);
+      } catch (err) {
+        error(err instanceof Error ? err.message : "Could not download file");
+      }
+    },
+    [client, error],
+  );
 
-  async function handleRetry(job: UiJob) {
-    // 1. If the input object is gone from storage, fall back to a full
-    //    re-upload via the normal conversion route.
-    const exists = await client.objectExists(job.object_key || job.input_file);
-    if (!exists) {
-      const cached = getCachedFile(job.job_id);
-      if (cached) {
-        try {
-          const newJob = await client.convertWithFile(cached.source, cached.target, cached.file);
-          updateJob(job.job_id, {
-            ...newJob,
-            fileName: cached.file.name,
-            status: "PENDING",
-            progress: 0,
-            createdAt: new Date().toISOString(),
-          });
-          dropCachedFile(job.job_id);
-          success("Input file was missing — re-uploaded and re-queued.");
-        } catch (err) {
-          error(err instanceof Error ? err.message : "Could not re-upload file");
+  const handleRetry = useCallback(
+    async (job: UiJob) => {
+      // 1. If the input object is gone from storage, fall back to a full
+      //    re-upload via the normal conversion route.
+      const exists = await client.objectExists(job.object_key || job.input_file);
+      if (!exists) {
+        const cached = getCachedFile(job.job_id);
+        if (cached) {
+          try {
+            const newJob = await client.convertWithFile(cached.source, cached.target, cached.file);
+            updateJob(job.job_id, {
+              ...newJob,
+              fileName: cached.file.name,
+              status: "PENDING",
+              progress: 0,
+              createdAt: new Date().toISOString(),
+            });
+            dropCachedFile(job.job_id);
+            success("Input file was missing — re-uploaded and re-queued.");
+          } catch (err) {
+            error(err instanceof Error ? err.message : "Could not re-upload file");
+          }
+          return;
         }
+        // No cached file — send the user to Convert pre-filled.
+        navigate("/app/convert", {
+          state: { source: job.source_format, target: job.target_format },
+        });
+        error("The input file is no longer in storage. Re-select it to convert.");
         return;
       }
-      // No cached file — send the user to Convert pre-filled.
-      navigate("/app/convert", {
-        state: { source: job.source_format, target: job.target_format },
-      });
-      error("The input file is no longer in storage. Re-select it to convert.");
-      return;
-    }
 
-    // 2. Input still exists — re-enqueue server-side without re-uploading.
-    try {
-      const updated = await client.retryJob(job.job_id);
-      updateJob(job.job_id, { status: "PENDING", progress: 0, output_file: updated.output_file, download_url: updated.download_url });
-      success("Conversion re-queued — tracking it now.");
-    } catch (err) {
-      error(err instanceof Error ? err.message : "Could not retry conversion");
-    }
-  }
+      // 2. Input still exists — re-enqueue server-side without re-uploading.
+      try {
+        const updated = await client.retryJob(job.job_id);
+        updateJob(job.job_id, { status: "PENDING", progress: 0, output_file: updated.output_file, download_url: updated.download_url });
+        success("Conversion re-queued — tracking it now.");
+      } catch (err) {
+        error(err instanceof Error ? err.message : "Could not retry conversion");
+      }
+    },
+    [client, navigate, updateJob, success, error],
+  );
 
   const active = jobs.filter((j) => j.status === "PROCESSING" || j.status === "PENDING").length;
 
@@ -152,74 +239,13 @@ export function QueuePage() {
           <ul className="divide-y divide-outline">
             <LayoutGroup>
               {sorted.map((job) => (
-                <motion.li
+                <QueueRow
                   key={job.job_id}
-                  layout
-                  initial={{ opacity: 0, y: 8 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0 }}
-                  transition={{ type: "spring", stiffness: 260, damping: 28 }}
-                  className="grid grid-cols-[2fr_1fr_auto] items-center gap-4 px-5 py-3 transition-colors hover:bg-surface-variant/50 sm:grid-cols-[2fr_1fr_1fr_140px_auto]"
-                >
-                  <span className="min-w-0 truncate text-sm text-on-background">
-                    {job.fileName ?? job.input_file}
-                  </span>
-                  <span className="hidden items-center gap-1 sm:flex">
-                    <FormatChip format={job.source_format} />
-                    <FormatChip format={job.target_format} />
-                  </span>
-                  <StatusBadge status={job.status} />
-                  <div className="hidden sm:block">
-                    <ProgressBar
-                      value={
-                        job.progress ??
-                        (job.status === "COMPLETED"
-                          ? 100
-                          : job.status === "PROCESSING"
-                            ? 45
-                            : job.status === "FAILED"
-                              ? 100
-                              : 0)
-                      }
-                      from="var(--color-primary)"
-                      to={job.status === "FAILED" ? "var(--color-error)" : undefined}
-                    />
-                  </div>
-                  <div className="flex items-center justify-end gap-3">
-                    <span className="hidden font-mono text-xs text-muted lg:block">
-                      {formatDateTime(job.createdAt)}
-                    </span>
-                    {job.status === "COMPLETED" && !!job.credits_used && (
-                      <CreditsBadge credits={job.credits_used} />
-                    )}
-                    {job.status === "COMPLETED" && (
-                      <button
-                        onClick={() => handleDownload(job.job_id)}
-                        className="text-muted transition-transform hover:scale-110 hover:text-primary"
-                        aria-label="Download"
-                        title="Download"
-                      >
-                        <Download size={18} />
-                      </button>
-                    )}
-                    {job.status === "FAILED" && (
-                      <>
-                        <ErrorButton message={job.errorMessage} />
-                        <motion.button
-                          onClick={() => handleRetry(job)}
-                          whileHover={{ rotate: -180 }}
-                          transition={{ type: "spring", stiffness: 200, damping: 15 }}
-                          className="text-muted hover:text-primary"
-                          aria-label="Retry"
-                          title="Retry"
-                        >
-                          <ArrowCounterClockwise size={18} />
-                        </motion.button>
-                      </>
-                    )}
-                  </div>
-                </motion.li>
-            ))}
+                  job={job}
+                  onDownload={handleDownload}
+                  onRetry={handleRetry}
+                />
+              ))}
             </LayoutGroup>
           </ul>
         )}
