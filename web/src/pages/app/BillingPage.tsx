@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { Coins } from "@phosphor-icons/react";
 import { useAuth } from "@/auth/AuthContext";
 import { useToast } from "@/auth/ToastContext";
@@ -15,11 +15,34 @@ import type {
 export function BillingPage() {
   const { api: client } = useAuth();
   const { success, error } = useToast();
+  const navigate = useNavigate();
+  const location = useLocation();
   const [plan, setPlan] = useState<SubscriptionStatusResponse | null>(null);
   const [credit, setCredit] = useState<CreditBalanceResponse | null>(null);
   const [pricing, setPricing] = useState<CreditPricingResponse[]>([]);
   const [history, setHistory] = useState<CreditTransactionResponse[]>([]);
   const [loading, setLoading] = useState(true);
+  const [portalLoading, setPortalLoading] = useState(false);
+
+  // Show feedback when the user returns from Stripe-hosted Checkout or the
+  // Customer Portal, then strip the query params so a refresh doesn't re-show it.
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    if (params.get("checkout") === "success") {
+      success("Payment successful — your subscription is now active.");
+    } else if (params.get("credits") === "success") {
+      success("Payment successful — credits have been added.");
+    } else if (params.get("checkout") === "cancelled") {
+      error("Checkout was cancelled — no changes were made.");
+    } else if (params.get("credits") === "cancelled") {
+      error("Checkout was cancelled — no credits were added.");
+    } else if (params.get("checkout") !== null || params.get("credits") !== null) {
+      // Unknown/other params: just clean the URL.
+    } else {
+      return;
+    }
+    navigate("/app/billing", { replace: true });
+  }, [location.search, navigate, success, error]);
 
   useEffect(() => {
     let active = true;
@@ -44,14 +67,47 @@ export function BillingPage() {
     };
   }, [client, error]);
 
+  // Refresh the credit balance live whenever a conversion completes and the
+  // worker publishes the user's updated remaining credits via JobsContext.
+  useEffect(() => {
+    const onCreditsUpdated = () => {
+      client
+        .creditBalance()
+        .then((balance) => setCredit(balance))
+        .catch((e: Error) => error(e.message));
+    };
+    window.addEventListener("credits:updated", onCreditsUpdated);
+    return () => window.removeEventListener("credits:updated", onCreditsUpdated);
+  }, [client, error]);
+
   async function buy(amount: number) {
     try {
-      await client.purchaseCredits(amount);
-      const balance = await client.creditBalance();
-      setCredit(balance);
-      success(`${amount} credits added`);
+      // Credit packs go through Stripe-hosted Checkout. Credits are granted by
+      // the backend only after the payment confirms (checkout webhook).
+      const { checkout_url } = await client.purchaseCredits(amount);
+      window.location.assign(checkout_url);
     } catch (err) {
-      error(err instanceof Error ? err.message : "Could not buy credits");
+      error(err instanceof Error ? err.message : "Could not start credit purchase");
+    }
+  }
+
+  async function openPortal() {
+    setPortalLoading(true);
+    try {
+      const { portal_url } = await client.createPortalSession();
+      window.location.assign(portal_url);
+    } catch (err) {
+      // The portal requires an existing Stripe customer. A user with no paid
+      // subscription (Free tier) has no customer yet, so guide them to upgrade
+      // instead of showing a raw error.
+      const message = err instanceof Error ? err.message : "";
+      if (message.toLowerCase().includes("no stripe customer")) {
+        navigate("/pricing");
+      } else {
+        error(message || "Could not open billing portal");
+      }
+    } finally {
+      setPortalLoading(false);
     }
   }
 
@@ -94,13 +150,15 @@ export function BillingPage() {
               )}
             </div>
             <div className="flex items-center gap-2">
-              <Link to="/pricing">
-                <Button variant="secondary">Manage subscription</Button>
-              </Link>
-              <Button variant="destructive" onClick={cancel}>
-              Cancel subscription
-            </Button>
-          </div>
+              <Button variant="secondary" onClick={openPortal} disabled={portalLoading}>
+                {portalLoading ? "Opening…" : "Manage subscription"}
+              </Button>
+              {plan && plan.tier !== "FREE" && (
+                <Button variant="destructive" onClick={cancel}>
+                  Cancel subscription
+                </Button>
+              )}
+            </div>
         </div>
         )}
       </Card>

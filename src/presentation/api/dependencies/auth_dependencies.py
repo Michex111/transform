@@ -10,6 +10,11 @@ from src.infrastructure.auth.jwt_provider import verify_access_token
 from src.infrastructure.adapters.repository.sql_api_key_repo import SQLAPIKeyRepository
 from src.infrastructure.database.models import UserModel
 from src.infrastructure.database.session import get_db_session
+from src.infrastructure.logging.audit import (
+    log_auth_failure,
+    log_auth_success,
+    set_audit_context,
+)
 
 
 oauth2_scheme = OAuth2PasswordBearer(
@@ -21,6 +26,7 @@ oauth2_scheme = OAuth2PasswordBearer(
 async def _authenticate_jwt(token: str | None, db: AsyncSession) -> UserModel:
     """Resolve the JWT bearer token to an active user."""
     if not token:
+        log_auth_failure("missing_token")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Not authenticated",
@@ -29,6 +35,7 @@ async def _authenticate_jwt(token: str | None, db: AsyncSession) -> UserModel:
 
     user_id = verify_access_token(token)
     if user_id is None:
+        log_auth_failure("invalid_or_expired_token")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired token",
@@ -38,6 +45,7 @@ async def _authenticate_jwt(token: str | None, db: AsyncSession) -> UserModel:
     try:
         user_id_int = int(user_id)
     except (TypeError, ValueError):
+        log_auth_failure("malformed_token_subject")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired token",
@@ -48,11 +56,15 @@ async def _authenticate_jwt(token: str | None, db: AsyncSession) -> UserModel:
     user = result.scalars().first()
 
     if user is None or not user.is_active:
+        log_auth_failure("inactive_or_missing_user", user_id=user_id)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or inactive user",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+    set_audit_context(correlation_id=getattr(user, "id", None) and str(user.id), actor=str(user.id))
+    log_auth_success(user_id=user_id, method="jwt")
     return user
 
 
@@ -61,6 +73,7 @@ async def _authenticate_api_key(api_key_header: str, db: AsyncSession) -> UserMo
     service = APIKeyService(SQLAPIKeyRepository(db))
     api_key = await service.authenticate(api_key_header)
     if api_key is None:
+        log_auth_failure("invalid_or_expired_api_key")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired API key",
@@ -68,11 +81,14 @@ async def _authenticate_api_key(api_key_header: str, db: AsyncSession) -> UserMo
         )
     user = await db.get(UserModel, int(api_key.user_id))
     if user is None or not user.is_active:
+        log_auth_failure("inactive_or_missing_user", user_id=api_key.user_id)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or inactive user",
             headers={"WWW-Authenticate": "ApiKey"},
         )
+    set_audit_context(correlation_id=str(user.id), actor=str(user.id))
+    log_auth_success(user_id=api_key.user_id, method="api_key")
     return user
 
 

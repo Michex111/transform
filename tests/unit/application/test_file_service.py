@@ -51,8 +51,27 @@ class FakeFileRepo:
         row.folder_id = folder_id
         return True
 
+    async def rename(self, file_id: str, file_name: str) -> bool:
+        row = self.files.get(file_id)
+        if row is None:
+            return False
+        row.file_name = file_name
+        return True
+
     async def delete(self, file_id: str) -> bool:
         return self.files.pop(file_id, None) is not None
+
+    async def set_favorite(self, file_id: str, is_favorite: bool) -> bool:
+        row = self.files.get(file_id)
+        if row is None:
+            return False
+        row.is_favorite = is_favorite
+        return True
+
+    async def list_favorites(self, user_id, *, offset=0, limit=50):
+        rows = [f for f in self.files.values() if f.user_id == user_id and f.is_favorite]
+        rows.sort(key=lambda f: f.id)
+        return rows[offset:offset + limit], len(rows)
 
 
 class FakeFolderRepo:
@@ -92,6 +111,13 @@ class FakeFolderRepo:
         if folder is None:
             return False
         folder.name = name
+        return True
+
+    async def move(self, folder_id: str, parent_id: str | None) -> bool:
+        folder = self.folders.get(folder_id)
+        if folder is None:
+            return False
+        folder.parent_id = parent_id
         return True
 
     async def delete_with_descendants(self, folder_id: str):
@@ -285,6 +311,30 @@ def test_delete_file_removes_object_then_record(service, file_repo, storage) -> 
         _run(service.delete_file(1, file_id))
 
 
+def test_rename_file_updates_display_name(service, file_repo) -> None:
+    file_id = _run(file_repo.save(user_id=1, file_key="k/a.pdf", file_name="a.pdf",
+                                  file_size_bytes=1, mime_type="x"))
+    updated = _run(service.rename_file(1, file_id, "  renamed.pdf  "))
+    assert updated.file_name == "renamed.pdf"
+    # The stored object key is unchanged.
+    assert updated.file_key == "k/a.pdf"
+    assert file_repo.files[file_id].file_name == "renamed.pdf"
+
+
+def test_rename_file_requires_ownership(service, file_repo) -> None:
+    file_id = _run(file_repo.save(user_id=1, file_key="k/a.pdf", file_name="a.pdf",
+                                  file_size_bytes=1, mime_type="x"))
+    with pytest.raises(FileRecordNotFoundError):
+        _run(service.rename_file(2, file_id, "hijack.pdf"))
+
+
+def test_rename_file_rejects_blank_name(service, file_repo) -> None:
+    file_id = _run(file_repo.save(user_id=1, file_key="k/a.pdf", file_name="a.pdf",
+                                  file_size_bytes=1, mime_type="x"))
+    with pytest.raises(FileRecordNotFoundError):
+        _run(service.rename_file(1, file_id, "   "))
+
+
 def test_list_files_requires_folder_ownership(service) -> None:
     folder = _run(service.create_folder(user_id=1, name="Mine"))
     rows, total = _run(service.list_files(1, folder.id))
@@ -335,3 +385,120 @@ def test_complete_upload_validates_target_folder(service, storage) -> None:
     storage.sizes["uploads/abc.pdf"] = 10
     with pytest.raises(FolderNotFoundError):
         _run(service.complete_upload(1, _session(folder_id="missing")))
+
+
+# ---------------------------------------------------------------------------
+# Favorites
+# ---------------------------------------------------------------------------
+
+def test_set_file_favorite_requires_ownership(service, file_repo) -> None:
+    file_id = _run(file_repo.save(user_id=1, file_key="k/a.pdf", file_name="a.pdf",
+                                  file_size_bytes=1, mime_type="x"))
+    updated = _run(service.set_file_favorite(1, file_id, True))
+    assert updated.is_favorite is True
+    assert file_repo.files[file_id].is_favorite is True
+
+    with pytest.raises(FileRecordNotFoundError):
+        _run(service.set_file_favorite(2, file_id, True))
+
+
+def test_list_favorite_files(service, file_repo) -> None:
+    fav_id = _run(file_repo.save(user_id=1, file_key="k/a.pdf", file_name="a.pdf",
+                                 file_size_bytes=1, mime_type="x"))
+    _run(file_repo.save(user_id=1, file_key="k/b.pdf", file_name="b.pdf",
+                        file_size_bytes=1, mime_type="x"))
+
+    _run(service.set_file_favorite(1, fav_id, True))
+
+    # Favorite listing only returns favorited files owned by the user.
+    rows, total = _run(service.list_favorite_files(1))
+    assert total == 1
+    assert rows[0].id == fav_id
+
+    rows, total = _run(service.list_favorite_files(2))
+    assert total == 0
+    assert rows == []
+
+
+# ---------------------------------------------------------------------------
+# Folder move
+# ---------------------------------------------------------------------------
+
+def test_move_folder_requires_ownership(service) -> None:
+    root = _run(service.create_folder(user_id=1, name="Root"))
+    sub = _run(service.create_folder(user_id=1, name="Sub", parent_id=root.id))
+
+    moved = _run(service.move_folder(1, sub.id, None))
+    assert moved.parent_id is None
+
+    # Re-parent under root again.
+    moved = _run(service.move_folder(1, sub.id, root.id))
+    assert moved.parent_id == root.id
+
+    # Other user cannot move it.
+    with pytest.raises(FolderNotFoundError):
+        _run(service.move_folder(2, sub.id, None))
+
+
+def test_move_folder_rejects_cycle(service) -> None:
+    root = _run(service.create_folder(user_id=1, name="Root"))
+    sub = _run(service.create_folder(user_id=1, name="Sub", parent_id=root.id))
+    deep = _run(service.create_folder(user_id=1, name="Deep", parent_id=sub.id))
+
+    # Moving root into its own descendant would create a cycle.
+    with pytest.raises(FolderNameConflictError):
+        _run(service.move_folder(1, root.id, deep.id))
+
+    # Moving a folder into itself is rejected.
+    with pytest.raises(FolderNameConflictError):
+        _run(service.move_folder(1, sub.id, sub.id))
+
+    # Moving root into its direct child is rejected.
+    with pytest.raises(FolderNameConflictError):
+        _run(service.move_folder(1, root.id, sub.id))
+
+
+def test_move_folder_to_missing_parent_raises(service) -> None:
+    sub = _run(service.create_folder(user_id=1, name="Sub"))
+    with pytest.raises(FolderNotFoundError):
+        _run(service.move_folder(1, sub.id, "nope"))
+
+
+# ---------------------------------------------------------------------------
+# Batch delete
+# ---------------------------------------------------------------------------
+
+def test_delete_files_batch(service, file_repo, storage) -> None:
+    a = _run(file_repo.save(user_id=1, file_key="k/a.pdf", file_name="a.pdf",
+                            file_size_bytes=1, mime_type="x"))
+    b = _run(file_repo.save(user_id=1, file_key="k/b.pdf", file_name="b.pdf",
+                            file_size_bytes=1, mime_type="x"))
+    # A foreign file that must be skipped.
+    c = _run(file_repo.save(user_id=2, file_key="k/c.pdf", file_name="c.pdf",
+                            file_size_bytes=1, mime_type="x"))
+
+    deleted = _run(service.delete_files(1, [a, b, c, "missing"]))
+    assert deleted == 2
+    assert a not in file_repo.files
+    assert b not in file_repo.files
+    assert c in file_repo.files  # other user's file untouched
+    assert set(storage.removed) == {"k/a.pdf", "k/b.pdf"}
+
+
+def test_delete_folders_batch(service, folder_repo, storage) -> None:
+    root = _run(service.create_folder(user_id=1, name="Root"))
+    sub = _run(service.create_folder(user_id=1, name="Sub", parent_id=root.id))
+    other = _run(service.create_folder(user_id=2, name="Foreign"))
+
+    # Monkeypatch delete_with_descendants to return concrete object keys.
+    async def delete_with_descendants(folder_id: str):
+        del folder_id
+        return (["k/root.pdf"], [root.id, sub.id])
+
+    service._folders.delete_with_descendants = delete_with_descendants  # type: ignore[method-assign]
+
+    deleted = _run(service.delete_folders(1, [root.id, other.id, "missing"]))
+    assert deleted == 1
+    assert other.id in folder_repo.folders  # foreign folder untouched
+    assert set(storage.removed) == {"k/root.pdf"}
+

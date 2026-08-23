@@ -1,24 +1,28 @@
 """Video converters using ffmpeg.
 
-Supports: MP4 ↔ AVI, MP4 ↔ MOV, AVI ↔ MKV, Video → GIF.
+Supports pairwise conversion between the video formats in the UI catalog:
+mp4, mov, avi, mkv, webm, flv, wmv, mpg, m4v, 3gp, plus video -> gif.
 """
 
 import subprocess
 import logging
 
-from src.infrastructure.converters.converter_registry import converter_registry as registry
 from src.domain.conversions.value_object.conversion_type import ConversionType
+from src.infrastructure.converters.converter_registry import converter_registry as registry
 
 logger = logging.getLogger(__name__)
 
-# Conversion type definitions
-mp4_to_avi = ConversionType("mp4", "avi")
-avi_to_mp4 = ConversionType("avi", "mp4")
-mp4_to_mov = ConversionType("mp4", "mov")
-mov_to_mp4 = ConversionType("mov", "mp4")
-avi_to_mkv = ConversionType("avi", "mkv")
-mkv_to_avi = ConversionType("mkv", "avi")
-video_to_gif = ConversionType("mp4", "gif")
+VIDEO_FORMATS = ["mp4", "mov", "avi", "mkv", "webm", "flv", "wmv", "mpg", "m4v", "3gp"]
+
+# Pairs that benefit from explicit encoder flags.
+VIDEO_CODEC_ARGS = {
+    ("mp4", "avi"): ["-c:v", "mpeg4", "-q:v", "5", "-c:a", "mp3"],
+    ("avi", "mp4"): ["-c:v", "libx264", "-preset", "medium", "-c:a", "aac"],
+    ("mp4", "mov"): ["-c:v", "libx264", "-c:a", "aac"],
+    ("mov", "mp4"): ["-c:v", "libx264", "-preset", "medium", "-c:a", "aac"],
+    ("avi", "mkv"): ["-c:v", "libx264", "-c:a", "aac"],
+    ("mkv", "avi"): ["-c:v", "mpeg4", "-q:v", "5", "-c:a", "mp3"],
+}
 
 
 def _run_ffmpeg(input_file: str, output_file: str, extra_args: list[str] | None = None) -> None:
@@ -32,39 +36,18 @@ def _run_ffmpeg(input_file: str, output_file: str, extra_args: list[str] | None 
         raise RuntimeError(f"ffmpeg failed: {result.stderr}")
 
 
-@registry.register(mp4_to_avi)
-def mp4_to_avi_converter(input_file: str, output_file: str, logger_override=None) -> None:
-    _run_ffmpeg(input_file, output_file, ["-c:v", "mpeg4", "-q:v", "5", "-c:a", "mp3"])
+def _make_converter(source: str, target: str):
+    def converter(input_file: str, output_file: str, logger_override=None) -> None:
+        del logger_override
+        _run_ffmpeg(input_file, output_file, VIDEO_CODEC_ARGS.get((source, target)))
+
+    converter.__name__ = f"video_{source}_to_{target}"
+    return converter
 
 
-@registry.register(avi_to_mp4)
-def avi_to_mp4_converter(input_file: str, output_file: str, logger_override=None) -> None:
-    _run_ffmpeg(input_file, output_file, ["-c:v", "libx264", "-preset", "medium", "-c:a", "aac"])
-
-
-@registry.register(mp4_to_mov)
-def mp4_to_mov_converter(input_file: str, output_file: str, logger_override=None) -> None:
-    _run_ffmpeg(input_file, output_file, ["-c:v", "libx264", "-c:a", "aac"])
-
-
-@registry.register(mov_to_mp4)
-def mov_to_mp4_converter(input_file: str, output_file: str, logger_override=None) -> None:
-    _run_ffmpeg(input_file, output_file, ["-c:v", "libx264", "-preset", "medium", "-c:a", "aac"])
-
-
-@registry.register(avi_to_mkv)
-def avi_to_mkv_converter(input_file: str, output_file: str, logger_override=None) -> None:
-    _run_ffmpeg(input_file, output_file, ["-c:v", "libx264", "-c:a", "aac"])
-
-
-@registry.register(mkv_to_avi)
-def mkv_to_avi_converter(input_file: str, output_file: str, logger_override=None) -> None:
-    _run_ffmpeg(input_file, output_file, ["-c:v", "mpeg4", "-q:v", "5", "-c:a", "mp3"])
-
-
-@registry.register(video_to_gif)
 def video_to_gif_converter(input_file: str, output_file: str, logger_override=None) -> None:
     """Convert video to GIF (first 10 seconds, 10fps, 480p)."""
+    del logger_override
     _run_ffmpeg(
         input_file,
         output_file,
@@ -75,3 +58,16 @@ def video_to_gif_converter(input_file: str, output_file: str, logger_override=No
             "-f", "gif",
         ],
     )
+
+
+for _source in VIDEO_FORMATS:
+    for _target in VIDEO_FORMATS:
+        if _source == _target:
+            continue
+        registry.register(ConversionType(_source, _target))(
+            _make_converter(_source, _target)
+        )
+
+# video (mp4/mov/mkv/webm/avi) -> gif
+for _source in ["mp4", "mov", "mkv", "webm", "avi"]:
+    registry.register(ConversionType(_source, "gif"))(video_to_gif_converter)

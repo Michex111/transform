@@ -7,6 +7,7 @@ from src.application.exceptions.file_transfer_exceptions import (
     UploadVerificationError,
 )
 from src.application.dtos.upload_dto import UploadResponse, UploadSession
+from src.infrastructure.adapters.storage.sanitize import sanitize_filename, sanitize_object_key
 from uuid import uuid4
 from datetime import timedelta
 
@@ -27,14 +28,18 @@ class TransferService:
         upload_id = str(uuid4())
         object_key = self._generate_object_key("upload/" + upload_id, file_extension)
 
+        # Sanitize the user-supplied file name to a safe leaf segment.
+        safe_name = sanitize_filename(file_name) if file_name else None
+
         upload_url = self._storage.generate_put_url(object_key)
 
         session = UploadSession(
             upload_id=upload_id,
             object_key=object_key,
             status="pending",
-            file_name=file_name,
+            file_name=safe_name,
             folder_id=folder_id,
+            user_id=user_id,
         )
         await self._cache.set(upload_id, session.model_dump_json(), ttl=self._ttl)
 
@@ -87,9 +92,9 @@ class TransferService:
         return self._storage.generate_get_url(object_key, ttl_minutes)
 
     def _generate_object_key(self, job_id: str, file_extension: str) -> str:
-        """
-        Creates a secure, collision-resistant object path.
-        """
-
-        secure_filename = f"{uuid4().hex}.{file_extension.lstrip('.')}"
-        return f"{job_id}/{secure_filename}"
+        """Create a secure, collision-resistant object path."""
+        ext = file_extension.lstrip(".")
+        if not ext or len(ext) > 20:
+            ext = "file"
+        secure_filename = f"{uuid4().hex}.{ext}"
+        return sanitize_object_key(f"{job_id}/{secure_filename}")

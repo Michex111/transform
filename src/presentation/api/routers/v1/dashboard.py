@@ -3,6 +3,8 @@
 from datetime import UTC, datetime
 from typing import Annotated
 
+import asyncio
+
 from fastapi import APIRouter, Depends
 
 from src.domain.security.enitities.api_key import APIKeyStatus
@@ -26,6 +28,7 @@ from src.presentation.schemas.dashboard import (
     StorageStats,
 )
 from src.presentation.schemas.subscription import domain_tier_to_api
+from src.presentation.schemas.auth import UserResponse
 
 router = APIRouter(prefix="/api/v1/user", tags=["dashboard"])
 
@@ -43,17 +46,19 @@ async def get_dashboard(
     tier = await subscription_repo.get_tier_for_user(current_user.id)
     policy = TierPolicy.for_tier(tier)
 
-    counts = await job_repo.count_by_status(current_user.id)
-    credits_used = await job_repo.sum_credits_used(current_user.id)
-
-    used_bytes = await file_repo.get_user_storage_used(current_user.id)
-    file_count = await file_repo.count_user_files(current_user.id)
-
+    # These queries are independent of one another, so run them concurrently
+    # instead of serially (previously 6 sequential DB round-trips per request).
     period_key = datetime.now(UTC).strftime("%Y-%m")
-    credit = await credit_repo.get_credit(str(current_user.id), period_key)
-    balance = credit.remaining if credit is not None else (policy.monthly_conversion_credits or 0)
+    counts, credits_used, used_bytes, file_count, credit, api_keys = await asyncio.gather(
+        job_repo.count_by_status(current_user.id),
+        job_repo.sum_credits_used(current_user.id),
+        file_repo.get_user_storage_used(current_user.id),
+        file_repo.count_user_files(current_user.id),
+        credit_repo.get_credit(str(current_user.id), period_key),
+        api_key_repo.find_by_user(current_user.id),
+    )
 
-    api_keys = await api_key_repo.find_by_user(current_user.id)
+    balance = credit.remaining if credit is not None else (policy.monthly_conversion_credits or 0)
     active_api_keys = sum(1 for k in api_keys if k.status == APIKeyStatus.ACTIVE)
 
     limit_bytes = policy.storage_quota_bytes
@@ -79,13 +84,7 @@ async def get_dashboard(
     )
 
 
-@router.get("/profile")
-async def get_profile(current_user: CurrentUser):
+@router.get("/profile", response_model=UserResponse)
+async def get_profile(current_user: CurrentUser) -> UserResponse:
     """Get the current user's profile."""
-    return {
-        "id": current_user.id,
-        "username": current_user.username,
-        "email": current_user.email,
-        "is_active": current_user.is_active,
-        "created_at": current_user.created_at.isoformat() if hasattr(current_user, 'created_at') else None,
-    }
+    return UserResponse.model_validate(current_user)

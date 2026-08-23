@@ -3,6 +3,8 @@ import type {
   APIKeyCreateRequest,
   APIKeyCreateResponse,
   APIKeyListResponse,
+  BatchDeleteRequest,
+  BatchDeleteResponse,
   CancelSubscriptionResponse,
   CheckoutResponse,
   ConversionHistoryResponse,
@@ -13,14 +15,17 @@ import type {
   CreditPurchaseRequest,
   CreditTransactionResponse,
   CreateConversionJobRequest,
+  CreateLibraryConversionRequest,
   CreateUploadSessionRequest,
   DashboardResponse,
+  FavoriteFileRequest,
   FileDownloadResponse,
   FileListResponse,
   FileMetadataResponse,
   FolderContentsResponse,
   FolderListResponse,
   FolderResponse,
+  PortalResponse,
   PresignedUrlResponse,
   PresignedUrlsRequest,
   RefreshTokenRequest,
@@ -210,12 +215,25 @@ class ApiClient {
   conversionMap = () => this.request<ConversionMapResponse>('/conversions/supported/map')
   createConversion = (body: CreateConversionJobRequest) =>
     this.request<ConversionJobResponse>('/conversions/jobs', { method: 'POST', body: JSON.stringify(body) })
+  /**
+   * Convert a file that already exists in the user's library (object storage).
+   * The server infers the source format from the stored file's extension and
+   * enqueues the job immediately.
+   */
+  convertLibraryFile = (fileId: string, targetFormat: string) =>
+    this.request<ConversionJobResponse>('/conversions/jobs', {
+      method: 'POST',
+      body: JSON.stringify({ file_id: fileId, target_format: targetFormat } satisfies CreateLibraryConversionRequest),
+    })
   getJob = (id: string) => this.request<ConversionJobResponse>(`/conversions/jobs/${id}`)
-  /** Paginated conversion history for the current user. */
-  conversionHistory = (page = 1, pageSize = 20) =>
+  /** Paginated conversion history for the current user, optionally time-ranged. */
+  conversionHistory = (page = 1, pageSize = 20, range?: string) =>
     this.request<ConversionHistoryResponse>(
-      `/conversions/history?page=${page}&page_size=${pageSize}`,
+      `/conversions/history?page=${page}&page_size=${pageSize}${range ? `&range=${encodeURIComponent(range)}` : ''}`,
     )
+  /** Delete a single history record owned by the current user. */
+  deleteHistoryJob = (id: string) =>
+    this.request<void>(`/conversions/history/${id}`, { method: 'DELETE' })
   /** Retry a failed job without re-uploading its input file. */
   retryJob = (id: string) =>
     this.request<ConversionJobResponse>(`/conversions/jobs/${id}/retry`, { method: 'POST' })
@@ -326,12 +344,33 @@ class ApiClient {
   getFileDownload = (id: string) => this.request<FileDownloadResponse>(`/v1/files/${id}/download`)
   getPresignedUrls = (body: PresignedUrlsRequest) =>
     this.request<PresignedUrlResponse[]>('/v1/files/urls', { method: 'POST', body: JSON.stringify(body) })
+  /** Set whether a file is a favorite (pinned to the favorites view). */
+  setFileFavorite = (id: string, isFavorite: boolean) =>
+    this.request<FileMetadataResponse>(`/v1/files/${id}/favorite`, {
+      method: 'PATCH',
+      body: JSON.stringify({ is_favorite: isFavorite } satisfies FavoriteFileRequest),
+    })
+  /** Paginated list of the user's favorited files. */
+  listFavorites = (page = 1, pageSize = 50) =>
+    this.request<FileListResponse>(`/v1/files/favorites?page=${page}&page_size=${pageSize}`)
+  /** Delete multiple files and/or folders in one request. */
+  batchDelete = (body: BatchDeleteRequest) =>
+    this.request<BatchDeleteResponse>('/v1/files/batch-delete', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    })
+  /** Move a folder under a new parent (pass null to move to the root). */
+  moveFolder = (id: string, parentId: string | null) =>
+    this.request<FolderResponse>(`/v1/files/folders/${id}/move`, {
+      method: 'POST',
+      body: JSON.stringify({ parent_id: parentId }),
+    })
 
   // ---- Credits ----
   creditBalance = () => this.request<CreditBalanceResponse>('/v1/credits/balance')
   creditHistory = () => this.request<CreditTransactionResponse[]>('/v1/credits/history')
   purchaseCredits = (amount: number) =>
-    this.request<CreditTransactionResponse>('/v1/credits/purchase', {
+    this.request<CheckoutResponse>('/v1/credits/purchase', {
       method: 'POST',
       body: JSON.stringify({ amount } satisfies CreditPurchaseRequest),
     })
@@ -340,6 +379,9 @@ class ApiClient {
   // ---- Subscription ----
   subscriptionPlans = () => this.request<SubscriptionPlanResponse[]>('/v1/subscription/plans')
   subscriptionStatus = () => this.request<SubscriptionStatusResponse>('/v1/subscription/status')
+  /** Open a Stripe Customer Portal session for self-service billing management. */
+  createPortalSession = () =>
+    this.request<PortalResponse>('/v1/subscription/portal', { method: 'POST' })
   checkout = (tier: string) =>
     this.request<CheckoutResponse>('/v1/subscription/checkout', {
       method: 'POST',

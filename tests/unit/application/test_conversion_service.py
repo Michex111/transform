@@ -247,3 +247,100 @@ def test_retry_conversion_job_raises_when_job_missing(
 
     with pytest.raises(InvalidConversionJobError, match="Job not found"):
         asyncio.run(service.retry_conversion_job("missing", user_id=None))
+
+
+def test_list_history_returns_only_users_jobs_paginated(
+    conversion_job,
+    fake_queue_port,
+    fake_repository_port,
+    converter_registry,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.domain.conversions.entities.conversion_job import ConversionJob
+    from src.domain.conversions.value_object.conversion_type import ConversionType
+    from src.domain.conversions.value_object.job_status import JobStatus
+
+    monkeypatch.setattr(conversion_service_module, "get_registry", lambda: converter_registry)
+    service = ConversionService(queue_port=fake_queue_port, db_repository=fake_repository_port)
+
+    own = ConversionJob(
+        job_id="job-own", conversion=ConversionType("txt", "md"),
+        input_file="a.txt", user_id=1, status=JobStatus.COMPLETED, output_file="a.md",
+    )
+    other = ConversionJob(
+        job_id="job-other", conversion=ConversionType("txt", "md"),
+        input_file="b.txt", user_id=2, status=JobStatus.COMPLETED, output_file="b.md",
+    )
+    asyncio.run(fake_repository_port.save_conversion_job(own))
+    asyncio.run(fake_repository_port.save_conversion_job(other))
+
+    rows, total = asyncio.run(service.list_history(1, offset=0, limit=20))
+
+    assert total == 1
+    assert [j.job_id for j in rows] == ["job-own"]
+
+    rows_page2, total = asyncio.run(service.list_history(1, offset=10, limit=20))
+    assert rows_page2 == []
+    assert total == 1
+
+
+def test_convert_library_file_creates_and_enqueues_job(
+    fake_queue_port,
+    fake_repository_port,
+    converter_registry,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """convert_library_file builds a job with object_key, persists it, and enqueues it."""
+    from src.domain.conversions.value_object.job_status import JobStatus
+
+    @converter_registry.register(ConversionType(source_format="pdf", target_format="docx"))
+    def noop_converter(input_path: str, output_path: str) -> None:
+        del input_path
+        del output_path
+
+    monkeypatch.setattr(conversion_service_module, "get_registry", lambda: converter_registry)
+    service = ConversionService(queue_port=fake_queue_port, db_repository=fake_repository_port)
+
+    job = asyncio.run(service.convert_library_file(
+        file_name="report.pdf",
+        source_format="pdf",
+        target_format="docx",
+        object_key="uploads/report.pdf",
+        user_id=42,
+    ))
+
+    assert job.job_id  # create_conversion_job assigns a UUID
+    assert job.status == JobStatus.PENDING
+    assert job.object_key == "uploads/report.pdf"
+    assert job.input_file == "report.pdf"
+    assert job.user_id == 42
+    assert job.conversion.source_format == "pdf"
+    assert job.conversion.target_format == "docx"
+    # Both the DB record and the queue should reflect the enqueued job.
+    stored = fake_repository_port.job_table[job.job_id]
+    assert stored.status == JobStatus.PENDING
+    assert fake_queue_port.pushed_jobs == [job]
+    assert fake_queue_port.pushed_jobs[0].object_key == "uploads/report.pdf"
+
+
+def test_convert_library_file_rejects_unsupported_conversion(
+    fake_queue_port,
+    fake_repository_port,
+    converter_registry,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unsupported source/target combo must raise InvalidConversion and not enqueue."""
+    monkeypatch.setattr(conversion_service_module, "get_registry", lambda: converter_registry)
+    service = ConversionService(queue_port=fake_queue_port, db_repository=fake_repository_port)
+
+    with pytest.raises(InvalidConversion):
+        asyncio.run(service.convert_library_file(
+            file_name="notes.xyz",
+            source_format="xyz",
+            target_format="docx",
+            object_key="uploads/notes.xyz",
+            user_id=42,
+        ))
+
+    assert fake_queue_port.pushed_jobs == []
+    assert fake_repository_port.job_table == {}

@@ -59,10 +59,13 @@ class JobEventSubscriber:
             for message_id, fields in messages:  # type: ignore[union-attr]
                 raw = dict(fields)  # type: ignore[arg-type]
                 fields_dict = {str(k): str(v) for k, v in raw.items()}
+                # Always advance the cursor past every consumed message (matching
+                # or not) so a busy stream full of other jobs' events does not
+                # make us re-read the same non-matching entries in a loop.
+                last_id = str(message_id)
                 if fields_dict.get("job_id") != job_id:
                     continue
                 yield str(message_id), fields_dict
-                last_id = str(message_id)
                 if fields_dict.get("status") in ("COMPLETED", "FAILED"):
                     terminal_seen = True
                     break

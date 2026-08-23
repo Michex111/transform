@@ -7,10 +7,14 @@ from fastapi.testclient import TestClient
 import src.presentation.api.main as api_main
 from src.application.dtos.upload_dto import UploadResponse
 from src.application.exceptions.conversion_job_exception import InvalidConversionJobError
+from src.application.exceptions.file_system_exceptions import FileRecordNotFoundError
 from src.domain.conversions.entities.conversion_job import ConversionJob
+from src.domain.conversions.value_object.conversion_type import ConversionType
+from src.infrastructure.database.models import UserFileModel
 from src.presentation.api.dependencies.auth_dependencies import get_current_user
 from src.presentation.api.dependencies.service_dependencies import (
     get_conversion_service,
+    get_file_service,
     get_transfer_service,
 )
 
@@ -23,6 +27,34 @@ class FakeConversionService:
         job.job_id = "test-job-id"
         self.created_jobs.append(job)
         return job.job_id
+
+    async def convert_library_file(
+        self,
+        *,
+        file_name: str,
+        source_format: str,
+        target_format: str,
+        object_key: str,
+        user_id: int,
+        tier: "SubscriptionTier | None" = None,
+    ) -> ConversionJob:
+        del tier
+        # Validate against the real registry so the route's InvalidConversion
+        # -> 400 mapping is exercised for unsupported source/target formats.
+        from src.domain.conversions.policies.conversion_policy import is_supported
+        from src.infrastructure.converters.converter_registry import get_registry
+
+        job = ConversionJob(
+            job_id="test-job-id",
+            conversion=ConversionType(source_format=source_format, target_format=target_format),
+            input_file=file_name,
+            object_key=object_key,
+            user_id=user_id,
+        )
+        is_supported(job.conversion, get_registry().list_conversions())
+        job.pending_processing()
+        self.created_jobs.append(job)
+        return job
 
     async def update_conversion_job(self, job: ConversionJob) -> None:
         del job  # object_key is already persisted on the in-memory object
@@ -40,6 +72,30 @@ class FakeConversionService:
                 job.retry()
                 return job
         raise InvalidConversionJobError("Job not found")
+
+    async def list_history(
+        self,
+        user_id: int,
+        *,
+        offset: int = 0,
+        limit: int = 20,
+        since=None,
+    ) -> tuple[list[ConversionJob], int]:
+        del user_id
+        del since
+        rows = self.created_jobs[offset:offset + limit]
+        return rows, len(self.created_jobs)
+
+
+class FakeFileService:
+    def __init__(self) -> None:
+        self.files: dict[str, UserFileModel] = {}
+
+    async def get_file(self, user_id: int, file_id: str) -> UserFileModel:
+        row = self.files.get(file_id)
+        if row is None or row.user_id != user_id:
+            raise FileRecordNotFoundError()
+        return row
 
 
 class FakeTransferService:
@@ -68,14 +124,17 @@ def create_test_client() -> Generator[TestClient, None, None]:
 
     fake_conversion_service = FakeConversionService()
     fake_transfer_service = FakeTransferService()
+    fake_file_service = FakeFileService()
     original_initialize_database = api_main.initialize_database
 
     api_main.initialize_database = no_op_initialize_database
     api_main.app.dependency_overrides[get_current_user] = lambda: FakeUser(id=101)
     api_main.app.dependency_overrides[get_conversion_service] = lambda: fake_conversion_service
     api_main.app.dependency_overrides[get_transfer_service] = lambda: fake_transfer_service
+    api_main.app.dependency_overrides[get_file_service] = lambda: fake_file_service
     api_main.app.state.fake_conversion_service = fake_conversion_service
     api_main.app.state.fake_transfer_service = fake_transfer_service
+    api_main.app.state.fake_file_service = fake_file_service
 
     client = TestClient(api_main.app)
     try:
@@ -88,3 +147,5 @@ def create_test_client() -> Generator[TestClient, None, None]:
             delattr(api_main.app.state, "fake_conversion_service")
         if hasattr(api_main.app.state, "fake_transfer_service"):
             delattr(api_main.app.state, "fake_transfer_service")
+        if hasattr(api_main.app.state, "fake_file_service"):
+            delattr(api_main.app.state, "fake_file_service")

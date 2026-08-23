@@ -26,9 +26,9 @@ def api_tier_to_domain(tier: SubscriptionTier) -> DomainTier:
     """Map the API-facing tier enum to the domain/persistence enum."""
     return {
         SubscriptionTier.FREE: DomainTier.FREE,
-        SubscriptionTier.PRO: DomainTier.PREMIUM,
-        SubscriptionTier.PRO_PLUS: DomainTier.PREMIUM,
-        SubscriptionTier.ENTERPRISE: DomainTier.PREMIUM,
+        SubscriptionTier.PRO: DomainTier.PRO,
+        SubscriptionTier.PRO_PLUS: DomainTier.PRO_PLUS,
+        SubscriptionTier.ENTERPRISE: DomainTier.ENTERPRISE,
     }[tier]
 
 
@@ -38,7 +38,20 @@ def domain_tier_to_api(tier: DomainTier) -> SubscriptionTier:
         DomainTier.GUEST: SubscriptionTier.FREE,
         DomainTier.FREE: SubscriptionTier.FREE,
         DomainTier.PREMIUM: SubscriptionTier.PRO,
+        DomainTier.PRO: SubscriptionTier.PRO,
+        DomainTier.PRO_PLUS: SubscriptionTier.PRO_PLUS,
+        DomainTier.ENTERPRISE: SubscriptionTier.ENTERPRISE,
     }[tier]
+
+
+def domain_tier_name(tier: DomainTier) -> str:
+    """Return the lowercase Stripe plan name for a domain tier."""
+    return {
+        DomainTier.PREMIUM: "pro",
+        DomainTier.PRO: "pro",
+        DomainTier.PRO_PLUS: "pro_plus",
+        DomainTier.ENTERPRISE: "enterprise",
+    }.get(tier, "pro")
 
 
 class SubscriptionPlanResponse(BaseModel):
@@ -56,6 +69,10 @@ class CheckoutRequest(BaseModel):
 
 class CheckoutResponse(BaseModel):
     checkout_url: str
+
+
+class PortalResponse(BaseModel):
+    portal_url: str
 
 
 class SubscriptionStatusResponse(BaseModel):

@@ -1,17 +1,16 @@
 """Credit and billing API endpoints."""
 
-import uuid
 from datetime import UTC, datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from src.domain.subscriptions.entities.credit import Credit
 from src.domain.subscriptions.policies.tier_policy import TierPolicy
 from src.domain.subscriptions.value_object.tier import SubscriptionTier
 from src.infrastructure.adapters.payment.stripe_service import StripeService
 from src.infrastructure.adapters.repository.sql_credit_repo import SQLCreditRepository
 from src.infrastructure.adapters.repository.sql_subscription_repo import SQLSubscriptionRepository
+from src.infrastructure.config.settings import get_settings
 from src.presentation.api.dependencies.auth_dependencies import CurrentUser
 from src.presentation.api.dependencies.service_dependencies import (
     get_credit_repository,
@@ -25,7 +24,7 @@ from src.presentation.schemas.credit import (
     CreditTransactionResponse,
     TransactionType,
 )
-from src.presentation.schemas.subscription import domain_tier_to_api
+from src.presentation.schemas.subscription import CheckoutResponse, domain_tier_to_api
 
 router = APIRouter(prefix="/api/v1/credits", tags=["credits"])
 
@@ -99,65 +98,48 @@ async def get_credit_history(
     return [_to_transaction(r) for r in rows]
 
 
-@router.post("/purchase", response_model=CreditTransactionResponse)
+@router.post("/purchase", response_model=CheckoutResponse)
 async def purchase_credits(
     payload: CreditPurchaseRequest,
     current_user: CurrentUser,
-    credit_repo: Annotated[SQLCreditRepository, Depends(get_credit_repository)],
+    subscription_repo: Annotated[SQLSubscriptionRepository, Depends(get_subscription_repository)],
     stripe_service: Annotated[StripeService, Depends(get_stripe_service)],
-) -> CreditTransactionResponse:
-    """Purchase additional credits via a Stripe payment intent."""
+) -> CheckoutResponse:
+    """Create a Stripe Checkout session for a one-off credit pack purchase.
+
+    Credits are granted only after Stripe confirms payment (via the
+    ``checkout.session.completed`` webhook handler) so users cannot be credited
+    for payments that are never captured.
+    """
     if not stripe_service.enabled:
         raise HTTPException(
             status_code=status.HTTP_501_NOT_IMPLEMENTED,
             detail="Stripe integration is not configured. Set STRIPE_SECRET_KEY to enable purchases.",
         )
 
+    # Look up the user's stripe customer (if one already exists) so repeat
+    # purchases attach to the same customer record.
+    row = await subscription_repo.get_subscription_row(current_user.id)
+    customer_id = row.stripe_customer_id if row else None
+    email = current_user.email
+
     amount_usd = _price_for_amount(payload.amount)
-    intent = await stripe_service.create_payment_intent(
-        amount_usd=amount_usd,
+    settings = get_settings()
+    url = await stripe_service.create_credit_purchase_session(
+        user_id=str(current_user.id),
+        email=email,
         credits=payload.amount,
-        customer_id=None,
-        metadata={"user_id": str(current_user.id)},
+        amount_usd=amount_usd,
+        success_url=settings.STRIPE_CREDIT_SUCCESS_URL,
+        cancel_url=settings.STRIPE_CREDIT_CANCEL_URL,
+        customer_id=customer_id,
     )
-    if intent is None:
+    if url is None:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Stripe payment could not be initiated",
+            detail="Stripe checkout session could not be created",
         )
-
-    # Grant credits immediately (simplified flow; production should confirm
-    # via the payment_intent.succeeded webhook).
-    period_key = datetime.now(UTC).strftime("%Y-%m")
-    credit = await credit_repo.get_credit(str(current_user.id), period_key)
-    if credit is None:
-        credit = Credit.from_tier(
-            owner_id=str(current_user.id),
-            period_key=period_key,
-            tier=SubscriptionTier.FREE,
-        )
-    credit.allowance += payload.amount
-    credit.remaining += payload.amount
-    await credit_repo.save_credit(credit)
-
-    transaction_id = str(uuid.uuid4())
-    await credit_repo.record_transaction(
-        transaction_id=transaction_id,
-        user_id=current_user.id,
-        amount=payload.amount,
-        transaction_type=TransactionType.PURCHASE.value,
-        reference_id=intent.get("id"),
-        description=f"Purchased {payload.amount} credits via Stripe",
-    )
-
-    return CreditTransactionResponse(
-        id=transaction_id,
-        amount=payload.amount,
-        transaction_type=TransactionType.PURCHASE,
-        reference_id=intent.get("id"),
-        description=f"Purchased {payload.amount} credits via Stripe",
-        created_at=datetime.now(UTC),
-    )
+    return CheckoutResponse(checkout_url=url)
 
 
 @router.get("/pricing", response_model=list[CreditPricingResponse])

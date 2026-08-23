@@ -41,6 +41,8 @@ class FileRepositoryPort(Protocol):
 
     async def move(self, file_id: str, folder_id: str | None) -> bool: ...
 
+    async def rename(self, file_id: str, file_name: str) -> bool: ...
+
     async def delete(self, file_id: str) -> bool: ...
 
 
@@ -88,7 +90,10 @@ def _default_size_limits() -> dict[SubscriptionTier, int]:
     return {
         SubscriptionTier.GUEST: settings.GUEST_MAX_FILE_SIZE,
         SubscriptionTier.FREE: settings.FREE_MAX_FILE_SIZE,
-        SubscriptionTier.PREMIUM: settings.PRO_PLUS_MAX_FILE_SIZE,
+        SubscriptionTier.PREMIUM: settings.PRO_MAX_FILE_SIZE,
+        SubscriptionTier.PRO: settings.PRO_MAX_FILE_SIZE,
+        SubscriptionTier.PRO_PLUS: settings.PRO_PLUS_MAX_FILE_SIZE,
+        SubscriptionTier.ENTERPRISE: settings.PRO_PLUS_MAX_FILE_SIZE,
     }
 
 
@@ -163,6 +168,51 @@ class FileService:
         assert updated is not None
         return updated
 
+    async def move_folder(
+        self, user_id: int, folder_id: str, parent_id: str | None,
+    ) -> UserFolderModel:
+        """Move a folder under a new parent (or to root when ``parent_id`` is
+        None). Rejects moving a folder into itself or one of its descendants,
+        which would create a cycle.
+        """
+        folder = await self.get_folder(user_id, folder_id)
+
+        if parent_id is not None:
+            # Validate target ownership.
+            await self.get_folder(user_id, parent_id)
+            # Reject self-move and moves that would introduce a cycle: the
+            # target may not be the folder itself or one of its descendants.
+            if parent_id == folder.id or await self._is_descendant(parent_id, folder.id):
+                raise FolderNameConflictError()
+
+        try:
+            moved = await self._folders.move(folder.id, parent_id)
+        except IntegrityError as exc:
+            raise FolderNameConflictError() from exc
+        if not moved:
+            raise FolderNotFoundError()
+        updated = await self._folders.get_by_id(folder.id)
+        assert updated is not None
+        return updated
+
+    async def _is_descendant(self, folder_id: str, ancestor_id: str) -> bool:
+        """Return True if ``folder_id`` is a descendant of ``ancestor_id``.
+
+        Walks up the parent chain from ``folder_id``; if ``ancestor_id`` is
+        reached (or a cycle is detected) before the root, returns True.
+        """
+        seen: set[str] = set()
+        # Start from the folder itself.
+        current = await self._folders.get_by_id(folder_id)
+        while current is not None and current.parent_id is not None:
+            if current.parent_id in seen:
+                return True
+            seen.add(current.parent_id)
+            if current.parent_id == ancestor_id:
+                return True
+            current = await self._folders.get_by_id(current.parent_id)
+        return False
+
     async def delete_folder(self, user_id: int, folder_id: str) -> None:
         """Delete a folder recursively — DB rows and object-storage keys."""
         folder = await self.get_folder(user_id, folder_id)
@@ -204,11 +254,68 @@ class FileService:
         assert updated is not None
         return updated
 
+    async def rename_file(self, user_id: int, file_id: str, file_name: str) -> UserFileModel:
+        """Rename a file's display name (the stored object key is unchanged)."""
+        row = await self.get_file(user_id, file_id)
+        cleaned = file_name.strip()
+        if not cleaned:
+            raise FileRecordNotFoundError()
+        if not await self._files.rename(row.id, cleaned):
+            raise FileRecordNotFoundError()
+        updated = await self._files.get_by_id(row.id)
+        assert updated is not None
+        return updated
+
+    async def set_file_favorite(self, user_id: int, file_id: str, is_favorite: bool) -> UserFileModel:
+        """Set or clear the favorite flag on a file owned by the user."""
+        row = await self.get_file(user_id, file_id)
+        if not await self._files.set_favorite(row.id, is_favorite):
+            raise FileRecordNotFoundError()
+        updated = await self._files.get_by_id(row.id)
+        assert updated is not None
+        return updated
+
+    async def list_favorite_files(
+        self, user_id: int, *, offset: int = 0, limit: int = 50,
+    ) -> tuple[list[UserFileModel], int]:
+        """List the user's favorite files (newest first) plus total count."""
+        return await self._files.list_favorites(user_id, offset=offset, limit=limit)
+
     async def delete_file(self, user_id: int, file_id: str) -> None:
         """Delete a file: object first, then the DB record."""
         row = await self.get_file(user_id, file_id)
         await self._storage.remove_object(row.file_key)
         await self._files.delete(row.id)
+
+    async def delete_files(self, user_id: int, file_ids: list[str]) -> int:
+        """Delete each owned file (object + DB record). Returns the number of
+        files actually removed. Unknown/foreign ids are skipped."""
+        deleted = 0
+        for file_id in file_ids:
+            try:
+                row = await self.get_file(user_id, file_id)
+            except FileRecordNotFoundError:
+                continue
+            await self._storage.remove_object(row.file_key)
+            if await self._files.delete(row.id):
+                deleted += 1
+        return deleted
+
+    async def delete_folders(self, user_id: int, folder_ids: list[str]) -> int:
+        """Delete each owned folder recursively (DB subtree + object keys).
+        Returns the number of folders actually removed. Unknown/foreign ids are
+        skipped."""
+        deleted = 0
+        for folder_id in folder_ids:
+            try:
+                folder = await self.get_folder(user_id, folder_id)
+            except FolderNotFoundError:
+                continue
+            file_keys, _ = await self._folders.delete_with_descendants(folder.id)
+            for key in file_keys:
+                await self._storage.remove_object(key)
+            deleted += 1
+        return deleted
 
     # ------------------------------------------------------------------
     # Uploads

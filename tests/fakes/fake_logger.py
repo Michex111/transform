@@ -11,5 +11,8 @@ class FakeLogger:
     def error(self, message: str, extra: dict | None = None, **_: object) -> None:
         self.records.append(("error", message, extra))
 
+    def warning(self, message: str, extra: dict | None = None, **_: object) -> None:
+        self.records.append(("warning", message, extra))
+
     def critical(self, message: str, extra: dict | None = None, **_: object) -> None:
         self.records.append(("critical", message, extra))

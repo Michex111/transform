@@ -20,6 +20,13 @@ class MoveFileRequest(BaseModel):
     folder_id: str | None = Field(default=None, description="Destination folder, or None to move to root")
 
 
+class MoveFolderRequest(BaseModel):
+    parent_id: str | None = Field(
+        default=None,
+        description="Destination parent folder, or None to move to root",
+    )
+
+
 class FolderResponse(BaseModel):
     id: str
     name: str

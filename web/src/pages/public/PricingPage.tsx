@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { Check } from "@phosphor-icons/react";
 import { api } from "@/api/client";
+import { useAuth } from "@/auth/AuthContext";
 import { useToast } from "@/auth/ToastContext";
 import { Button, Skeleton } from "@/components/ui";
 import { Stagger, Item, Reveal } from "@/lib/motion";
@@ -10,7 +11,9 @@ import type { SubscriptionPlanResponse } from "@/api/types";
 export function PricingPage() {
   const [plans, setPlans] = useState<SubscriptionPlanResponse[]>([]);
   const [loading, setLoading] = useState(true);
+  const [checkoutLoading, setCheckoutLoading] = useState<string | null>(null);
   const { error } = useToast();
+  const { isAuthenticated } = useAuth();
 
   useEffect(() => {
     let active = true;
@@ -24,6 +27,17 @@ export function PricingPage() {
       active = false;
     };
   }, [error]);
+
+  async function upgrade(tier: string) {
+    setCheckoutLoading(tier);
+    try {
+      const { checkout_url } = await api.checkout(tier);
+      window.location.assign(checkout_url);
+    } catch (err) {
+      error(err instanceof Error ? err.message : "Could not start checkout");
+      setCheckoutLoading(null);
+    }
+  }
 
   const list = plans;
 
@@ -82,18 +96,36 @@ export function PricingPage() {
                     </li>
                   ))}
                 </ul>
-                <Link to={enterprise ? "/app/support" : "/register"} className="mt-6 block">
-                  <Button
-                    variant={popular ? "primary" : "secondary"}
-                    className="w-full"
-                  >
-                    {enterprise
-                      ? "Contact sales"
-                      : plan.price_monthly_usd == null
-                        ? "Start free"
-                        : `Upgrade to ${plan.name}`}
-                  </Button>
-                </Link>
+                <div className="mt-6">
+                  {enterprise ? (
+                    <Link to="/app/support" className="block">
+                      <Button variant="secondary" className="w-full">
+                        Contact sales
+                      </Button>
+                    </Link>
+                  ) : plan.price_monthly_usd == null ? (
+                    <Link to="/register" className="block">
+                      <Button variant="secondary" className="w-full">
+                        Start free
+                      </Button>
+                    </Link>
+                  ) : isAuthenticated ? (
+                    <Button
+                      variant={popular ? "primary" : "secondary"}
+                      className="w-full"
+                      disabled={checkoutLoading === plan.tier}
+                      onClick={() => upgrade(plan.tier)}
+                    >
+                      {checkoutLoading === plan.tier ? "Redirecting…" : `Upgrade to ${plan.name}`}
+                    </Button>
+                  ) : (
+                    <Link to="/register" className="block">
+                      <Button variant={popular ? "primary" : "secondary"} className="w-full">
+                        {`Upgrade to ${plan.name}`}
+                      </Button>
+                    </Link>
+                  )}
+                </div>
               </div>
             </Item>
           );

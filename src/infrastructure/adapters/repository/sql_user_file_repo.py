@@ -80,6 +80,49 @@ class SQLUserFileRepository:
         await self._session.commit()
         return result.rowcount > 0  # type: ignore[attr-defined]
 
+    async def rename(self, file_id: str, file_name: str) -> bool:
+        """Update a file's display name. Returns True if a row was updated."""
+        result = await self._session.execute(
+            update(UserFileModel)
+            .where(UserFileModel.id == file_id)
+            .values(file_name=file_name)
+        )
+        await self._session.commit()
+        return result.rowcount > 0  # type: ignore[attr-defined]
+
+    async def set_favorite(self, file_id: str, is_favorite: bool) -> bool:
+        """Set (or clear) the favorite flag for a file. Returns True if a row
+        was updated."""
+        result = await self._session.execute(
+            update(UserFileModel)
+            .where(UserFileModel.id == file_id)
+            .values(is_favorite=is_favorite)
+        )
+        await self._session.commit()
+        return result.rowcount > 0  # type: ignore[attr-defined]
+
+    async def list_favorites(
+        self, user_id: int, *, offset: int = 0, limit: int = 50,
+    ) -> tuple[list[UserFileModel], int]:
+        """
+        Return a paginated list of the user's favorite files, newest first.
+
+        Returns:
+            (rows, total_count)
+        """
+        base = select(UserFileModel).where(
+            UserFileModel.user_id == user_id,
+            UserFileModel.is_favorite.is_(True),
+        )
+
+        count_q = select(func.count()).select_from(base.subquery())
+        total = (await self._session.execute(count_q)).scalar_one()
+
+        rows_q = base.order_by(UserFileModel.created_at.desc()).offset(offset).limit(limit)
+        rows = (await self._session.execute(rows_q)).scalars().all()
+
+        return list(rows), total
+
     async def delete(self, file_id: str) -> bool:
         """Delete a file record by ID. Returns True if a row was removed."""
         record = await self.get_by_id(file_id)

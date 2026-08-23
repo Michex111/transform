@@ -49,11 +49,13 @@ async def get_upload_session(
 	current_user: CurrentUser,
 	transfer_service: Annotated[TransferService, Depends(get_transfer_service)],
 ) -> UploadSession:
-	del current_user
 	try:
-		return await transfer_service.get_upload_session(upload_id)
+		session = await transfer_service.get_upload_session(upload_id)
 	except UploadSessionNotFoundError as exc:
 		raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+	if session.user_id is not None and session.user_id != str(current_user.id):
+		raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Upload session not found")
+	return session
 
 
 @router.post("/sessions/{upload_id}/verify", response_model=UploadSession)
@@ -67,6 +69,11 @@ async def verify_upload_session(
 ) -> UploadSession:
 	try:
 		session = await transfer_service.verify_upload_completion(upload_id)
+
+		# The session must belong to the caller (unless it is a guest session
+		# created without a user).
+		if session.user_id is not None and session.user_id != str(current_user.id):
+			raise UploadSessionNotFoundError("Upload session not found")
 
 		# Enforce the tier size limit and persist the file record.
 		await file_service.complete_upload(current_user.id, session)
@@ -96,6 +103,11 @@ async def delete_upload_session(
 	current_user: CurrentUser,
 	transfer_service: Annotated[TransferService, Depends(get_transfer_service)],
 ) -> Response:
-	del current_user
+	try:
+		session = await transfer_service.get_upload_session(upload_id)
+	except UploadSessionNotFoundError as exc:
+		raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+	if session.user_id is not None and session.user_id != str(current_user.id):
+		raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Upload session not found")
 	await transfer_service.delete_upload_session(upload_id)
 	return Response(status_code=status.HTTP_204_NO_CONTENT)

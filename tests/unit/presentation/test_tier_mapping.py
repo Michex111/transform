@@ -12,10 +12,10 @@ def test_api_free_maps_to_domain_free() -> None:
     assert api_tier_to_domain(SubscriptionTier.FREE) is DomainTier.FREE
 
 
-def test_api_paid_tiers_map_to_premium() -> None:
-    assert api_tier_to_domain(SubscriptionTier.PRO) is DomainTier.PREMIUM
-    assert api_tier_to_domain(SubscriptionTier.PRO_PLUS) is DomainTier.PREMIUM
-    assert api_tier_to_domain(SubscriptionTier.ENTERPRISE) is DomainTier.PREMIUM
+def test_api_paid_tiers_map_to_distinct_domain() -> None:
+    assert api_tier_to_domain(SubscriptionTier.PRO) is DomainTier.PRO
+    assert api_tier_to_domain(SubscriptionTier.PRO_PLUS) is DomainTier.PRO_PLUS
+    assert api_tier_to_domain(SubscriptionTier.ENTERPRISE) is DomainTier.ENTERPRISE
 
 
 def test_domain_guest_and_free_map_to_api_free() -> None:
@@ -25,6 +25,12 @@ def test_domain_guest_and_free_map_to_api_free() -> None:
 
 def test_domain_premium_maps_to_api_pro() -> None:
     assert domain_tier_to_api(DomainTier.PREMIUM) is SubscriptionTier.PRO
+
+
+def test_domain_paid_tiers_map_to_distinct_api() -> None:
+    assert domain_tier_to_api(DomainTier.PRO) is SubscriptionTier.PRO
+    assert domain_tier_to_api(DomainTier.PRO_PLUS) is SubscriptionTier.PRO_PLUS
+    assert domain_tier_to_api(DomainTier.ENTERPRISE) is SubscriptionTier.ENTERPRISE
 
 
 def test_round_trip_through_api_tier() -> None:

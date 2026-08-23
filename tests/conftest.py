@@ -35,8 +35,8 @@ pytest_plugins = [
 
 @pytest.fixture(autouse=True)
 def _reset_rate_limit_state():
-    """Reset the shared in-memory rate limiter so per-IP counters do not
-    accumulate across test cases (prevents spurious 429s)."""
+    """Reset the shared rate limiter (in-memory and Redis-backed) so per-IP
+    counters do not accumulate across test cases (prevents spurious 429s)."""
     RateLimitMiddleware.reset_all()
     yield
     RateLimitMiddleware.reset_all()

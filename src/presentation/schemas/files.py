@@ -13,6 +13,7 @@ class FileMetadataResponse(BaseModel):
     folder_id: str | None = None
     created_at: datetime
     expires_at: datetime | None = None
+    is_favorite: bool = False
 
 
 class FileListResponse(BaseModel):
@@ -25,6 +26,24 @@ class FileListResponse(BaseModel):
 class FileDownloadResponse(BaseModel):
     download_url: str
     expires_in_seconds: int = 900  # 15 minutes
+
+
+class RenameFileRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=255)
+
+
+class FavoriteFileRequest(BaseModel):
+    is_favorite: bool
+
+
+class BatchDeleteRequest(BaseModel):
+    file_ids: list[str] = []
+    folder_ids: list[str] = []
+
+
+class BatchDeleteResponse(BaseModel):
+    deleted_files: int
+    deleted_folders: int
 
 
 class PresignedUrlRequest(BaseModel):

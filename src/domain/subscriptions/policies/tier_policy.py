@@ -23,7 +23,13 @@ class TierPolicy:
     @property
     def api_access(self) -> bool:
         """Returns True if the tier allows API access."""
-        return self.tier in {SubscriptionTier.FREE, SubscriptionTier.PREMIUM}
+        return self.tier in {
+            SubscriptionTier.FREE,
+            SubscriptionTier.PREMIUM,
+            SubscriptionTier.PRO,
+            SubscriptionTier.PRO_PLUS,
+            SubscriptionTier.ENTERPRISE,
+        }
 
     @property
     def has_persistent_credits(self) -> bool:
@@ -55,10 +61,28 @@ class TierPolicy:
             ),
             SubscriptionTier.PREMIUM: TierPolicy(
                 tier=SubscriptionTier.PREMIUM,
-                storage_quota_bytes=100 * GB,
+                storage_quota_bytes=50 * GB,
                 monthly_conversion_credits=500,
-                monthly_api_conversion_credits=100 # later derive valuses from config
+                monthly_api_conversion_credits=100
+            ),
+            SubscriptionTier.PRO: TierPolicy(
+                tier=SubscriptionTier.PRO,
+                storage_quota_bytes=50 * GB,
+                monthly_conversion_credits=500,
+                monthly_api_conversion_credits=100
+            ),
+            SubscriptionTier.PRO_PLUS: TierPolicy(
+                tier=SubscriptionTier.PRO_PLUS,
+                storage_quota_bytes=100 * GB,
+                monthly_conversion_credits=2000,
+                monthly_api_conversion_credits=1000
+            ),
+            SubscriptionTier.ENTERPRISE: TierPolicy(
+                tier=SubscriptionTier.ENTERPRISE,
+                storage_quota_bytes=1000 * GB,
+                monthly_conversion_credits=None,
+                monthly_api_conversion_credits=None
             ),
         }
-        
+
         return mapping[tier]

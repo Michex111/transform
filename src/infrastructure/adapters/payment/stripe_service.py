@@ -1,7 +1,12 @@
 """
 Stripe integration service for subscription billing and payments.
 
-Handles checkout sessions, webhook processing, and subscription management.
+Handles checkout sessions (subscriptions and credit purchases), customer
+portal sessions, webhook processing, and subscription management.
+
+Uses the :class:`stripe.StripeClient` instance API (not the deprecated
+global ``stripe.api_key`` pattern) so that API version pinning and per-call
+configuration stay on a single client.
 """
 
 import logging
@@ -14,12 +19,13 @@ logger = logging.getLogger(__name__)
 
 class StripeService:
     """
-    Wrapper around the Stripe API for subscription management.
+    Wrapper around the Stripe API for subscription and credit billing.
 
     Provides methods for:
-    - Creating checkout sessions
+    - Creating subscription checkout sessions
+    - Creating credit-pack checkout sessions
+    - Creating customer portal sessions
     - Managing subscriptions
-    - Processing webhook events
     - Handling customer lifecycle
     """
 
@@ -36,11 +42,39 @@ class StripeService:
             else None
         )
         self._enabled = bool(self._secret_key)
+        self._client: Any | None = None
 
     @property
     def enabled(self) -> bool:
         """Whether Stripe is configured and enabled."""
         return self._enabled
+
+    def _get_client(self):
+        """Lazily build the StripeClient instance using the secret key."""
+        if self._client is None:
+            import stripe
+            self._client = stripe.StripeClient(self._secret_key)
+        return self._client
+
+    @staticmethod
+    def _integration_identifier() -> str:
+        """Return an ``integration_identifier`` label for checkout sessions.
+
+        Stripe recommends tagging sessions with a custom label (plus an 8-char
+        random suffix) so they can be tracked and compared in the Dashboard.
+        """
+        import secrets
+        return f"transform_{secrets.token_hex(4)}"
+
+    def _resolve_price_id(self, tier: str) -> str | None:
+        """Map a tier name to its configured Stripe price ID."""
+        settings = get_settings()
+        price_ids = {
+            "pro": settings.STRIPE_PRICE_PRO,
+            "pro_plus": settings.STRIPE_PRICE_PRO_PLUS,
+            "enterprise": settings.STRIPE_PRICE_ENTERPRISE,
+        }
+        return price_ids.get(tier.lower())
 
     async def create_checkout_session(
         self,
@@ -49,9 +83,10 @@ class StripeService:
         tier: str,
         success_url: str,
         cancel_url: str,
+        customer_id: str | None = None,
     ) -> str | None:
         """
-        Create a Stripe checkout session for subscription upgrade.
+        Create a Stripe checkout session for a subscription upgrade.
 
         Args:
             user_id: The user's internal ID.
@@ -59,6 +94,7 @@ class StripeService:
             tier: The target subscription tier.
             success_url: Redirect URL on successful payment.
             cancel_url: Redirect URL on cancellation.
+            customer_id: Optional existing Stripe customer ID.
 
         Returns:
             The checkout session URL, or None if Stripe is not configured.
@@ -67,55 +103,105 @@ class StripeService:
             logger.warning("Stripe not configured; cannot create checkout session")
             return None
 
+        price_id = self._resolve_price_id(tier)
+        if not price_id:
+            # Enterprise and any un-provisioned tier are sold via contact
+            # sales; there is no self-serve checkout price.
+            logger.info("No Stripe price configured for tier '%s'; skipping checkout", tier)
+            return None
+
         try:
-            import stripe
-            stripe.api_key = self._secret_key
-
-            # Price IDs come from settings so they can be configured per environment
-            settings = get_settings()
-            price_ids = {
-                "pro": settings.STRIPE_PRICE_PRO,
-                "pro_plus": settings.STRIPE_PRICE_PRO_PLUS,
-                "enterprise": settings.STRIPE_PRICE_ENTERPRISE,
-            }
-
-            price_id = price_ids.get(tier.lower())
-            if not price_id:
-                raise ValueError(f"Unknown tier: {tier}")
-
-            session = stripe.checkout.Session.create(
-                payment_method_types=["card"],
-                line_items=[{
-                    "price": price_id,
-                    "quantity": 1,
-                }],
-                mode="subscription",
-                success_url=success_url,
-                cancel_url=cancel_url,
-                customer_email=email,
-                metadata={
-                    "user_id": user_id,
-                    "tier": tier,
+            client = self._get_client()
+            session = client.v1.checkout.sessions.create({
+                # NOTE: Omit `payment_method_types` so Stripe dynamically selects
+                # eligible payment methods from Dashboard settings.
+                "line_items": [{"price": price_id, "quantity": 1}],
+                "mode": "subscription",
+                "success_url": success_url,
+                "cancel_url": cancel_url,
+                "customer_email": email if not customer_id else None,
+                "customer": customer_id,
+                "metadata": {"user_id": user_id, "tier": tier, "kind": "subscription"},
+                "subscription_data": {
+                    "metadata": {"user_id": user_id, "tier": tier, "kind": "subscription"}
                 },
-                subscription_data={
-                    "metadata": {
-                        "user_id": user_id,
-                        "tier": tier,
-                    }
-                },
-            )
+                "integration_identifier": self._integration_identifier(),
+            })
 
             logger.info(
-                "Created Stripe checkout session",
+                "Created Stripe subscription checkout session",
                 extra={"user_id": user_id, "tier": tier, "session_id": session.id},
             )
             return session.url
 
-        except ImportError:
-            logger.error("Stripe Python SDK not installed")
-            return None
         except Exception as e:
             logger.error("Failed to create Stripe checkout session: %s", e, exc_info=True)
+            raise
+
+    async def create_credit_purchase_session(
+        self,
+        user_id: str,
+        email: str,
+        credits: int,
+        amount_usd: float,
+        success_url: str,
+        cancel_url: str,
+        customer_id: str | None = None,
+    ) -> str | None:
+        """
+        Create a Stripe checkout session for a one-off credit pack purchase.
+
+        Args:
+            user_id: The user's internal ID.
+            email: The user's email address.
+            credits: Number of credits being purchased.
+            amount_usd: Pre-computed USD price for the credit pack (in dollars).
+            success_url: Redirect URL on successful payment.
+            cancel_url: Redirect URL on cancellation.
+            customer_id: Optional existing Stripe customer ID.
+
+        Returns:
+            The checkout session URL, or None if Stripe is not configured.
+        """
+        if not self._enabled:
+            logger.warning("Stripe not configured; cannot create credit checkout session")
+            return None
+
+        unit_amount = int(amount_usd * 100)
+
+        try:
+            client = self._get_client()
+            session = client.v1.checkout.sessions.create({
+                # Omit `payment_method_types` for dynamic payment methods.
+                "line_items": [{
+                    "price_data": {
+                        "currency": "usd",
+                        "product_data": {"name": f"{credits} Conversion Credits"},
+                        "unit_amount": unit_amount,
+                    },
+                    "quantity": 1,
+                }],
+                "mode": "payment",
+                "success_url": success_url,
+                "cancel_url": cancel_url,
+                "customer_email": email if not customer_id else None,
+                "customer": customer_id,
+                "metadata": {
+                    "user_id": user_id,
+                    "kind": "credit_purchase",
+                    "credits": str(credits),
+                },
+                "integration_identifier": self._integration_identifier(),
+            })
+
+            logger.info(
+                "Created Stripe credit-purchase checkout session",
+                extra={"user_id": user_id, "credits": credits, "session_id": session.id},
+            )
+            return session.url
+
+        except Exception as e:
+            logger.error("Failed to create credit checkout session: %s", e, exc_info=True)
             raise
 
     async def cancel_subscription(self, subscription_id: str) -> bool:
@@ -132,13 +218,8 @@ class StripeService:
             return False
 
         try:
-            import stripe
-            stripe.api_key = self._secret_key
-
-            stripe.Subscription.modify(
-                subscription_id,
-                cancel_at_period_end=True,
-            )
+            client = self._get_client()
+            client.v1.subscriptions.update(subscription_id, {"cancel_at_period_end": True})
             logger.info("Cancelled subscription at period end", extra={"subscription_id": subscription_id})
             return True
 
@@ -157,12 +238,11 @@ class StripeService:
             return None
 
         try:
-            import stripe
-            stripe.api_key = self._secret_key
-
-            subscription = stripe.Subscription.retrieve(subscription_id)
+            client = self._get_client()
+            subscription = client.v1.subscriptions.retrieve(subscription_id)
             return {
                 "status": subscription.status,
+                "current_period_start": getattr(subscription, "current_period_start", None),
                 "current_period_end": getattr(subscription, "current_period_end", None),
                 "cancel_at_period_end": subscription.cancel_at_period_end,
             }
@@ -186,14 +266,12 @@ class StripeService:
             return None
 
         try:
-            import stripe
-            stripe.api_key = self._secret_key
-
-            customer = stripe.Customer.create(
-                email=email,
-                name=name,
-                metadata={"user_id": user_id},
-            )
+            client = self._get_client()
+            customer = client.v1.customers.create({
+                "email": email,
+                "name": name,
+                "metadata": {"user_id": user_id},
+            })
             logger.info("Created Stripe customer", extra={"user_id": user_id, "customer_id": customer.id})
             return customer.id
 
@@ -201,46 +279,30 @@ class StripeService:
             logger.error("Failed to create Stripe customer: %s", e, exc_info=True)
             return None
 
-    async def create_payment_intent(
-        self,
-        amount_usd: float,
-        credits: int,
-        customer_id: str | None,
-        metadata: dict[str, str] | None = None,
-    ) -> dict[str, Any] | None:
+    async def create_portal_session(self, customer_id: str, return_url: str) -> str | None:
         """
-        Create a Stripe payment intent for credit purchases.
+        Create a Stripe customer portal session (self-service billing).
 
         Args:
-            amount_usd: The amount to charge in USD.
-            credits: The number of credits being purchased.
-            customer_id: Optional Stripe customer ID.
-            metadata: Additional metadata for the payment.
+            customer_id: The Stripe customer ID.
+            return_url: Where to redirect the user after leaving the portal.
 
         Returns:
-            Payment intent dict with client_secret, or None.
+            The portal URL, or None if Stripe is not configured.
         """
         if not self._enabled:
+            logger.warning("Stripe not configured; cannot create portal session")
             return None
 
         try:
-            import stripe
-            stripe.api_key = self._secret_key
-
-            intent_kwargs: dict[str, Any] = {
-                "amount": int(amount_usd * 100),  # Convert to cents
-                "currency": "usd",
-                "metadata": {
-                    **(metadata or {}),
-                    "credits": str(credits),
-                },
-            }
-            if customer_id:
-                intent_kwargs["customer"] = customer_id
-            intent = stripe.PaymentIntent.create(**intent_kwargs)
-            logger.info("Created payment intent", extra={"intent_id": intent.id, "credits": credits})
-            return {"client_secret": intent.client_secret, "id": intent.id}
+            client = self._get_client()
+            session = client.v1.billing_portal.sessions.create({
+                "customer": customer_id,
+                "return_url": return_url,
+            })
+            logger.info("Created Stripe customer portal session", extra={"customer_id": customer_id, "session_id": session.id})
+            return session.url
 
         except Exception as e:
-            logger.error("Failed to create payment intent: %s", e, exc_info=True)
+            logger.error("Failed to create portal session: %s", e, exc_info=True)
             return None

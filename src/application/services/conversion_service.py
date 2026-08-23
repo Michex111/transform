@@ -6,6 +6,7 @@ from src.application.ports.queue_port import JobQueuePort
 from src.application.services.priority_queue_dispatcher import PriorityQueueDispatcher
 from src.domain.conversions.entities.conversion_job import ConversionJob
 from src.domain.conversions.policies.conversion_policy import is_supported
+from src.domain.conversions.value_object.conversion_type import ConversionType
 from src.domain.subscriptions.value_object.tier import SubscriptionTier
 from src.infrastructure.converters.converter_registry import get_registry
 
@@ -57,8 +58,65 @@ class ConversionService:
             await self.queue_port.publish_job(job)
         return job.job_id
 
+    async def convert_library_file(
+        self,
+        *,
+        file_name: str,
+        source_format: str,
+        target_format: str,
+        object_key: str,
+        user_id: int,
+        tier: SubscriptionTier = SubscriptionTier.FREE,
+    ) -> ConversionJob:
+        """Create and enqueue a job that converts a file already stored in the
+        user's library.
+
+        Unlike the upload flow, the input object is already persisted at
+        ``object_key``, so the job is created directly and enqueued immediately
+        (no separate upload/verify step). The worker downloads the existing
+        object and converts it.
+
+        Raises:
+            InvalidConversion: If ``source_format`` / ``target_format`` is not
+                a supported conversion.
+        """
+        job = ConversionJob(
+            job_id="",
+            conversion=ConversionType(source_format=source_format, target_format=target_format),
+            input_file=file_name,
+            object_key=object_key,
+            user_id=user_id,
+        )
+        await self.create_conversion_job(job)
+        await self.push_conversion_job(job, tier=tier)
+        return job
+
     async def get_conversion_job(self, job_id: str) -> ConversionJob | None:
         return await self.db_repository.get_conversion_job(job_id)
+
+    async def list_history(
+        self,
+        user_id: int,
+        *,
+        offset: int = 0,
+        limit: int = 20,
+        since=None,
+    ) -> tuple[list[ConversionJob], int]:
+        """Return the user's conversion history (newest first) plus total count.
+
+        Args:
+            since: Optional datetime; only jobs created on/after this time are
+                returned (used for the time-range filter on the History page).
+        """
+        return await self.db_repository.list_user_history(user_id, offset, limit, since=since)
+
+    async def delete_history_job(self, job_id: str, user_id: int) -> bool:
+        """Delete a single conversion-history record owned by ``user_id``.
+
+        Returns:
+            True if a job was deleted; False if it was not found or not owned.
+        """
+        return await self.db_repository.delete_job(job_id, user_id)
 
     async def update_conversion_job(self, job: ConversionJob) -> None:
         """Persist progress updates for an existing job (status, output, errors,

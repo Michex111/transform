@@ -3,6 +3,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import or_, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.infrastructure.auth.jwt_provider import (
@@ -49,7 +50,16 @@ async def register_user(
         is_active=True,
     )
     db.add(user)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError:
+        # Concurrent registration with the same username/email can slip past
+        # the pre-check above; surface it as a clean 409, not a 500.
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Username or email already exists",
+        ) from None
     await db.refresh(user)
     return UserResponse.model_validate(user)
 

@@ -26,6 +26,25 @@ _AUTH_PATHS = {"/api/users/token", "/api/users/register", "/api/users/refresh"}
 _INSTANCES: list["RateLimitMiddleware"] = []
 
 
+def _flush_redis_rate_limits() -> None:
+    """Best-effort flush of Redis rate-limit keys.
+
+    Used by ``reset_all`` so tests running against a reachable local Redis
+    start from a fresh budget. Falls back to a no-op when Redis is unreachable
+    or the sync client is unavailable.
+    """
+    try:
+        from redis import Redis as SyncRedis
+
+        settings = get_settings()
+        redis = SyncRedis.from_url(settings.REDIS_URL.get_secret_value(), socket_timeout=3)
+        for key in redis.scan_iter(match="ratelimit:*", count=500):
+            redis.delete(key)
+        redis.close()
+    except Exception:  # pragma: no cover - Redis may not be present in tests
+        pass
+
+
 class RateLimitMiddleware(BaseHTTPMiddleware):
     """
     Sliding-window rate limiting middleware.
@@ -52,10 +71,16 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
     @classmethod
     def reset_all(cls) -> None:
-        """Clear all in-memory rate-limit state (used by tests)."""
+        """Clear all in-memory rate-limit state (used by tests).
+
+        Also clears Redis-backed rate-limit keys so tests that run against a
+        reachable local Redis start from a fresh budget (otherwise counters
+        accumulate across test runs and cause spurious 429s).
+        """
         for instance in _INSTANCES:
             instance._store.clear()
             instance._redis_unavailable = False
+        _flush_redis_rate_limits()
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         # Only rate-limit API routes. The SPA (index.html, /assets/*) is served

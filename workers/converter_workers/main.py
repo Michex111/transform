@@ -17,6 +17,7 @@ from src.infrastructure.logging.loggers import worker_logger
 from src.infrastructure.adapters.storage.minio_storage_factory import get_storage
 from workers.converter_workers.dependencies import (
     get_consumer_queue,
+    get_credit_port,
     get_encryption_service,
     get_event_queue,
     get_job_repository,
@@ -40,7 +41,11 @@ async def build_worker(worker_name: str = "file_converter_worker") -> ConverterW
     queue_port: QueuePort = await get_consumer_queue(consumer_group="conversion-workers", consumer_name=worker_name)
     event_port = get_event_queue()
     job_repository = get_job_repository()
-    encryption_service = None  #get_encryption_service()
+    credit_port = get_credit_port()
+    # Enable at-rest encryption when ENCRYPTION_MASTER_KEY is configured so the
+    # worker decrypts inputs before conversion and re-encrypts outputs, keeping
+    # downloads (which stream through the API's decrypt path) consistent.
+    encryption_service = get_encryption_service()
 
     if storage_port is None or queue_port is None or event_port is None:
         raise RuntimeError(
@@ -56,6 +61,7 @@ async def build_worker(worker_name: str = "file_converter_worker") -> ConverterW
         worker_name=worker_name,
         job_repository=job_repository,
         encryption_service=encryption_service,
+        credit_port=credit_port,
     )
 
     worker = ConverterWorker(context=context, process_job=process_job)

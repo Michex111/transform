@@ -19,6 +19,24 @@ class ConversionJobRepositoryPort(ConversionJobWriteRepositoryPort, Protocol):
         """Retrieve a conversion job from the database by its ID."""
         ...
 
+    async def list_user_history(
+        self,
+        user_id: int,
+        offset: int,
+        limit: int,
+    ) -> tuple[list[ConversionJob], int]:
+        """Return the user's job history (newest first) plus the total count."""
+        ...
+
+    async def list_user_active_jobs(
+        self,
+        user_id: int,
+        offset: int,
+        limit: int,
+    ) -> tuple[list[ConversionJob], int]:
+        """Return the user's in-flight jobs (pending/processing/awaiting upload)."""
+        ...
+
 class APIKeyRepositoryPort(Protocol):
     """Repository interface for API keys."""
     async def save(self, api_key: APIKey) -> None:

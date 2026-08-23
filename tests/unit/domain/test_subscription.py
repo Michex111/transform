@@ -30,9 +30,27 @@ class TestTierPolicy:
 
     def test_premium_policy(self):
         policy = TierPolicy.for_tier(SubscriptionTier.PREMIUM)
-        assert policy.storage_quota_bytes == 100 * 1024 * 1024 * 1024
+        assert policy.storage_quota_bytes == 50 * 1024 * 1024 * 1024
         assert policy.monthly_conversion_credits == 500
         assert policy.has_persistent_credits
+
+    def test_pro_policy(self):
+        policy = TierPolicy.for_tier(SubscriptionTier.PRO)
+        assert policy.storage_quota_bytes == 50 * 1024 * 1024 * 1024
+        assert policy.monthly_conversion_credits == 500
+        assert policy.has_persistent_credits
+
+    def test_pro_plus_policy(self):
+        policy = TierPolicy.for_tier(SubscriptionTier.PRO_PLUS)
+        assert policy.storage_quota_bytes == 100 * 1024 * 1024 * 1024
+        assert policy.monthly_conversion_credits == 2000
+        assert policy.has_persistent_credits
+
+    def test_enterprise_policy(self):
+        policy = TierPolicy.for_tier(SubscriptionTier.ENTERPRISE)
+        assert policy.storage_quota_bytes == 1000 * 1024 * 1024 * 1024
+        assert policy.monthly_conversion_credits is None
+        assert not policy.has_persistent_credits
 
 
 class TestSubscription:

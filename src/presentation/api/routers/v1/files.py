@@ -29,11 +29,15 @@ from src.presentation.api.dependencies.service_dependencies import (
 )
 from src.application.dtos.upload_dto import UploadResponse
 from src.presentation.schemas.files import (
+    BatchDeleteRequest,
+    BatchDeleteResponse,
+    FavoriteFileRequest,
     FileDownloadResponse,
     FileListResponse,
     FileMetadataResponse,
     PresignedUrlsRequest,
     PresignedUrlResponse,
+    RenameFileRequest,
 )
 from src.presentation.schemas.folders import (
     CreateFolderRequest,
@@ -41,6 +45,7 @@ from src.presentation.schemas.folders import (
     FolderListResponse,
     FolderResponse,
     MoveFileRequest,
+    MoveFolderRequest,
     RenameFolderRequest,
 )
 from src.presentation.schemas.upload import CreateUploadSessionRequest
@@ -62,6 +67,7 @@ def _to_metadata(row) -> FileMetadataResponse:
         folder_id=row.folder_id,
         created_at=row.created_at,
         expires_at=row.expires_at,
+        is_favorite=row.is_favorite,
     )
 
 
@@ -165,6 +171,24 @@ async def rename_folder(
     return _to_folder(folder)
 
 
+@router.post("/folders/{folder_id}/move", response_model=FolderResponse)
+async def move_folder(
+    folder_id: str,
+    payload: MoveFolderRequest,
+    current_user: CurrentUser,
+    file_service: Annotated[FileService, Depends(get_file_service)],
+) -> FolderResponse:
+    """Move a folder under a new parent (or to root when ``parent_id`` is
+    None). Moving a folder into itself or one of its descendants is rejected."""
+    try:
+        folder = await file_service.move_folder(
+            current_user.id, folder_id, payload.parent_id,
+        )
+    except FileSystemError as exc:
+        raise _map_fs_error(exc) from exc
+    return _to_folder(folder)
+
+
 @router.delete("/folders/{folder_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_folder(
     folder_id: str,
@@ -255,6 +279,60 @@ async def list_files(
     )
 
 
+@router.get("/favorites", response_model=FileListResponse)
+async def list_favorite_files(
+    current_user: CurrentUser,
+    file_service: Annotated[FileService, Depends(get_file_service)],
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=100),
+) -> FileListResponse:
+    """List the current user's favorite files (newest first)."""
+    rows, total = await file_service.list_favorite_files(
+        current_user.id, offset=(page - 1) * page_size, limit=page_size,
+    )
+    return FileListResponse(
+        files=[_to_metadata(r) for r in rows],
+        total=total,
+        page=page,
+        page_size=page_size,
+    )
+
+
+@router.post("/batch-delete", response_model=BatchDeleteResponse)
+async def batch_delete(
+    payload: BatchDeleteRequest,
+    current_user: CurrentUser,
+    file_service: Annotated[FileService, Depends(get_file_service)],
+) -> BatchDeleteResponse:
+    """Delete multiple files and/or folders in one call."""
+    try:
+        deleted_files = await file_service.delete_files(current_user.id, payload.file_ids)
+        deleted_folders = await file_service.delete_folders(current_user.id, payload.folder_ids)
+    except FileSystemError as exc:
+        raise _map_fs_error(exc) from exc
+    return BatchDeleteResponse(
+        deleted_files=deleted_files,
+        deleted_folders=deleted_folders,
+    )
+
+
+@router.patch("/{file_id}/favorite", response_model=FileMetadataResponse)
+async def set_file_favorite(
+    file_id: str,
+    payload: FavoriteFileRequest,
+    current_user: CurrentUser,
+    file_service: Annotated[FileService, Depends(get_file_service)],
+) -> FileMetadataResponse:
+    """Set or clear the favorite flag on a file."""
+    try:
+        updated = await file_service.set_file_favorite(
+            current_user.id, file_id, payload.is_favorite,
+        )
+    except FileSystemError as exc:
+        raise _map_fs_error(exc) from exc
+    return _to_metadata(updated)
+
+
 @router.post("/{file_id}/move", response_model=FileMetadataResponse)
 async def move_file(
     file_id: str,
@@ -266,6 +344,23 @@ async def move_file(
     try:
         updated = await file_service.move_file(
             current_user.id, file_id, payload.folder_id,
+        )
+    except FileSystemError as exc:
+        raise _map_fs_error(exc) from exc
+    return _to_metadata(updated)
+
+
+@router.patch("/{file_id}", response_model=FileMetadataResponse)
+async def rename_file(
+    file_id: str,
+    payload: RenameFileRequest,
+    current_user: CurrentUser,
+    file_service: Annotated[FileService, Depends(get_file_service)],
+) -> FileMetadataResponse:
+    """Rename a file's display name. The stored object key is unchanged."""
+    try:
+        updated = await file_service.rename_file(
+            current_user.id, file_id, payload.name,
         )
     except FileSystemError as exc:
         raise _map_fs_error(exc) from exc

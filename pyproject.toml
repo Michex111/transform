@@ -11,6 +11,7 @@ dependencies = [
     "cairosvg>=2.7.1",
     "cryptography>=44.0.0",
     "fastapi[standard]>=0.136.3",
+    "fonttools[woff]>=4.53.0",
     "minio>=7.2.20",
     "pillow>=11.0.0",
     "prometheus-client>=0.21.0",
