@@ -18,6 +18,7 @@ from src.presentation.schemas.subscription import (
     CancelSubscriptionResponse,
     CheckoutRequest,
     CheckoutResponse,
+    PortalResponse,
     SubscriptionPlanResponse,
     SubscriptionStatus,
     SubscriptionStatusResponse,
@@ -74,6 +75,7 @@ async def list_plans() -> list[SubscriptionPlanResponse]:
 async def create_checkout_session(
     payload: CheckoutRequest,
     current_user: CurrentUser,
+    subscription_repo: Annotated[SQLSubscriptionRepository, Depends(get_subscription_repository)],
     stripe_service: Annotated[StripeService, Depends(get_stripe_service)],
 ) -> CheckoutResponse:
     """Create a Stripe checkout session for upgrading subscription."""
@@ -88,6 +90,11 @@ async def create_checkout_session(
             detail="The FREE tier does not require checkout",
         )
 
+    # Reuse an existing Stripe customer if the user already has one, so repeat
+    # subscription changes attach to the same customer record.
+    row = await subscription_repo.get_subscription_row(current_user.id)
+    customer_id = row.stripe_customer_id if row else None
+
     settings = get_settings()
     url = await stripe_service.create_checkout_session(
         user_id=str(current_user.id),
@@ -95,6 +102,7 @@ async def create_checkout_session(
         tier=payload.tier.value.lower(),
         success_url=settings.STRIPE_SUCCESS_URL,
         cancel_url=settings.STRIPE_CANCEL_URL,
+        customer_id=customer_id,
     )
     if url is None:
         raise HTTPException(
@@ -102,6 +110,40 @@ async def create_checkout_session(
             detail="Stripe checkout session could not be created",
         )
     return CheckoutResponse(checkout_url=url)
+
+
+@router.post("/portal", response_model=PortalResponse)
+async def create_portal_session(
+    current_user: CurrentUser,
+    subscription_repo: Annotated[SQLSubscriptionRepository, Depends(get_subscription_repository)],
+    stripe_service: Annotated[StripeService, Depends(get_stripe_service)],
+) -> PortalResponse:
+    """Create a Stripe customer portal session for self-service billing."""
+    if not stripe_service.enabled:
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="Stripe integration is not configured.",
+        )
+
+    row = await subscription_repo.get_subscription_row(current_user.id)
+    customer_id = row.stripe_customer_id if row else None
+    if not customer_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No Stripe customer found for this account",
+        )
+
+    settings = get_settings()
+    url = await stripe_service.create_portal_session(
+        customer_id=customer_id,
+        return_url=settings.STRIPE_PORTAL_RETURN_URL,
+    )
+    if url is None:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Stripe portal session could not be created",
+        )
+    return PortalResponse(portal_url=url)
 
 
 @router.get("/status", response_model=SubscriptionStatusResponse)
@@ -123,10 +165,15 @@ async def get_subscription_status(
     if row.stripe_subscription_id:
         remote = await stripe_service.get_subscription(row.stripe_subscription_id)
         if remote:
-            current_period_end = datetime.fromtimestamp(
-                remote["current_period_end"], tz=UTC
-            )
-            if remote["status"] == "canceled":
+            # Use .get() with a fallback so older Stripe mocks / partial payloads
+            # don't crash the status endpoint.
+            period_start_ts = remote.get("current_period_start")
+            period_end_ts = remote.get("current_period_end")
+            if period_start_ts is not None:
+                current_period_start = datetime.fromtimestamp(period_start_ts, tz=UTC)
+            if period_end_ts is not None:
+                current_period_end = datetime.fromtimestamp(period_end_ts, tz=UTC)
+            if remote.get("status") == "canceled":
                 return SubscriptionStatusResponse(
                     tier=domain_tier_to_api(row.tier),
                     status=SubscriptionStatus.CANCELLED,

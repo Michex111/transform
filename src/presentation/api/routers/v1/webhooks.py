@@ -1,8 +1,9 @@
 """Webhook handling API endpoints for Stripe and other integrations."""
 
 import logging
+import uuid
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,15 +15,17 @@ from src.infrastructure.adapters.repository.sql_credit_repo import SQLCreditRepo
 from src.infrastructure.adapters.repository.sql_subscription_repo import SQLSubscriptionRepository
 from src.infrastructure.config.settings import get_settings
 from src.infrastructure.database.session import get_db_session
+from src.infrastructure.logging.audit import log_webhook_failure
+from src.presentation.schemas.credit import TransactionType
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/webhooks", tags=["webhooks"])
 
 _TIER_BY_NAME: dict[str, SubscriptionTier] = {
-    "pro": SubscriptionTier.PREMIUM,
-    "pro_plus": SubscriptionTier.PREMIUM,
-    "enterprise": SubscriptionTier.PREMIUM,
+    "pro": SubscriptionTier.PRO,
+    "pro_plus": SubscriptionTier.PRO_PLUS,
+    "enterprise": SubscriptionTier.ENTERPRISE,
 }
 
 
@@ -35,7 +38,7 @@ async def _activate_subscription(
     stripe_subscription_id: str | None,
 ) -> None:
     """Upsert the user's subscription row and grant the tier's monthly credits."""
-    tier = _TIER_BY_NAME.get(tier_name.lower(), SubscriptionTier.PREMIUM)
+    tier = _TIER_BY_NAME.get(tier_name.lower(), SubscriptionTier.PRO)
     actor_key = f"user:{user_id}"
 
     sub_repo = SQLSubscriptionRepository(db)
@@ -74,6 +77,54 @@ async def _activate_subscription(
     )
 
 
+async def _grant_purchased_credits(
+    db: AsyncSession,
+    *,
+    user_id: str,
+    credits: int,
+    reference_id: str | None,
+) -> None:
+    """Grant purchased credits idempotently after payment confirms.
+
+    Uses the Stripe session id as the transaction reference so repeated
+    deliveries of the same webhook don't double-credit the user. For a FREE
+    user the purchased credits are added on top of the existing allowance.
+    """
+    credit_repo = SQLCreditRepository(db)
+    period_key = datetime.now(UTC).strftime("%Y-%m")
+
+    existing_txns = await credit_repo.list_transactions(int(user_id), offset=0, limit=100)
+    if any(
+        t.transaction_type == TransactionType.PURCHASE.value
+        and t.reference_id == reference_id
+        for t in existing_txns
+    ):
+        logger.info("Duplicate credit purchase webhook ignored: ref=%s", reference_id)
+        return
+
+    credit = await credit_repo.get_credit(user_id, period_key)
+    if credit is None:
+        credit = Credit.from_tier(
+            owner_id=user_id,
+            period_key=period_key,
+            tier=SubscriptionTier.FREE,
+        )
+    credit.allowance += credits
+    credit.remaining += credits
+    await credit_repo.save_credit(credit)
+
+    await credit_repo.record_transaction(
+        transaction_id=str(uuid.uuid4()),
+        user_id=int(user_id),
+        amount=credits,
+        transaction_type=TransactionType.PURCHASE.value,
+        reference_id=reference_id,
+        description=f"Purchased {credits} credits via Stripe",
+    )
+
+    logger.info("Granted %s credits to user=%s ref=%s", credits, user_id, reference_id)
+
+
 async def _downgrade_to_free(db: AsyncSession, user_id: str) -> None:
     """Downgrade a user to the FREE tier after their subscription ends."""
     sub_repo = SQLSubscriptionRepository(db)
@@ -85,6 +136,26 @@ async def _downgrade_to_free(db: AsyncSession, user_id: str) -> None:
     logger.info("User %s downgraded to FREE tier", user_id)
 
 
+def _normalise_event_data(event_data: Any) -> dict[str, Any]:
+    """Return a plain dict for Stripe event data (handles StripeObject)."""
+    if hasattr(event_data, "to_dict_recursive"):
+        return event_data.to_dict_recursive()
+    if hasattr(event_data, "to_dict"):
+        return event_data.to_dict()
+    return dict(event_data) if isinstance(event_data, dict) else {}
+
+
+def _handled_credit_purchase_metadata(metadata: dict[str, Any]) -> tuple[str | None, int]:
+    """Extract user_id and credits from the checkout session metadata."""
+    user_id = metadata.get("user_id")
+    credits = metadata.get("credits")
+    try:
+        credits_int = int(credits) if credits is not None else 0
+    except (TypeError, ValueError):
+        credits_int = 0
+    return user_id, credits_int
+
+
 @router.post("/stripe", status_code=status.HTTP_200_OK)
 async def handle_stripe_webhook(
     request: Request,
@@ -94,10 +165,10 @@ async def handle_stripe_webhook(
     Handle incoming Stripe webhook events.
 
     Verifies the webhook signature and processes events such as:
-    - checkout.session.completed
-    - invoice.payment_succeeded
-    - invoice.payment_failed
-    - customer.subscription.deleted
+    - checkout.session.completed (subscription activation + credit purchase)
+    - checkout.session.async_payment_succeeded / async_payment_failed
+    - invoice.payment_succeeded / invoice.payment_failed
+    - customer.subscription.updated / customer.subscription.deleted
     """
     settings = get_settings()
 
@@ -119,6 +190,7 @@ async def handle_stripe_webhook(
             secret=settings.STRIPE_WEBHOOK_SECRET.get_secret_value(),
         )
     except Exception as e:
+        log_webhook_failure(provider="stripe", reason=str(e))
         logger.error("Stripe webhook signature verification failed: %s", e)
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -126,37 +198,23 @@ async def handle_stripe_webhook(
         )
 
     event_type = event.type
-    # Stripe's event objects are StripeObject instances, not plain dicts —
-    # normalise to a recursive plain dict so attribute/dict access is safe.
-    event_data = event.data.object
-    if hasattr(event_data, "to_dict_recursive"):
-        event_data = event_data.to_dict_recursive()
-    elif hasattr(event_data, "to_dict"):
-        event_data = event_data.to_dict()
+    event_data = _normalise_event_data(event.data.object)
 
     if event_type == "checkout.session.completed":
-        metadata = event_data.get("metadata", {}) or {}
-        user_id = metadata.get("user_id")
-        tier = metadata.get("tier", "pro")
-        if user_id:
-            await _activate_subscription(
-                db,
-                user_id=user_id,
-                tier_name=tier,
-                stripe_customer_id=event_data.get("customer"),
-                stripe_subscription_id=event_data.get("subscription"),
-            )
+        await _handle_checkout_completed(db, event_data)
+
+    elif event_type in ("checkout.session.async_payment_succeeded", "checkout.session.async_payment_failed"):
+        # Same handling as .completed; fulfilment logic checks payment_status.
+        await _handle_checkout_completed(db, event_data)
 
     elif event_type == "invoice.payment_succeeded":
-        logger.info("Invoice payment succeeded: %s", event.id)
-        # Reset the user's monthly credits so their allowance is refreshed
-        customer_id = event_data.get("customer")
-        if customer_id:
-            logger.info("Payment succeeded for customer %s", customer_id)
+        await _refresh_allowance_for_invoice(db, event_data)
 
     elif event_type == "invoice.payment_failed":
         logger.info("Invoice payment failed: %s", event.id)
-        # Stripe handles retries and the grace period; log for monitoring.
+
+    elif event_type == "customer.subscription.updated":
+        await _handle_subscription_updated(db, event_data)
 
     elif event_type == "customer.subscription.deleted":
         metadata = event_data.get("metadata", {}) or {}
@@ -165,6 +223,104 @@ async def handle_stripe_webhook(
             await _downgrade_to_free(db, user_id)
 
     return {"status": "received", "type": event_type}
+
+
+async def _handle_checkout_completed(db: AsyncSession, event_data: dict[str, Any]) -> None:
+    metadata = event_data.get("metadata", {}) or {}
+    payment_status = event_data.get("payment_status")
+    # For delayed-notification methods, only fulfill when the payment actually
+    # succeeded (payment_status != 'unpaid').
+    if payment_status == "unpaid":
+        logger.info("Checkout session unpaid; skipping fulfillment: %s", event_data.get("id"))
+        return
+
+    kind = metadata.get("kind")
+    if kind == "credit_purchase":
+        user_id, credits = _handled_credit_purchase_metadata(metadata)
+        if user_id and credits:
+            await _grant_purchased_credits(
+                db,
+                user_id=user_id,
+                credits=credits,
+                reference_id=event_data.get("id"),
+            )
+        return
+
+    # Otherwise treat as a subscription activation.
+    user_id = metadata.get("user_id")
+    tier = metadata.get("tier", "pro")
+    if user_id:
+        await _activate_subscription(
+            db,
+            user_id=user_id,
+            tier_name=tier,
+            stripe_customer_id=event_data.get("customer"),
+            stripe_subscription_id=event_data.get("subscription"),
+        )
+
+
+async def _refresh_allowance_for_invoice(db: AsyncSession, event_data: dict[str, Any]) -> None:
+    """Refresh the user's monthly conversion-credit allowance on renewal.
+
+    Invoices carry a ``subscription`` reference; that subscription's metadata
+    holds the ``user_id`` and ``tier`` we stored at checkout. We re-fetch the
+    subscription to read those values and re-apply the tier allowance.
+    """
+    subscription_id = event_data.get("subscription")
+    if not subscription_id:
+        logger.info("Invoice payment succeeded without subscription: %s", event_data.get("id"))
+        return
+
+    settings = get_settings()
+    if not settings.STRIPE_SECRET_KEY:
+        logger.warning("Cannot refresh allowance: Stripe secret not configured")
+        return
+
+    try:
+        from src.infrastructure.adapters.payment.stripe_service import StripeService
+        client = StripeService()._get_client()
+        sub = client.v1.subscriptions.retrieve(subscription_id)
+    except Exception as e:
+        logger.error("Failed to refresh allowance from subscription: %s", e, exc_info=True)
+        return
+
+    metadata = getattr(sub, "metadata", None) or {}
+    user_id = metadata.get("user_id")
+    tier_name = metadata.get("tier", "pro")
+    if not user_id:
+        logger.info("Invoice subscription has no user metadata: %s", subscription_id)
+        return
+
+    await _activate_subscription(
+        db,
+        user_id=user_id,
+        tier_name=tier_name,
+        stripe_customer_id=event_data.get("customer"),
+        stripe_subscription_id=subscription_id,
+    )
+
+
+async def _handle_subscription_updated(db: AsyncSession, event_data: dict[str, Any]) -> None:
+    metadata = event_data.get("metadata", {}) or {}
+    user_id = metadata.get("user_id")
+    if not user_id:
+        logger.info("Subscription updated without user metadata: %s", event_data.get("id"))
+        return
+
+    status = event_data.get("status")
+    if status == "canceled":
+        await _downgrade_to_free(db, user_id)
+        return
+
+    tier_name = metadata.get("tier", "pro")
+    await _activate_subscription(
+        db,
+        user_id=user_id,
+        tier_name=tier_name,
+        stripe_customer_id=event_data.get("customer"),
+        stripe_subscription_id=event_data.get("id"),
+    )
+    logger.info("Subscription updated: user=%s status=%s", user_id, status)
 
 
 @router.get("/health", status_code=status.HTTP_200_OK)

@@ -2,7 +2,8 @@
 
 from datetime import UTC, datetime
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Integer, String, UniqueConstraint
+import sqlalchemy as sa
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.infrastructure.database.session import Base
@@ -31,6 +32,7 @@ class UserFileModel(Base):
     file_name: Mapped[str] = mapped_column(String(255), nullable=False, comment="Original filename")
     file_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     mime_type: Mapped[str] = mapped_column(String(100), nullable=False, default="application/octet-stream")
+    is_favorite: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=sa.text("false"))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

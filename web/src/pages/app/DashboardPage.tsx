@@ -14,10 +14,15 @@ import type { DashboardResponse } from "@/api/types";
 
 export function DashboardPage() {
   const { user } = useAuth();
-  const { jobs } = useJobs();
+  const { jobs, refresh } = useJobs();
   const { error } = useToast();
   const [stats, setStats] = useState<DashboardResponse | null>(null);
   const [loading, setLoading] = useState(true);
+
+  // Pull the server history so the "recent" list isn't empty on a fresh login.
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
 
   useEffect(() => {
     let active = true;
@@ -30,6 +35,19 @@ export function DashboardPage() {
     return () => {
       active = false;
     };
+  }, [error]);
+
+  // Keep the "Credits remaining" stat in sync when a conversion completes and
+  // JobsContext broadcasts the updated balance. Depends only on stable `error`.
+  useEffect(() => {
+    const onCreditsUpdated = () => {
+      api
+        .dashboard()
+        .then((d) => setStats(d))
+        .catch((e: Error) => error(e.message));
+    };
+    window.addEventListener("credits:updated", onCreditsUpdated);
+    return () => window.removeEventListener("credits:updated", onCreditsUpdated);
   }, [error]);
 
   async function handleDownload(jobId: string) {

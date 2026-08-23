@@ -77,6 +77,12 @@ export interface CreateConversionJobRequest {
   input_key: string
 }
 
+/** Convert a file that already lives in the user's library (object storage). */
+export interface CreateLibraryConversionRequest {
+  file_id: string
+  target_format: string
+}
+
 export interface ConversionJobResponse {
   job_id: string
   status: string
@@ -86,6 +92,9 @@ export interface ConversionJobResponse {
   output_file: string | null
   object_key: string | null
   download_url: string | null
+  error_message?: string | null
+  credits_used?: number
+  compute_duration_ms?: number
 }
 
 /** Paginated list of a user's conversion history. */
@@ -118,6 +127,7 @@ export interface FileMetadataResponse {
   file_size_bytes: number
   mime_type: string
   folder_id: string | null
+  is_favorite?: boolean
   created_at: string
   expires_at: string | null
 }
@@ -127,6 +137,22 @@ export interface FileListResponse {
   total: number
   page: number
   page_size: number
+}
+
+/** Toggle whether a file is favorited. */
+export interface FavoriteFileRequest {
+  is_favorite: boolean
+}
+
+/** Bulk-delete a set of files and/or folders. */
+export interface BatchDeleteRequest {
+  file_ids: string[]
+  folder_ids: string[]
+}
+
+export interface BatchDeleteResponse {
+  deleted_files: number
+  deleted_folders: number
 }
 
 export interface FileDownloadResponse {
@@ -216,6 +242,11 @@ export interface SubscriptionStatusResponse {
 
 export interface CheckoutResponse {
   checkout_url: string
+}
+
+/** Stripe Customer Portal session for self-service subscription management. */
+export interface PortalResponse {
+  portal_url: string
 }
 
 export interface CancelSubscriptionResponse {

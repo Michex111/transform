@@ -26,7 +26,7 @@ interface JobsContextValue {
   addJob: (job: UiJob) => void;
   updateJob: (jobId: string, patch: Partial<UiJob>) => void;
   removeJob: (jobId: string) => void;
-  refresh: () => Promise<void>;
+  refresh: (range?: string) => Promise<void>;
 }
 
 const JobsContext = createContext<JobsContextValue | undefined>(undefined);
@@ -101,9 +101,9 @@ export function JobsProvider({ children }: { children: ReactNode }) {
     setJobs((prev) => prev.filter((j) => j.job_id !== jobId));
   }, []);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (range?: string) => {
     try {
-      const { jobs: serverJobs } = await api.conversionHistory(1, 100);
+      const { jobs: serverJobs } = await api.conversionHistory(1, 100, range);
       // Merge server history with any local in-flight job progress, so active
       // jobs keep their progress/errorMessage until the server catches up.
       setJobs((prev) => {
@@ -113,7 +113,11 @@ export function JobsProvider({ children }: { children: ReactNode }) {
         const merged = [...localActive];
         for (const s of serverJobs) {
           const existing = localActive.find((l) => l.job_id === s.job_id);
-          merged.push(existing ? { ...existing, ...s, progress: existing.progress } : s);
+          merged.push(
+            existing
+              ? { ...existing, ...s, progress: existing.progress }
+              : { ...s, errorMessage: s.error_message ?? undefined },
+          );
         }
         // Deduplicate by job_id, newest-first as returned by the server.
         const seen = new Set<string>();

@@ -23,5 +23,8 @@ class QueuePriorityRouter:
             SubscriptionTier.GUEST: self.guest_stream,
             SubscriptionTier.FREE: self.free_stream,
             SubscriptionTier.PREMIUM: self.premium_stream,
+            SubscriptionTier.PRO: self.premium_stream,
+            SubscriptionTier.PRO_PLUS: self.premium_stream,
+            SubscriptionTier.ENTERPRISE: self.premium_stream,
         }
         return mapping[tier]

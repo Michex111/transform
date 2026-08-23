@@ -1,35 +1,53 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { Download, ArrowCounterClockwise } from "@phosphor-icons/react";
+import { Download, ArrowCounterClockwise, Trash } from "@phosphor-icons/react";
 import { useJobs, type UiJob } from "@/jobs/JobsContext";
 import { useAuth } from "@/auth/AuthContext";
 import { useToast } from "@/auth/ToastContext";
 import { getCachedFile, dropCachedFile } from "@/lib/fileCache";
 import { Dropdown } from "@/components/Dropdown";
 import { ErrorButton } from "@/components/ErrorButton";
-import { Card, FormatChip, StatusBadge } from "@/components/ui";
+import { Modal } from "@/components/Modal";
+import { Button, Card, FormatChip, StatusBadge } from "@/components/ui";
 import { formatDateTime } from "@/lib/format";
 
 const FILTERS = ["pdf", "docx", "xlsx", "png", "mp3", "mp4"] as const;
 
 export function HistoryPage() {
-  const { jobs, updateJob, refresh } = useJobs();
+  const { jobs, updateJob, refresh, removeJob } = useJobs();
   const { api: client } = useAuth();
   const { success, error } = useToast();
   const navigate = useNavigate();
   const [format, setFormat] = useState<string | null>(null);
   const [status, setStatus] = useState<string>("all");
+  const [range, setRange] = useState<string>("all");
+  const [deleteTarget, setDeleteTarget] = useState<UiJob | null>(null);
 
-  // Load persisted history from the server on mount.
+  // Load persisted history from the server on mount, and re-fetch whenever
+  // the time-range filter changes. "all" omits the `range` query param.
+  // Re-fetch history whenever the time-range filter changes.
   useEffect(() => {
-    refresh();
-  }, [refresh]);
+    refresh(range === "all" ? undefined : range);
+  }, [refresh, range]);
 
   async function handleDownload(jobId: string) {
     try {
       await client.downloadConvertedFile(jobId);
     } catch (err) {
       error(err instanceof Error ? err.message : "Could not download file");
+    }
+  }
+
+  async function handleDelete(job: UiJob) {
+    try {
+      await client.deleteHistoryJob(job.job_id);
+      // Remove from the shared list (also tears down its SSE subscription).
+      removeJob(job.job_id);
+      setDeleteTarget(null);
+      success("History record deleted");
+    } catch (err) {
+      setDeleteTarget(null);
+      error(err instanceof Error ? err.message : "Could not delete history record");
     }
   }
 
@@ -106,7 +124,19 @@ export function HistoryPage() {
             </button>
           ))}
         </div>
-        <div className="ml-auto">
+        <div className="ml-auto flex flex-wrap items-center gap-2">
+          <Dropdown
+            value={range}
+            onChange={setRange}
+            ariaLabel="Filter by time range"
+            align="right"
+            options={[
+              { value: "all", label: "All time" },
+              { value: "24h", label: "Last 24 hours" },
+              { value: "7d", label: "Last 7 days" },
+              { value: "30d", label: "Last 30 days" },
+            ]}
+          />
           <Dropdown
             value={status}
             onChange={setStatus}
@@ -159,6 +189,14 @@ export function HistoryPage() {
                   <span className="hidden font-mono text-xs text-muted lg:block">
                     {formatDateTime(job.createdAt)}
                   </span>
+                  <button
+                    onClick={() => setDeleteTarget(job)}
+                    className="text-muted transition-transform hover:scale-110 hover:text-error"
+                    aria-label="Delete history record"
+                    title="Delete"
+                  >
+                    <Trash size={18} />
+                  </button>
                   {job.status === "COMPLETED" && (
                     <button
                       onClick={() => handleDownload(job.job_id)}
@@ -185,6 +223,27 @@ export function HistoryPage() {
           </ul>
         )}
       </Card>
+
+      {/* Delete confirmation */}
+      <Modal
+        open={deleteTarget !== null}
+        onClose={() => setDeleteTarget(null)}
+        title="Delete history record?"
+        description={deleteTarget ? (deleteTarget.fileName ?? deleteTarget.input_file) : undefined}
+      >
+        <p className="text-sm text-on-background">
+          This will permanently remove this conversion from your history. This cannot be
+          undone.
+        </p>
+        <div className="mt-6 flex justify-end gap-2">
+          <Button variant="ghost" onClick={() => setDeleteTarget(null)}>
+            Cancel
+          </Button>
+          <Button variant="destructive" onClick={() => deleteTarget && handleDelete(deleteTarget)}>
+            Delete
+          </Button>
+        </div>
+      </Modal>
     </div>
   );
 }

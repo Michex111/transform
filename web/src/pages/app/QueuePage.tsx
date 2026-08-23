@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { LayoutGroup, motion } from "motion/react";
 import { Download, ArrowCounterClockwise } from "@phosphor-icons/react";
@@ -8,17 +8,17 @@ import { useToast } from "@/auth/ToastContext";
 import { getCachedFile, dropCachedFile } from "@/lib/fileCache";
 import { Dropdown } from "@/components/Dropdown";
 import { ErrorButton } from "@/components/ErrorButton";
-import { Card, FormatChip, ProgressBar, StatusBadge } from "@/components/ui";
+import { Card, CreditsBadge, FormatChip, ProgressBar, StatusBadge } from "@/components/ui";
 import { formatDateTime } from "@/lib/format";
 
-type SortKey = "newest" | "oldest" | "status" | "format" | "size";
+type SortKey = "newest" | "oldest" | "status" | "format" | "filename";
 
 const SORTS: { key: SortKey; label: string }[] = [
   { key: "newest", label: "Newest first" },
   { key: "oldest", label: "Oldest first" },
   { key: "status", label: "By status" },
   { key: "format", label: "By format" },
-  { key: "size", label: "By size" },
+  { key: "filename", label: "By filename" },
 ];
 
 const STATUS_ORDER: Record<string, number> = {
@@ -30,11 +30,16 @@ const STATUS_ORDER: Record<string, number> = {
 };
 
 export function QueuePage() {
-  const { jobs, updateJob } = useJobs();
+  const { jobs, updateJob, refresh } = useJobs();
   const { api: client } = useAuth();
   const { success, error } = useToast();
   const navigate = useNavigate();
   const [sort, setSort] = useState<SortKey>("newest");
+
+  // Load server history on mount so the queue isn't empty on a fresh session.
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
 
   async function handleDownload(jobId: string) {
     try {
@@ -98,8 +103,12 @@ export function QueuePage() {
         return arr.sort((a, b) => (STATUS_ORDER[a.status] ?? 9) - (STATUS_ORDER[b.status] ?? 9));
       case "format":
         return arr.sort((a, b) => a.source_format.localeCompare(b.source_format));
-      case "size":
-        return arr.sort((a, b) => a.input_file.length - b.input_file.length);
+      case "filename":
+        // The backend does not return file size, so sort by filename instead
+        // of the misleading "size" heuristic (which sorted by name length).
+        return arr.sort((a, b) =>
+          (a.fileName ?? a.input_file).localeCompare(b.fileName ?? b.input_file),
+        );
     }
   }, [jobs, sort]);
 
@@ -180,6 +189,9 @@ export function QueuePage() {
                     <span className="hidden font-mono text-xs text-muted lg:block">
                       {formatDateTime(job.createdAt)}
                     </span>
+                    {job.status === "COMPLETED" && !!job.credits_used && (
+                      <CreditsBadge credits={job.credits_used} />
+                    )}
                     {job.status === "COMPLETED" && (
                       <button
                         onClick={() => handleDownload(job.job_id)}

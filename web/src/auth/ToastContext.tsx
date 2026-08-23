@@ -2,6 +2,7 @@ import {
   createContext,
   useCallback,
   useContext,
+  useMemo,
   useState,
   type ReactNode,
 } from "react";
@@ -45,12 +46,19 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     [remove],
   );
 
-  const value: ToastContextValue = {
-    toast,
-    success: (m) => toast("success", m),
-    error: (m) => toast("error", m),
-    info: (m) => toast("info", m),
-  };
+  // Memoize the context value so its members keep stable identities across
+  // toast changes. Pages depend on `success`/`error`/`info` inside effects; an
+  // unstable identity re-triggered those effects on every toast, which could
+  // fail again and call `error` again -> infinite refetch/toast loop.
+  const value = useMemo<ToastContextValue>(
+    () => ({
+      toast,
+      success: (m) => toast("success", m),
+      error: (m) => toast("error", m),
+      info: (m) => toast("info", m),
+    }),
+    [toast],
+  );
 
   return (
     <ToastContext.Provider value={value}>
@@ -59,7 +67,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
         {toasts.map((t) => (
           <div
             key={t.id}
-            role="status"
+            role={t.kind === "error" ? "alert" : "status"}
             className="pointer-events-auto flex items-start gap-2 rounded-lg border border-outline-strong bg-surface p-3 shadow-lg"
           >
             <span className="mt-0.5">{ICONS[t.kind]}</span>

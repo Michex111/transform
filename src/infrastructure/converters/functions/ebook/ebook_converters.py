@@ -1,22 +1,21 @@
 """Ebook converters using calibre's ebook-convert CLI.
 
-Supports: EPUB ↔ PDF, EPUB ↔ MOBI, EPUB ↔ TXT.
+Supports pairwise conversion between the ebook formats in the UI catalog:
+azw, azw3, epub, fb2, mobi, lit. Also allows pdf and txt as targets, which
+calibre writes natively.
 """
 
 import subprocess
 import logging
 
-from src.infrastructure.converters.converter_registry import converter_registry as registry
 from src.domain.conversions.value_object.conversion_type import ConversionType
+from src.infrastructure.converters.converter_registry import converter_registry as registry
 
 logger = logging.getLogger(__name__)
 
-# Conversion type definitions
-epub_to_pdf = ConversionType("epub", "pdf")
-pdf_to_epub = ConversionType("pdf", "epub")
-epub_to_mobi = ConversionType("epub", "mobi")
-mobi_to_epub = ConversionType("mobi", "epub")
-epub_to_txt = ConversionType("epub", "txt")
+EBOOK_FORMATS = ["azw", "azw3", "epub", "fb2", "mobi", "lit"]
+# calibre can also read/write these.
+EXTRA_FORMATS = ["pdf", "txt"]
 
 
 def _run_ebook_convert(input_file: str, output_file: str, extra_args: list[str] | None = None) -> None:
@@ -29,26 +28,20 @@ def _run_ebook_convert(input_file: str, output_file: str, extra_args: list[str] 
         raise RuntimeError(f"ebook-convert failed: {result.stderr}")
 
 
-@registry.register(epub_to_pdf)
-def epub_to_pdf_converter(input_file: str, output_file: str, logger_override=None) -> None:
-    _run_ebook_convert(input_file, output_file)
+def _make_converter(source: str, target: str):
+    def converter(input_file: str, output_file: str, logger_override=None) -> None:
+        del logger_override
+        _run_ebook_convert(input_file, output_file)
+
+    converter.__name__ = f"ebook_{source}_to_{target}"
+    return converter
 
 
-@registry.register(pdf_to_epub)
-def pdf_to_epub_converter(input_file: str, output_file: str, logger_override=None) -> None:
-    _run_ebook_convert(input_file, output_file, ["--enable-heuristics"])
-
-
-@registry.register(epub_to_mobi)
-def epub_to_mobi_converter(input_file: str, output_file: str, logger_override=None) -> None:
-    _run_ebook_convert(input_file, output_file)
-
-
-@registry.register(mobi_to_epub)
-def mobi_to_epub_converter(input_file: str, output_file: str, logger_override=None) -> None:
-    _run_ebook_convert(input_file, output_file)
-
-
-@registry.register(epub_to_txt)
-def epub_to_txt_converter(input_file: str, output_file: str, logger_override=None) -> None:
-    _run_ebook_convert(input_file, output_file)
+_all_formats = EBOOK_FORMATS + EXTRA_FORMATS
+for _source in _all_formats:
+    for _target in _all_formats:
+        if _source == _target:
+            continue
+        registry.register(ConversionType(_source, _target))(
+            _make_converter(_source, _target)
+        )

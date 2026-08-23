@@ -145,6 +145,35 @@ def test_folder_rename() -> None:
         asyncio.run(_run())
 
 
+def test_folder_move_updates_parent() -> None:
+    with sqlite_session_factory() as factory:
+
+        async def _run() -> None:
+            async with factory() as session:
+                user = await _add_user(factory)
+                folder_repo = SQLUserFolderRepository(session)
+
+                root = await folder_repo.create(user_id=user.id, name="Root")
+                child = await folder_repo.create(user_id=user.id, name="Child", parent_id=root.id)
+
+                # Move child to root
+                assert await folder_repo.move(child.id, None) is True
+                moved = await folder_repo.get_by_id(child.id)
+                assert moved is not None
+                assert moved.parent_id is None
+
+                # Move child back under root
+                assert await folder_repo.move(child.id, root.id) is True
+                moved = await folder_repo.get_by_id(child.id)
+                assert moved is not None
+                assert moved.parent_id == root.id
+
+                # Unknown folder returns False
+                assert await folder_repo.move("missing", None) is False
+
+        asyncio.run(_run())
+
+
 def test_delete_with_descendants_removes_subtree_and_files() -> None:
     with sqlite_session_factory() as factory:
 

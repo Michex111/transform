@@ -62,7 +62,10 @@ _FORMAT_CATEGORY_MAP: dict[str, str] = {
 _TIER_DISCOUNT_MAP: dict[SubscriptionTier, str] = {
     SubscriptionTier.GUEST: "CREDIT_DISCOUNT_GUEST",
     SubscriptionTier.FREE: "CREDIT_DISCOUNT_FREE",
-    SubscriptionTier.PREMIUM: "CREDIT_DISCOUNT_PRO",  # PREMIUM maps to PRO discount
+    SubscriptionTier.PREMIUM: "CREDIT_DISCOUNT_PRO",  # legacy alias
+    SubscriptionTier.PRO: "CREDIT_DISCOUNT_PRO",
+    SubscriptionTier.PRO_PLUS: "CREDIT_DISCOUNT_PRO_PLUS",
+    SubscriptionTier.ENTERPRISE: "CREDIT_DISCOUNT_ENTERPRISE",
 }
 
 

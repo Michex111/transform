@@ -6,6 +6,7 @@ class UploadSession(BaseModel):
     status: str = "pending"
     file_name: str | None = None
     folder_id: str | None = None
+    user_id: str | None = None
 
 class UploadResponse(BaseModel):
     upload_id: str = Field(..., description="Unique identifier for the upload session")

@@ -1,12 +1,18 @@
 from src.infrastructure.adapters.queues.redis_stream_job_queue import JobStreamConsumer
 from src.infrastructure.adapters.queues.redis_stream_status_queue import JobEventPublisher
 from src.infrastructure.adapters.repository.sql_conversion_job_repo import SQLConversionJobRepository
+from src.infrastructure.adapters.repository.sql_credit_repo import SQLCreditRepository
+from src.infrastructure.adapters.repository.sql_subscription_repo import SQLSubscriptionRepository
 from src.infrastructure.adapters.security.encryption import FileEncryptionService, get_file_encryption_service
-from workers.converter_workers.ports import JobEventPort, JobRepositoryPort, QueuePort
+from workers.converter_workers.ports import CreditPort, JobEventPort, JobRepositoryPort, QueuePort
 from src.infrastructure.redis.client import create_redis_client
 from src.infrastructure.config.settings import get_settings
 from src.infrastructure.database.session import get_session_factory
+from src.domain.subscriptions.entities.credit import Credit
+from src.domain.subscriptions.exceptions import InsufficientCredits
+from src.domain.subscriptions.value_object.tier import SubscriptionTier
 from src.domain.conversions.entities.conversion_job import ConversionJob
+from sqlalchemy.exc import IntegrityError
 
 
 class WorkerJobRepository(JobRepositoryPort):
@@ -20,8 +26,74 @@ class WorkerJobRepository(JobRepositoryPort):
             await SQLConversionJobRepository(session=session).update_conversion_job(job)
 
 
+class WorkerCreditRepository(CreditPort):
+    """Resolves tiers and atomically consumes monthly credits for the worker.
+
+    Each call uses a fresh DB session (mirroring ``WorkerJobRepository``). A
+    best-effort retry guards against a race on the unique ``(owner_id,
+    period_key)`` constraint when two workers initialize the same bucket at
+    once.
+    """
+
+    def __init__(self, session_factory):
+        self._session_factory = session_factory
+
+    async def get_remaining(self, user_id: int, period_key: str) -> int | None:
+        async with self._session_factory() as session:
+            credit = await SQLCreditRepository(session=session).get_credit(
+                str(user_id), period_key
+            )
+            return credit.remaining if credit is not None else None
+
+    async def get_tier(self, user_id: int) -> SubscriptionTier:
+        async with self._session_factory() as session:
+            return await SQLSubscriptionRepository(session=session).get_tier_for_user(user_id)
+
+    async def consume(self, user_id: int, period_key: str, units: int) -> int:
+        async with self._session_factory() as session:
+            return await self._consume_once(session, user_id, period_key, units, retried=False)
+
+    async def _consume_once(
+        self,
+        session,
+        user_id: int,
+        period_key: str,
+        units: int,
+        *,
+        retried: bool,
+    ) -> int:
+        repo = SQLCreditRepository(session=session)
+        credit = await repo.get_credit(str(user_id), period_key)
+        if credit is None:
+            tier = await SQLSubscriptionRepository(session=session).get_tier_for_user(user_id)
+            credit = Credit.from_tier(str(user_id), period_key, tier)
+
+        try:
+            credit.consume_for_conversion(units)
+        except InsufficientCredits:
+            # Clamp at the floor — never negative.
+            credit.remaining = 0
+
+        try:
+            await repo.save_credit(credit)
+        except IntegrityError:
+            # Race: another worker inserted the same (owner_id, period_key)
+            # bucket between our read and write. Roll back and retry once —
+            # the bucket now exists, so the retry takes the update path.
+            if retried:
+                raise
+            await session.rollback()
+            return await self._consume_once(session, user_id, period_key, units, retried=True)
+
+        return credit.remaining
+
+
 def get_job_repository() -> JobRepositoryPort:
     return WorkerJobRepository(session_factory=get_session_factory())
+
+
+def get_credit_port() -> CreditPort:
+    return WorkerCreditRepository(session_factory=get_session_factory())
 
 
 def get_encryption_service() -> FileEncryptionService | None:

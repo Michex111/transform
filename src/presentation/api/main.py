@@ -22,6 +22,7 @@ from sqlalchemy import text
 from src.infrastructure.config.settings import get_settings
 from src.infrastructure.database.initializer import initialize_database
 from src.infrastructure.database.session import get_engine
+from src.infrastructure.adapters.storage.cors import apply_bucket_cors
 from src.presentation.api.middleware.rate_limit import build_rate_limit_middleware
 from src.presentation.api.middleware.security_headers import SecurityHeadersMiddleware
 from src.presentation.api.routers.v1 import (
@@ -65,6 +66,15 @@ async def lifespan(_: FastAPI):
         logger.info("Database migrations applied")
     else:
         logger.info("Skipping database migrations (RUN_MIGRATIONS=false)")
+
+    # Ensure the object-storage bucket allows browser uploads from the SPA
+    # origin(s). Failures are non-fatal (logged) but configured origins are
+    # honoured so direct uploads are not blocked by bucket CORS.
+    try:
+        apply_bucket_cors()
+    except Exception as e:  # noqa: BLE001 — startup must proceed
+        logger.warning("Bucket CORS setup failed: %s", e)
+
     yield
 
 
@@ -186,9 +196,18 @@ def mount_frontend(app: FastAPI) -> None:
 
     index_html = dist / "index.html"
 
+    def _index_response() -> FileResponse:
+        # Always revalidate index.html so browser caches pick up the latest
+        # hashed bundle after a rebuild (the asset files themselves stay
+        # immutable via their content hash, so they can be cached long-term).
+        return FileResponse(
+            str(index_html),
+            headers={"Cache-Control": "no-cache"},
+        )
+
     @app.get("/", include_in_schema=False)
     async def spa_index() -> FileResponse:
-        return FileResponse(str(index_html))
+        return _index_response()
 
     @app.get("/{full_path:path}", include_in_schema=False)
     async def spa_fallback(full_path: str) -> Response:
@@ -205,7 +224,7 @@ def mount_frontend(app: FastAPI) -> None:
         if target.is_file() and str(target).startswith(str(dist.resolve())):
             return FileResponse(str(target))
         # Otherwise hand the route to the SPA.
-        return FileResponse(str(index_html))
+        return _index_response()
 
     logger.info("Frontend mounted at / (dist=%s)", dist)
 

@@ -4,7 +4,7 @@ from src.infrastructure.database.models import ConversionJobModel
 from src.domain.conversions.entities.conversion_job import ConversionJob
 from src.domain.conversions.value_object.conversion_type import ConversionType
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 class SQLConversionJobRepository:
@@ -81,9 +81,16 @@ class SQLConversionJobRepository:
         user_id: int,
         offset: int,
         limit: int,
+        since: datetime | None = None,
     ) -> tuple[list[ConversionJob], int]:
-        """Returns the user's job history (newest first) plus the total count."""
+        """Returns the user's job history (newest first) plus the total count.
+
+        When ``since`` is provided only jobs created on/after that timestamp are
+        returned.
+        """
         base = select(ConversionJobModel).where(ConversionJobModel.user_id == user_id)
+        if since is not None:
+            base = base.where(ConversionJobModel.created_at >= since)
 
         count_q = select(func.count()).select_from(base.subquery())
         total = (await self.session.execute(count_q)).scalar_one()
@@ -95,6 +102,18 @@ class SQLConversionJobRepository:
         )
         rows = (await self.session.execute(rows_q)).scalars().all()
         return [self._to_entity(r) for r in rows], total
+
+    async def delete_job(self, job_id: str, user_id: int) -> bool:
+        """Delete a single job owned by ``user_id``. Returns True when a row was
+        removed. Jobs owned by another user (or missing) are untouched."""
+        result = await self.session.execute(
+            delete(ConversionJobModel).where(
+                ConversionJobModel.job_id == job_id,
+                ConversionJobModel.user_id == user_id,
+            )
+        )
+        await self.session.commit()
+        return result.rowcount > 0  # type: ignore[attr-defined]
 
     async def list_user_active_jobs(
         self,

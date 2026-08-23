@@ -11,18 +11,23 @@ import { Button, Card, FormatMorph, FormatChip, ProgressBar, StatusBadge } from 
 
 export function ConvertPage() {
   const { api: client } = useAuth();
-  const { addJob } = useJobs();
+  const { addJob, jobs, refresh } = useJobs();
   const { success, error } = useToast();
   const fileInput = useRef<HTMLInputElement>(null);
   const location = useLocation();
   const prefill = (location.state as { source?: string; target?: string } | null) ?? {};
+
+  // Load server history on mount so the inline queue isn't empty on a fresh
+  // session.
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
 
   const [from, setFrom] = useState(prefill.source ?? "pdf");
   const [to, setTo] = useState(prefill.target ?? "docx");
   const [file, setFile] = useState<File | null>(null);
   const [busy, setBusy] = useState(false);
   const [dragOver, setDragOver] = useState(false);
-  const { jobs } = useJobs();
 
   // Source → valid target formats from the backend conversion map.
   const [conversionMap, setConversionMap] = useState<Record<string, string[]>>({});
@@ -99,6 +104,14 @@ export function ConvertPage() {
   async function startConversion() {
     if (!file) {
       error("Choose a file first.");
+      return;
+    }
+
+    // Enforce the advertised upload limit client-side so users aren't surprised
+    // by a 413 after a slow upload.
+    const MAX_BYTES = 100 * 1024 * 1024; // 100 MB
+    if (file.size > MAX_BYTES) {
+      error(`File is too large. The maximum upload size is 100 MB.`);
       return;
     }
 

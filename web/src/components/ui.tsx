@@ -1,5 +1,6 @@
 import type { InputHTMLAttributes, ReactNode } from "react";
 import { motion, useReducedMotion, type HTMLMotionProps } from "motion/react";
+import { Coins } from "@phosphor-icons/react";
 import { formatMeta, statusMeta } from "@/lib/format";
 
 /* ---------------- Skeleton (loading) ---------------- */
@@ -163,6 +164,20 @@ export function StatusBadge({ status }: { status: string }) {
     <Badge color={meta.color} pulse={meta.pulse}>
       {meta.label}
     </Badge>
+  );
+}
+
+/** A small pill showing how many credits/tokens a completed conversion used. */
+export function CreditsBadge({ credits }: { credits: number }) {
+  return (
+    <span
+      className="inline-flex items-center gap-1 rounded-full border border-outline bg-surface-variant/60 px-2 py-0.5 font-mono text-xs font-semibold text-muted"
+      title="Tokens used"
+      aria-label={`${credits} tokens used`}
+    >
+      <Coins size={13} weight="fill" className="text-primary/80" aria-hidden />
+      <span>{credits}</span>
+    </span>
   );
 }
 

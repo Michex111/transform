@@ -44,6 +44,23 @@ def test_list_conversion_endpoint_returns_supported_conversions() -> None:
     assert {"source_format": "pdf", "target_format": "docx"} in payload
 
 
+def test_conversion_map_endpoint_groups_by_source() -> None:
+    with create_test_client() as client:
+        response = client.get("/api/conversions/supported/map")
+        payload = response.json()
+
+    assert response.status_code == 200
+    conversions = payload["conversions"]
+    assert "pdf" in conversions
+    assert "docx" in conversions["pdf"]
+    assert "epub" in conversions["pdf"]
+    assert "xlsx" in conversions
+    assert "csv" in conversions["xlsx"]
+    # Targets are sorted and never equal the source.
+    assert conversions["pdf"] == sorted(set(conversions["pdf"]))
+    assert "pdf" not in conversions["pdf"]
+
+
 def test_retry_conversion_job_endpoint_returns_retried_job() -> None:
     with create_test_client() as client:
         # Create a job, then mark it FAILED so it is retryable.
@@ -77,3 +94,140 @@ def test_retry_conversion_job_endpoint_returns_404_for_missing_job() -> None:
 
     assert response.status_code == 404
     assert response.json()["detail"] == "Job not found"
+
+
+def test_conversion_history_endpoint_lists_jobs() -> None:
+    with create_test_client() as client:
+        # Create a couple of jobs so history has content.
+        for fmt in ("pdf", "docx"):
+            client.post(
+                "/api/conversions/jobs",
+                json={
+                    "source_format": fmt,
+                    "target_format": "pdf",
+                    "input_key": f"uploads/{fmt}.pdf",
+                },
+            )
+        response = client.get("/api/conversions/history")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == 2
+    assert payload["page"] == 1
+    assert payload["page_size"] == 20
+    jobs = payload["jobs"]
+    assert len(jobs) == 2
+    assert all(j["job_id"] == "test-job-id" for j in jobs)
+
+
+def test_conversion_history_endpoint_respects_pagination() -> None:
+    with create_test_client() as client:
+        for _ in range(3):
+            client.post(
+                "/api/conversions/jobs",
+                json={"source_format": "pdf", "target_format": "docx", "input_key": "uploads/a.pdf"},
+            )
+        response = client.get("/api/conversions/history?page=1&page_size=2")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["total"] == 3
+    assert len(payload["jobs"]) == 2
+    assert payload["page_size"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Library-path conversion (file already in object storage, no re-upload)
+# ---------------------------------------------------------------------------
+
+def _seed_library_file(client, *, file_id: str, user_id: int = 101, file_name: str,
+                       file_key: str) -> None:
+    """Register a file in the fake file service so the library path can find it."""
+    from src.infrastructure.database.models import UserFileModel
+    fake_file_service = client.app.state.fake_file_service  # type: ignore
+    fake_file_service.files[file_id] = UserFileModel(
+        id=file_id, user_id=user_id, folder_id=None, file_key=file_key,
+        file_name=file_name, file_size_bytes=1024, mime_type="application/pdf",
+    )
+
+
+def test_convert_library_file_returns_pending_with_object_key() -> None:
+    """A job created from an existing library file is enqueued directly (PENDING)."""
+    with create_test_client() as client:
+        _seed_library_file(
+            client, file_id="file-1", file_name="report.pdf", file_key="uploads/report.pdf"
+        )
+        response = client.post(
+            "/api/conversions/jobs",
+            json={"file_id": "file-1", "target_format": "docx"},
+        )
+        payload = response.json()
+        conversion_service = client.app.state.fake_conversion_service  # type: ignore
+
+    assert response.status_code == 202
+    assert payload["status"] == "PENDING"
+    assert payload["object_key"] == "uploads/report.pdf"
+    assert payload["input_file"] == "report.pdf"
+    assert payload["source_format"] == "pdf"
+    assert payload["target_format"] == "docx"
+    job = conversion_service.created_jobs[0]
+    assert job.status.value == "PENDING"
+    assert job.object_key == "uploads/report.pdf"
+    assert job.conversion.source_format == "pdf"
+
+
+def test_convert_library_file_returns_404_for_unknown_or_foreign_file() -> None:
+    with create_test_client() as client:
+        # Unknown file id.
+        r1 = client.post("/api/conversions/jobs", json={"file_id": "nope", "target_format": "docx"})
+        # A file owned by a different user (current user is 101).
+        _seed_library_file(
+            client, file_id="file-2", user_id=999, file_name="other.pdf", file_key="uploads/other.pdf"
+        )
+        r2 = client.post("/api/conversions/jobs", json={"file_id": "file-2", "target_format": "docx"})
+
+    assert r1.status_code == 404
+    assert r2.status_code == 404
+
+
+def test_convert_library_file_rejects_unsupported_inferred_source() -> None:
+    """A library file whose extension is not a supported source returns 400."""
+    with create_test_client() as client:
+        _seed_library_file(
+            client, file_id="file-3", file_name="notes.xyz", file_key="uploads/notes.xyz"
+        )
+        response = client.post("/api/conversions/jobs", json={"file_id": "file-3", "target_format": "docx"})
+
+    assert response.status_code == 400
+
+
+def test_convert_library_file_rejects_unsupported_target_format() -> None:
+    """A valid inferred source paired with an unsupported target returns 400."""
+    with create_test_client() as client:
+        _seed_library_file(
+            client, file_id="file-4", file_name="report.pdf", file_key="uploads/report.pdf"
+        )
+        response = client.post("/api/conversions/jobs", json={"file_id": "file-4", "target_format": "nope"})
+
+    assert response.status_code == 400
+
+
+def test_upload_flow_still_works_without_file_id() -> None:
+    """The no-file_id upload flow is unchanged and returns AWAITING_UPLOAD."""
+    with create_test_client() as client:
+        response = client.post(
+            "/api/conversions/jobs",
+            json={"source_format": "docx", "target_format": "pdf", "input_key": "uploads/example.docx"},
+        )
+
+    assert response.status_code == 202
+    assert response.json()["status"] == "AWAITING_UPLOAD"
+    assert response.json()["object_key"] is None
+
+
+def test_upload_flow_requires_source_and_input_key_without_file_id() -> None:
+    """Omitting source_format/input_key on the upload flow returns 422."""
+    with create_test_client() as client:
+        response = client.post("/api/conversions/jobs", json={"target_format": "pdf"})
+
+    assert response.status_code == 422

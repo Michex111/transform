@@ -67,6 +67,8 @@ async def stream_job_events(
                     payload["compute_duration_ms"] = fields["compute_duration_ms"]
                 if "credits_used" in fields:
                     payload["credits_used"] = fields["credits_used"]
+                if "credits_remaining" in fields:
+                    payload["credits_remaining"] = fields["credits_remaining"]
 
                 yield f"event: progress\ndata: {json.dumps(payload)}\n\n"
 

@@ -44,6 +44,19 @@ class SQLUserFolderRepository:
         await self._session.commit()
         return result.rowcount > 0  # type: ignore[attr-defined]
 
+    async def move(self, folder_id: str, parent_id: str | None) -> bool:
+        """Move a folder to a new parent (or root when ``parent_id`` is None).
+
+        Returns True when a row was updated.
+        """
+        result = await self._session.execute(
+            update(UserFolderModel)
+            .where(UserFolderModel.id == folder_id)
+            .values(parent_id=parent_id, updated_at=datetime.now(UTC))
+        )
+        await self._session.commit()
+        return result.rowcount > 0  # type: ignore[attr-defined]
+
     async def delete_with_descendants(
         self, folder_id: str
     ) -> tuple[list[str], list[str]]:

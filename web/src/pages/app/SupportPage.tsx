@@ -1,7 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { Envelope, BookOpen, Pulse, CaretDown } from "@phosphor-icons/react";
-import { useToast } from "@/auth/ToastContext";
 import { Button, Card, Field } from "@/components/ui";
 import { Stagger, Item } from "@/lib/motion";
 
@@ -13,23 +12,44 @@ const FAQS = [
 ];
 
 export function SupportPage() {
-  const { success } = useToast();
   const [open, setOpen] = useState<number | null>(0);
   const [subject, setSubject] = useState("");
   const [message, setMessage] = useState("");
-  const [busy, setBusy] = useState(false);
 
   function submit(e: FormEvent) {
     e.preventDefault();
-    setBusy(true);
-    // Simulate a send; hook to an endpoint when available.
-    window.setTimeout(() => {
-      setBusy(false);
-      success("Message sent");
-      setSubject("");
-      setMessage("");
-    }, 600);
+    // No support-ticket backend exists yet, so compose a prefilled email instead
+    // of silently faking a successful send.
+    const body = encodeURIComponent(message);
+    const subjectLine = encodeURIComponent(subject.trim() || "Support request");
+    window.location.href = `mailto:help@transform.app?subject=${subjectLine}&body=${body}`;
+    setSubject("");
+    setMessage("");
   }
+
+  const CONTACTS = [
+    {
+      icon: Envelope,
+      label: "Email support",
+      detail: "help@transform.app",
+      href: "mailto:help@transform.app",
+      external: false,
+    },
+    {
+      icon: BookOpen,
+      label: "Documentation",
+      detail: "Read the guides",
+      href: "/docs",
+      external: false,
+    },
+    {
+      icon: Pulse,
+      label: "Status page",
+      detail: "All systems operational",
+      href: "/health",
+      external: false,
+    },
+  ];
 
   return (
     <div className="mx-auto max-w-3xl space-y-6">
@@ -40,17 +60,15 @@ export function SupportPage() {
 
       {/* Contact options */}
       <Stagger className="grid gap-4 sm:grid-cols-3">
-        {[
-          { icon: Envelope, label: "Email support", detail: "help@transform.app" },
-          { icon: BookOpen, label: "Documentation", detail: "Read the guides" },
-          { icon: Pulse, label: "Status page", detail: "All systems operational" },
-        ].map(({ icon: Icon, label, detail }) => (
+        {CONTACTS.map(({ icon: Icon, label, detail, href }) => (
           <Item key={label} className="h-full">
-            <Card hover className="h-full p-5">
-              <Icon size={22} className="mb-3 text-primary" />
-              <p className="font-medium text-on-background">{label}</p>
-              <p className="mt-0.5 text-sm text-muted">{detail}</p>
-            </Card>
+            <a href={href} className="block h-full">
+              <Card hover className="h-full p-5">
+                <Icon size={22} className="mb-3 text-primary" />
+                <p className="font-medium text-on-background">{label}</p>
+                <p className="mt-0.5 text-sm text-muted">{detail}</p>
+              </Card>
+            </a>
           </Item>
         ))}
       </Stagger>
@@ -113,9 +131,7 @@ export function SupportPage() {
               placeholder="Tell us what happened"
             />
           </div>
-          <Button type="submit" disabled={busy}>
-            {busy ? "Sending…" : "Send"}
-          </Button>
+          <Button type="submit">Send</Button>
         </form>
       </Card>
     </div>

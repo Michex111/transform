@@ -42,8 +42,11 @@ class Settings(BaseSettings):
     STRIPE_PRICE_PRO: str = "price_pro_monthly"
     STRIPE_PRICE_PRO_PLUS: str = "price_pro_plus_monthly"
     STRIPE_PRICE_ENTERPRISE: str = "price_enterprise_monthly"
-    STRIPE_SUCCESS_URL: str = "http://localhost:3000/settings?checkout=success"
-    STRIPE_CANCEL_URL: str = "http://localhost:3000/settings?checkout=cancelled"
+    STRIPE_SUCCESS_URL: str = "http://localhost:5173/app/billing?checkout=success"
+    STRIPE_CANCEL_URL: str = "http://localhost:5173/app/billing?checkout=cancelled"
+    STRIPE_CREDIT_SUCCESS_URL: str = "http://localhost:5173/app/billing?credits=success"
+    STRIPE_CREDIT_CANCEL_URL: str = "http://localhost:5173/app/billing?credits=cancelled"
+    STRIPE_PORTAL_RETURN_URL: str = "http://localhost:5173/app/billing"
 
     # Rate Limiting (requests per minute)
     RATE_LIMIT_GUEST: int = 10
@@ -58,7 +61,15 @@ class Settings(BaseSettings):
     RATE_LIMIT_AUTHENTICATED: int = 600
 
     # CORS
-    ALLOWED_ORIGINS: list[str] = ["*"]
+    # ISO 27001 A.8.26: production must use explicit origins; wildcard with
+    # credentials is rejected by validation. Default to empty (no CORS).
+    # For local dev, include the Vite dev server and the API origin.
+    ALLOWED_ORIGINS: list[str] = []
+
+    # Backblaze B2 / S3 bucket CORS allowed origins. These are the SPA origins
+    # permitted to make cross-origin PUT (upload) requests directly to object
+    # storage. Applied to the bucket at startup when configured.
+    S3_CORS_ALLOWED_ORIGINS: list[str] = []
 
     # Monitoring
     SENTRY_DSN: SecretStr | None = None
@@ -133,6 +144,13 @@ class Settings(BaseSettings):
             if self.BACKBLAZE_USE_SSL is False:
                 raise RuntimeError(
                     "BACKBLAZE_USE_SSL must be true for object storage in production."
+                )
+            if self.ENCRYPTION_MASTER_KEY is None:
+                # ISO 27001 A.8.24 / A.8.25: at-rest encryption is a production
+                # requirement. Refuse to start with plaintext object storage.
+                raise RuntimeError(
+                    "ENCRYPTION_MASTER_KEY must be configured in production to "
+                    "encrypt files at rest."
                 )
 
 

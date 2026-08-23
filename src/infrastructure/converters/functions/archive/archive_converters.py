@@ -1,6 +1,13 @@
-"""Archive converters using Python standard library.
+"""Archive converters using the Python standard library.
 
-Supports: ZIP ↔ TAR.
+Supports repacking between the archive formats in the UI catalog that can be
+read/written with the standard library: zip, tar, tar.gz, tar.bz2, tar.xz.
+
+Single-file compression formats (gz, bz2, xz, lzma) are supported for direct
+recompression between one another.
+
+Formats that need third-party tools (7z, rar, cab, iso, dmg, etc.) are not
+registered here.
 """
 
 import os
@@ -9,43 +16,128 @@ import zipfile
 import tempfile
 import logging
 
-from src.infrastructure.converters.converter_registry import converter_registry as registry
 from src.domain.conversions.value_object.conversion_type import ConversionType
+from src.infrastructure.converters.converter_registry import converter_registry as registry
 
 logger = logging.getLogger(__name__)
 
-# Conversion type definitions
-zip_to_tar = ConversionType("zip", "tar")
-tar_to_zip = ConversionType("tar", "zip")
+# True multi-file archives that can be extracted and repacked.
+ARCHIVE_FORMATS = ["zip", "tar", "tar.gz", "tar.bz2", "tar.xz"]
+
+# Single-file compression formats (recompression between each other).
+COMPRESSION_FORMATS = ["gz", "bz2", "xz", "lzma"]
 
 
-@registry.register(zip_to_tar)
-def zip_to_tar_converter(input_file: str, output_file: str, logger_override=None) -> None:
-    """Convert ZIP archive to TAR archive."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        # Extract ZIP
+def _extract(input_file: str, dest_dir: str) -> None:
+    """Extract a source archive (or decompress a single file) into dest_dir."""
+    name = input_file.lower()
+    if name.endswith(".zip") or zipfile.is_zipfile(input_file):
         with zipfile.ZipFile(input_file, "r") as zf:
-            zf.extractall(tmpdir)
-        # Create TAR
-        with tarfile.open(output_file, "w") as tf:
-            for root, _, files in os.walk(tmpdir):
-                for f in files:
-                    full_path = os.path.join(root, f)
-                    arcname = os.path.relpath(full_path, tmpdir)
-                    tf.add(full_path, arcname=arcname)
+            zf.extractall(dest_dir)
+    elif tarfile.is_tarfile(input_file):
+        with tarfile.open(input_file, "r:*") as tf:
+            tf.extractall(dest_dir)
+    elif name.endswith((".gz", ".bz2", ".xz", ".lzma")):
+        # Single-file compression: decompress to a plain file in dest_dir.
+        mode = "r:gz" if name.endswith(".gz") else "r:bz2" if name.endswith(".bz2") else "r:xz"
+        with tarfile.open(input_file, mode) as tf:
+            tf.extractall(dest_dir)
+    else:
+        raise RuntimeError(f"Cannot extract archive type: {input_file}")
 
 
-@registry.register(tar_to_zip)
-def tar_to_zip_converter(input_file: str, output_file: str, logger_override=None) -> None:
-    """Convert TAR archive to ZIP archive."""
-    with tempfile.TemporaryDirectory() as tmpdir:
-        # Extract TAR
-        with tarfile.open(input_file, "r") as tf:
-            tf.extractall(tmpdir)
-        # Create ZIP
+def _pack(src_dir: str, output_file: str, target: str) -> None:
+    """Pack the contents of src_dir into an archive of the target format."""
+    out_name = output_file.lower()
+    if target == "zip" or out_name.endswith(".zip"):
         with zipfile.ZipFile(output_file, "w", zipfile.ZIP_DEFLATED) as zf:
-            for root, _, files in os.walk(tmpdir):
+            for root, _, files in os.walk(src_dir):
                 for f in files:
                     full_path = os.path.join(root, f)
-                    arcname = os.path.relpath(full_path, tmpdir)
+                    arcname = os.path.relpath(full_path, src_dir)
                     zf.write(full_path, arcname=arcname)
+        return
+
+    mode = "w:gz" if target == "tar.gz" or out_name.endswith(".tar.gz") else (
+        "w:bz2" if target == "tar.bz2" or out_name.endswith(".tar.bz2") else (
+            "w:xz" if target == "tar.xz" or out_name.endswith(".tar.xz") else "w"
+        )
+    )
+    with tarfile.open(output_file, mode) as tf:
+        for root, _, files in os.walk(src_dir):
+            for f in files:
+                full_path = os.path.join(root, f)
+                arcname = os.path.relpath(full_path, src_dir)
+                tf.add(full_path, arcname=arcname)
+
+
+def _make_converter(source: str, target: str):
+    def converter(input_file: str, output_file: str, logger_override=None) -> None:
+        del logger_override
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _extract(input_file, tmpdir)
+            _pack(tmpdir, output_file, target)
+
+    converter.__name__ = f"archive_{source}_to_{target}"
+    return converter
+
+
+# Register repacking between true archives.
+for _source in ARCHIVE_FORMATS:
+    for _target in ARCHIVE_FORMATS:
+        if _source == _target:
+            continue
+        registry.register(ConversionType(_source, _target))(
+            _make_converter(_source, _target)
+        )
+
+
+def _make_recompress(source: str, target: str):
+    """Convert a single-file compressed format (e.g. .gz -> .bz2)."""
+
+    def converter(input_file: str, output_file: str, logger_override=None) -> None:
+        del logger_override
+        _simple_recompress(input_file, output_file, source, target)
+
+    converter.__name__ = f"archive_{source}_to_{target}"
+    return converter
+
+
+def _simple_recompress(input_file: str, output_file: str, source: str, target: str) -> None:
+    """Decompress a single-file compressed format, then recompress to target."""
+    with open(input_file, "rb") as fh:
+        data = fh.read()
+
+    import gzip
+    import bz2
+    import lzma
+
+    if source == "gz":
+        decompressed = gzip.decompress(data)
+    elif source == "bz2":
+        decompressed = bz2.decompress(data)
+    elif source in ("xz", "lzma"):
+        decompressed = lzma.decompress(data)
+    else:
+        raise RuntimeError(f"Unsupported compression source: {source}")
+
+    if target == "gz":
+        out = gzip.compress(decompressed)
+    elif target == "bz2":
+        out = bz2.compress(decompressed)
+    elif target in ("xz", "lzma"):
+        out = lzma.compress(decompressed)
+    else:
+        raise RuntimeError(f"Unsupported compression target: {target}")
+
+    with open(output_file, "wb") as fh:
+        fh.write(out)
+
+
+for _source in COMPRESSION_FORMATS:
+    for _target in COMPRESSION_FORMATS:
+        if _source == _target:
+            continue
+        registry.register(ConversionType(_source, _target))(
+            _make_recompress(_source, _target)
+        )
