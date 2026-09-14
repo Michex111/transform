@@ -54,10 +54,10 @@ def test_events_router_forwards_credits_remaining() -> None:
         "credits_remaining": "46",
     }
     with create_test_client() as client:
-        client.app.dependency_overrides[get_conversion_repository] = lambda: FakeJobRepository(
-            _completed_job()
+        client.app.dependency_overrides[get_conversion_repository] = (  # type: ignore[attr-defined]
+            lambda: FakeJobRepository(_completed_job())
         )
-        client.app.dependency_overrides[get_event_subscriber] = lambda: FakeSubscriber(fields)
+        client.app.dependency_overrides[get_event_subscriber] = lambda: FakeSubscriber(fields)  # type: ignore[attr-defined]
         with client.stream("GET", "/api/v1/events/jobs/job-1") as stream:
             lines = [line for line in stream.iter_lines() if line]
 
@@ -79,10 +79,10 @@ def test_events_router_omits_credit_fields_when_absent() -> None:
         "message": "conversion completed",
     }
     with create_test_client() as client:
-        client.app.dependency_overrides[get_conversion_repository] = lambda: FakeJobRepository(
-            _completed_job()
+        client.app.dependency_overrides[get_conversion_repository] = (  # type: ignore[attr-defined]
+            lambda: FakeJobRepository(_completed_job())
         )
-        client.app.dependency_overrides[get_event_subscriber] = lambda: FakeSubscriber(fields)
+        client.app.dependency_overrides[get_event_subscriber] = lambda: FakeSubscriber(fields)  # type: ignore[attr-defined]
         with client.stream("GET", "/api/v1/events/jobs/job-1") as stream:
             lines = [line for line in stream.iter_lines() if line]
 

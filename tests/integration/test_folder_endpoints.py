@@ -77,6 +77,10 @@ def folder_client(db_path: str) -> Generator[TestClient, None, None]:
             del object_key
             return None
 
+        async def read_object_head(self, object_key: str, max_bytes: int = 4096) -> bytes:
+            del object_key, max_bytes
+            return b""
+
         async def remove_object(self, object_key: str) -> bool:
             del object_key
             return True

@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime
 
-from sqlalchemy import DateTime, Enum as SqlEnum, Integer, String
+from sqlalchemy import Boolean, DateTime, Enum as SqlEnum, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.domain.conversions.value_object.job_status import JobStatus
@@ -23,6 +23,12 @@ class ConversionJobModel(Base):
     error_message: Mapped[str | None] = mapped_column(String, nullable=True)
     compute_duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     credits_used: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Client-side (FENCR) encryption metadata. ``data_key_wrapped`` holds the
+    # Fernet ciphertext (base64 str) of the client's raw per-file data key,
+    # wrapped with the per-user derived key at job creation. The raw key is
+    # never stored. ``client_encrypted`` flags a FENCR blob input.
+    data_key_wrapped: Mapped[str | None] = mapped_column(String, nullable=True)
+    client_encrypted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

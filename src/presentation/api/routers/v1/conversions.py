@@ -2,6 +2,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated
 
+import base64
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.responses import StreamingResponse
 
@@ -53,7 +55,67 @@ def _to_response(job: ConversionJob, download_url: str | None = None) -> Convers
         error_message=job.error_message,
         credits_used=job.credits_used,
         compute_duration_ms=job.compute_duration_ms,
+        data_key_wrapped=job.data_key_wrapped,
+        client_encrypted=job.client_encrypted,
     )
+
+
+def _apply_client_encryption(
+    job: ConversionJob,
+    payload: CreateConversionJobRequest,
+    encryption_service: FileEncryptionService | None,
+    actor: str,
+) -> None:
+    """Register client-side (FENCR) encryption metadata on a job.
+
+    The browser encrypts the file into a ``FENCR`` blob and uploads it; the
+    raw per-file ``data_key`` is sent in the create-job request (base64). The
+    server **immediately** wraps it with the per-user Fernet key derived from
+    the master key (``encrypt_file(data_key_bytes, actor)``) and stores only
+    the wrapped ciphertext — the raw key is never persisted. The worker unwraps
+    it with ``decrypt_file(wrapped, actor)`` to decrypt the FENCR input.
+
+    Args:
+        job: The job being constructed (mutated in place).
+        payload: The create-job request carrying ``data_key``/``client_encrypted``.
+        encryption_service: At-rest encryption service (``None`` when the master
+            key is unset — in which case client-side encryption is unsupported).
+        actor: The per-user key-derivation actor (``str(user_id)`` or ``"guest"``).
+    """
+    if not payload.client_encrypted:
+        # Plaintext upload — nothing to register.
+        job.client_encrypted = False
+        job.data_key_wrapped = None
+        return
+
+    if encryption_service is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Client-side encryption is not enabled on this deployment",
+        )
+    if not payload.data_key:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="data_key is required when client_encrypted is set",
+        )
+
+    # Decode the raw 32-byte key (base64) from the client and wrap it.
+    try:
+        raw_key = base64.b64decode(payload.data_key)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="data_key must be valid base64",
+        ) from exc
+    if len(raw_key) != 32:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="data_key must decode to exactly 32 bytes",
+        )
+
+    wrapped = encryption_service.encrypt_file(raw_key, actor)
+    job.client_encrypted = True
+    job.data_key_wrapped = wrapped.hex()  # hex so the worker can bytes.fromhex() it
 
 
 @router.get("/supported", response_model=list[SupportedConversionResponse])
@@ -135,6 +197,7 @@ async def create_conversion_job(
     current_user: CurrentUser,
     conversion_service: Annotated[ConversionService, Depends(get_conversion_service)],
     file_service: Annotated[FileService, Depends(get_file_service)],
+    encryption_service: Annotated[FileEncryptionService | None, Depends(get_encryption_service)],
 ) -> ConversionJobResponse:
     try:
         if payload.file_id:
@@ -176,6 +239,9 @@ async def create_conversion_job(
             input_file=payload.input_key,
             user_id=current_user.id,
         )
+        # Register client-side (FENCR) encryption: the browser-uploaded object
+        # is a FENCR blob; wrap the raw data key for at-rest storage.
+        _apply_client_encryption(job, payload, encryption_service, str(current_user.id))
         await conversion_service.create_conversion_job(job)
 
     except InvalidConversion as exc:

@@ -76,7 +76,7 @@ Format colors (canonical, on chips + morph streams only):
 - Image #E8549C
 - Audio #9B59D0
 - Video #F97316
-- Text #8A919B
+- Text #B8C1C9
 
 ## Background animation
 Landing and Convert use a slow ambient field of faint format glyphs (PDF, DOCX, XLSX, MP3, PNG) drifting and morphing at ~5% opacity, respecting prefers-reduced-motion. Never a generic radial mesh gradient.

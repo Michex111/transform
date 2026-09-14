@@ -42,3 +42,30 @@ def test_message_roundtrip_preserves_job_fields() -> None:
     assert payload["target_format"] == "docx"
     assert payload["input_key"] == "input.pdf"
     assert payload["user_id"] == "3"
+
+
+def test_message_includes_client_encryption_fields_when_present() -> None:
+    """Client-side encryption metadata must reach the worker via the message."""
+    job = _job(user_id=7)
+    job.client_encrypted = True
+    job.data_key_wrapped = "deadbeefcafe"  # hex of the Fernet-wrapped data key
+
+    message = ConversionJobMessage.from_conversion_job(job)
+    payload = message.to_dict()
+
+    assert payload["client_encrypted"] == "true"
+    assert payload["data_key_wrapped"] == "deadbeefcafe"
+    # The worker reconstructs the flags from the Redis string fields.
+    assert ConversionJobMessage._to_bool(payload["client_encrypted"]) is True
+    assert ConversionJobMessage._to_bool(payload["client_encrypted"]) is not False
+
+
+def test_message_omits_client_encryption_fields_when_disabled() -> None:
+    """A plaintext upload must not carry client-encryption fields (None dropped)."""
+    job = _job(user_id=None)
+    message = ConversionJobMessage.from_conversion_job(job)
+    payload = message.to_dict()
+
+    assert "data_key_wrapped" not in payload
+    assert payload["client_encrypted"] == "false"
+    assert ConversionJobMessage._to_bool(payload["client_encrypted"]) is False

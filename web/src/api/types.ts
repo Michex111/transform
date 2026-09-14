@@ -75,6 +75,10 @@ export interface CreateConversionJobRequest {
   source_format: string
   target_format: string
   input_key: string
+  /** Raw 32-byte client-side FENCR data key, base64. Sent only when encrypting. */
+  data_key?: string
+  /** True when the uploaded object is a client-encrypted FENCR blob. */
+  client_encrypted?: boolean
 }
 
 /** Convert a file that already lives in the user's library (object storage). */
@@ -95,6 +99,9 @@ export interface ConversionJobResponse {
   error_message?: string | null
   credits_used?: number
   compute_duration_ms?: number
+  /** Echoed FENCR metadata: wrapped (Fernet) data key + client-encrypted flag. */
+  data_key_wrapped?: string | null
+  client_encrypted?: boolean
 }
 
 /** Paginated list of a user's conversion history. */

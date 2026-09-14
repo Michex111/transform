@@ -40,14 +40,14 @@ export function SupportPage() {
       label: "Documentation",
       detail: "Read the guides",
       href: "/docs",
-      external: false,
+      external: true,
     },
     {
       icon: Pulse,
       label: "Status page",
       detail: "All systems operational",
       href: "/health",
-      external: false,
+      external: true,
     },
   ];
 
@@ -60,9 +60,14 @@ export function SupportPage() {
 
       {/* Contact options */}
       <Stagger className="grid gap-4 sm:grid-cols-3">
-        {CONTACTS.map(({ icon: Icon, label, detail, href }) => (
+        {CONTACTS.map(({ icon: Icon, label, detail, href, external }) => (
           <Item key={label} className="h-full">
-            <a href={href} className="block h-full">
+            <a
+              href={href}
+              target={external ? "_blank" : undefined}
+              rel={external ? "noreferrer" : undefined}
+              className="block h-full"
+            >
               <Card hover className="h-full p-5">
                 <Icon size={22} className="mb-3 text-primary" />
                 <p className="font-medium text-on-background">{label}</p>

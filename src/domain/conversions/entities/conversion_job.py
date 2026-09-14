@@ -16,6 +16,11 @@ class ConversionJob:
     compute_duration_ms: int = 0          # actual converter wall-clock time
     credits_used: int = 0                 # credits charged for this job
     user_id: int | None = None            # owner of the job (when authenticated)
+    # Client-side (FENCR) encryption: the browser encrypts the file BEFORE
+    # upload with a per-file data key. The server only ever receives the key in
+    # wrapped (Fernet-encrypted) form and NEVER persists the raw key.
+    data_key_wrapped: str | None = None   # Fernet ciphertext (b64 str) of the raw data key
+    client_encrypted: bool = False        # True when the input is a FENCR blob
 
     def pending_processing(self):
         if self.status != JobStatus.AWAITING_UPLOAD:

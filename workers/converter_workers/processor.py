@@ -39,14 +39,56 @@ async def _download_input_file(context: WorkerContext, job: ConversionJob, input
     Download the job's input object to disk and return the path of the
     plaintext file to feed to the converter.
 
-    When encryption at rest is enabled, the stored object is ciphertext; it is
-    decrypted into a sibling temp file before conversion.
+    When encryption at rest is enabled, the stored object is normally
+    ciphertext; it is decrypted into a sibling temp file before conversion.
+    However, uploads are written to object storage directly from the browser
+    (plaintext, no ingest-time encryption), so an object may be plaintext even
+    with a master key configured. We detect the ciphertext magic and only
+    decrypt when the object is actually encrypted — otherwise we pass the
+    plaintext through so plaintext uploads convert correctly.
     """
     await asyncio.to_thread(context.storage_port.download, job.object_key, input_dest)
     log_context = context.get_log_context(job_id=job.job_id, conversion_type=job.conversion)
     worker_logger.debug(f"Downloaded input file for job {job.job_id} to {input_dest}", extra=log_context)
 
     if context.encryption_service is None:
+        return input_dest
+
+    # Client-side (FENCR) encryption takes precedence: if the browser uploaded
+    # a FENCR blob we must unwrap the per-file data key and decrypt it here.
+    # This is checked FIRST because a FENCR blob would otherwise be misread as
+    # a plaintext object by the at-rest TRENC probe below (its magic differs,
+    # but probing FENCR first keeps the ordering explicit and unambiguous).
+    if job.client_encrypted and context.encryption_service.is_fencr_file(input_dest):
+        if not job.data_key_wrapped:
+            raise ValueError(
+                f"Job {job.job_id} is client-encrypted but has no wrapped data key"
+            )
+        data_key = context.encryption_service.decrypt_file(
+            bytes.fromhex(job.data_key_wrapped), _actor_key(job)
+        )
+        plain_input = input_dest.parent / f"plain_{input_dest.name}"
+        await asyncio.to_thread(
+            context.encryption_service.decrypt_fencr_file,
+            input_dest,
+            plain_input,
+            data_key,
+        )
+        worker_logger.debug(
+            f"Decrypted client-encrypted (FENCR) input for job {job.job_id} "
+            f"to {plain_input}",
+            extra=log_context,
+        )
+        return plain_input
+
+    if not context.encryption_service.is_encrypted_file(input_dest):
+        # Plaintext object (direct browser upload). No ingest-time encryption,
+        # so it is already converter-ready — do not attempt to decrypt it.
+        worker_logger.debug(
+            f"Input file for job {job.job_id} is plaintext (not encrypted); "
+            f"passing through to converter",
+            extra=log_context,
+        )
         return input_dest
 
     plain_input = input_dest.parent / f"plain_{input_dest.name}"

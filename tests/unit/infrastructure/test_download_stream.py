@@ -42,7 +42,32 @@ class FakeStreamingStorage(MinioFileStorageAdapter):
         return self.last_response
 
 
-def test_iter_decrypted_object_streams_plaintext() -> None:
+def test_iter_decrypted_object_streams_plaintext_object() -> None:
+    """A non-encrypted object (direct browser upload) streams through as-is.
+
+    Regression test for the 0-byte download bug: uploads are written to object
+    storage plaintext, so the download path must NOT try to "decrypt" them.
+    Previously it raised ``Not a Transform-encrypted file (bad header)`` and
+    returned an empty body.
+    """
+    service = _make_service()
+    plaintext = b"%PDF-1.7 real plaintext upload bytes" * 500
+    storage = FakeStreamingStorage(plaintext)
+
+    async def _run() -> bytes:
+        chunks = []
+        async for chunk in iter_decrypted_object(storage, "upload.pdf", service, "7"):
+            chunks.append(chunk)
+        return b"".join(chunks)
+
+    result = asyncio.run(_run())
+    assert result == plaintext
+    assert storage.last_response is not None
+    assert storage.last_response.closed
+
+
+def test_iter_decrypted_object_decrypts_ciphertext() -> None:
+    """Real ciphertext still decrypts correctly through the download path."""
     service = _make_service()
     ciphertext = service.encrypt_bytes(b"secret document" * 1000, "7")
     storage = FakeStreamingStorage(ciphertext)
@@ -61,11 +86,13 @@ def test_iter_decrypted_object_streams_plaintext() -> None:
 
 def test_iter_decrypted_object_closes_response_on_error() -> None:
     service = _make_service()
-    # Not a valid Transform-encrypted header → decrypt fails mid-stream
-    storage = FakeStreamingStorage(b"garbage that is not encrypted")
+    # Real ciphertext for user "7", decrypted as a different user → InvalidTag.
+    # This is the true failure path and must still close the stream.
+    ciphertext = service.encrypt_bytes(b"for another user", "7")
+    storage = FakeStreamingStorage(ciphertext)
 
     async def _run() -> None:
-        async for _ in iter_decrypted_object(storage, "x.enc", service, "7"):
+        async for _ in iter_decrypted_object(storage, "x.enc", service, "8"):
             pass
 
     with pytest.raises(Exception):

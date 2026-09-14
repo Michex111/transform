@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -8,6 +9,7 @@ import {
   type FormEvent,
   type ReactNode,
 } from "react";
+import { createPortal } from "react-dom";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { Item, PopIn, staggerContainer } from "@/lib/motion";
 import {
@@ -45,6 +47,30 @@ const MOVE_MIME = "application/x-transform-file";
 // Custom MIME type used to identify a draggable folder.
 const MOVE_FOLDER_MIME = "application/x-transform-folder";
 
+// Whether the current drag payload is one of our file/folder moves. This reads
+// `dataTransfer.types` synchronously so the dragover/drop handlers never depend
+// on React state (draggedFileId/draggedFolderId) having flushed. That state is
+// set in `dragstart`, but on the first (or a fast) drag it may still be null
+// when the browser dispatches the very first `dragover`/`drop`. If `active` were
+// the gate, `preventDefault()` would be skipped, the browser would refuse to
+// allow the drop, and the move would silently no-op until a page refresh.
+function hasMovePayload(e: DragEvent<HTMLElement>): boolean {
+  const types = e.dataTransfer?.types;
+  return !!types && (types.includes(MOVE_MIME) || types.includes(MOVE_FOLDER_MIME));
+}
+
+// Extract the dragged file/folder ids from the drop payload. Unlike the React
+// state (draggedFileId/draggedFolderId), this is read synchronously from the
+// DataTransfer, so the self/descendant guards are reliable even on the first drag.
+function getMovePayload(e: DragEvent<HTMLElement>): {
+  fileId: string | null;
+  folderId: string | null;
+} {
+  const fileId = e.dataTransfer.getData(MOVE_MIME);
+  const folderId = e.dataTransfer.getData(MOVE_FOLDER_MIME);
+  return { fileId: fileId || null, folderId: folderId || null };
+}
+
 /** Browse the library as Drive-style file/folder cards with breadcrumb pathing. */
 export function FilesPage() {
   const { api: client } = useAuth();
@@ -57,6 +83,8 @@ export function FilesPage() {
   const [loading, setLoading] = useState(true);
   // Inline "new folder" card (a folder with an editable name), selected by default.
   const [newFolder, setNewFolder] = useState<{ id: string; name: string } | null>(null);
+  // Inline validation error for the "new folder" form (cleared on edit).
+  const [folderError, setFolderError] = useState<string | null>(null);
   const newFolderInput = useRef<HTMLInputElement>(null);
   // Feature modals.
   const [uploadOpen, setUploadOpen] = useState(false);
@@ -122,7 +150,23 @@ export function FilesPage() {
   async function saveNewFolder(e: FormEvent) {
     e.preventDefault();
     if (!newFolder) return;
-    const name = newFolder.name.trim() || "new_folder";
+    const name = newFolder.name.trim();
+
+    // Reject blank/whitespace-only names before submitting.
+    if (!name) {
+      setFolderError("Folder name can't be empty.");
+      return;
+    }
+    // Reject obvious duplicates (case-insensitive) within the current folder.
+    const duplicate = folders.some(
+      (f) => f.name.toLowerCase() === name.toLowerCase(),
+    );
+    if (duplicate) {
+      setFolderError("A folder with that name already exists here.");
+      return;
+    }
+
+    setFolderError(null);
     try {
       const created = await client.createFolder(name, currentFolderId);
       // The placeholder card is NOT part of `folders`, so append the persisted
@@ -131,6 +175,7 @@ export function FilesPage() {
       setNewFolder(null);
       success("Folder created");
     } catch (err) {
+      // Surface server-side validation results (source of truth) cleanly.
       error(err instanceof Error ? err.message : "Could not create folder");
     }
   }
@@ -401,15 +446,14 @@ export function FilesPage() {
 
   /** Shared drag-over/drop handlers for a drop target that moves to `target`. */
   function makeDropHandlers(target: string | null) {
-    const active = draggedFileId !== null || draggedFolderId !== null;
     return {
       onDragOver: (e: DragEvent<HTMLElement>) => {
-        if (!active) return;
+        if (!hasMovePayload(e)) return;
         e.preventDefault();
         e.dataTransfer.dropEffect = "move";
       },
       onDrop: (e: DragEvent<HTMLElement>) => {
-        if (!active) return;
+        if (!hasMovePayload(e)) return;
         e.preventDefault();
         const fileId = e.dataTransfer.getData(MOVE_MIME);
         const folderId = e.dataTransfer.getData(MOVE_FOLDER_MIME);
@@ -422,8 +466,8 @@ export function FilesPage() {
   return (
     <div className="mx-auto max-w-6xl space-y-6">
       {/* Header */}
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
+      <div className="flex flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center sm:justify-between">
+        <div className="min-w-0">
           <h1 className="font-display text-2xl font-semibold">My Drive</h1>
           <p className="text-sm text-muted">Your files, in folders.</p>
           <p
@@ -433,7 +477,8 @@ export function FilesPage() {
             Drag a file or folder onto a folder or breadcrumb to move it
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        {/* Toolbar — wraps on small screens so buttons never overflow 375px. */}
+        <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto sm:justify-end">
           <Button
             variant={showFavorites ? "primary" : "secondary"}
             onClick={() => {
@@ -454,9 +499,10 @@ export function FilesPage() {
           </Button>
           <Button
             variant="secondary"
-            onClick={() =>
-              setNewFolder({ id: `new-${Date.now()}`, name: "new_folder" })
-            }
+            onClick={() => {
+              setFolderError(null);
+              setNewFolder({ id: `new-${Date.now()}`, name: "new_folder" });
+            }}
           >
             <Plus size={16} /> New folder
           </Button>
@@ -506,8 +552,6 @@ export function FilesPage() {
           target={null}
           onMove={handleMove}
           onMoveFolder={handleMoveFolder}
-          draggedFileId={draggedFileId}
-          draggedFolderId={draggedFolderId}
           className="inline-flex rounded-md"
           overClassName="bg-surface-variant ring-1 ring-primary/30"
         >
@@ -538,8 +582,6 @@ export function FilesPage() {
               target={folder.id}
               onMove={handleMove}
               onMoveFolder={handleMoveFolder}
-              draggedFileId={draggedFileId}
-              draggedFolderId={draggedFolderId}
               className="inline-flex rounded-md"
               overClassName="bg-surface-variant ring-1 ring-primary/30"
             >
@@ -624,24 +666,43 @@ export function FilesPage() {
                 {/* New-folder placeholder card (inline editable) */}
                 {newFolder && (
                   <Item className="w-full">
-                    <div className="flex w-full items-center gap-3 rounded-xl border border-primary/50 bg-surface px-4 py-4">
-                      <FolderSimple size={22} weight="duotone" className="shrink-0 text-primary" />
-                      <form onSubmit={saveNewFolder} className="flex min-w-0 flex-1 items-center gap-1.5">
-                        <input
-                          ref={newFolderInput}
-                          value={newFolder.name}
-                          onChange={(e) => setNewFolder({ ...newFolder, name: e.target.value })}
-                          onFocus={(e) => e.target.select()}
-                          className="min-w-0 flex-1 rounded border border-outline-strong bg-surface-variant px-2 py-1 text-sm text-on-background focus:border-primary focus:outline-none"
-                          aria-label="Folder name"
-                        />
-                        <button type="submit" className="text-primary hover:text-primary/80" aria-label="Save folder">
-                          <Check size={16} weight="bold" />
-                        </button>
-                        <button type="button" onClick={() => setNewFolder(null)} className="text-muted hover:text-error" aria-label="Cancel">
-                          <X size={16} />
-                        </button>
-                      </form>
+                    <div className="flex w-full flex-col gap-1.5 rounded-xl border border-primary/50 bg-surface px-4 py-4">
+                      <div className="flex w-full items-center gap-3">
+                        <FolderSimple size={22} weight="duotone" className="shrink-0 text-primary" />
+                        <form onSubmit={saveNewFolder} className="flex min-w-0 flex-1 items-center gap-1.5">
+                          <input
+                            ref={newFolderInput}
+                            value={newFolder.name}
+                            onChange={(e) => {
+                              setNewFolder({ ...newFolder, name: e.target.value });
+                              if (folderError) setFolderError(null);
+                            }}
+                            onFocus={(e) => e.target.select()}
+                            className="min-w-0 flex-1 rounded border border-outline-strong bg-surface-variant px-2 py-1 text-sm text-on-background focus:border-primary focus:outline-none"
+                            aria-label="Folder name"
+                            aria-invalid={folderError ? true : undefined}
+                          />
+                          <button type="submit" className="text-primary hover:text-primary/80" aria-label="Save folder">
+                            <Check size={16} weight="bold" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setNewFolder(null);
+                              setFolderError(null);
+                            }}
+                            className="text-muted hover:text-error"
+                            aria-label="Cancel"
+                          >
+                            <X size={16} />
+                          </button>
+                        </form>
+                      </div>
+                      {folderError && (
+                        <p className="pl-8 text-xs text-error" role="alert">
+                          {folderError}
+                        </p>
+                      )}
                     </div>
                   </Item>
                 )}
@@ -661,8 +722,6 @@ export function FilesPage() {
                       onMove={() => setMoveTarget({ kind: "folder", id: folder.id, name: folder.name, currentParentId: folder.parent_id })}
                       onDropFile={(fileId) => void handleMove(fileId, folder.id)}
                       onDropFolder={(folderId) => void handleMoveFolder(folderId, folder.id)}
-                      draggedFileId={draggedFileId}
-                      draggedFolderId={draggedFolderId}
                     />
                   </Item>
                 ))}
@@ -806,8 +865,6 @@ function BreadcrumbDrop({
   target,
   onMove,
   onMoveFolder,
-  draggedFileId,
-  draggedFolderId,
   className,
   overClassName,
   children,
@@ -815,34 +872,31 @@ function BreadcrumbDrop({
   target: string | null;
   onMove: (fileId: string, target: string | null) => void;
   onMoveFolder: (folderId: string, target: string | null) => void;
-  draggedFileId: string | null;
-  draggedFolderId: string | null;
   className: string;
   overClassName: string;
   children: ReactNode;
 }) {
   const [over, setOver] = useState(false);
   const overCount = useRef(0);
-  const active = draggedFileId !== null || draggedFolderId !== null;
 
   return (
     <div
       className={`${className} ${over ? overClassName : ""}`}
       onDragOver={(e) => {
-        if (!active) return;
+        if (!hasMovePayload(e)) return;
         e.preventDefault();
         e.stopPropagation();
         e.dataTransfer.dropEffect = "move";
       }}
       onDragEnter={(e) => {
-        if (!active) return;
+        if (!hasMovePayload(e)) return;
         e.preventDefault();
         e.stopPropagation();
         overCount.current += 1;
         setOver(true);
       }}
-      onDragLeave={() => {
-        if (!active) return;
+      onDragLeave={(e) => {
+        if (!hasMovePayload(e)) return;
         overCount.current -= 1;
         if (overCount.current <= 0) {
           overCount.current = 0;
@@ -850,7 +904,7 @@ function BreadcrumbDrop({
         }
       }}
       onDrop={(e) => {
-        if (!active) return;
+        if (!hasMovePayload(e)) return;
         e.preventDefault();
         e.stopPropagation();
         overCount.current = 0;
@@ -880,8 +934,6 @@ function FolderCard({
   onMove,
   onDropFile,
   onDropFolder,
-  draggedFileId,
-  draggedFolderId,
 }: {
   folder: FolderResponse;
   selectionMode: boolean;
@@ -896,17 +948,11 @@ function FolderCard({
   onMove: () => void;
   onDropFile: (fileId: string) => void;
   onDropFolder: (folderId: string) => void;
-  draggedFileId: string | null;
-  draggedFolderId: string | null;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(folder.name);
   const [over, setOver] = useState(false);
   const overCount = useRef(0);
-  const active = draggedFileId !== null || draggedFolderId !== null;
-  // Whether the dragged folder (if any) is THIS folder — dropping onto itself
-  // is a no-op that we want to visually suppress.
-  const draggingSelf = draggedFolderId === folder.id;
 
   function submit() {
     onRename(draft);
@@ -931,23 +977,33 @@ function FolderCard({
       onDragStart={handleDragStart}
       onDragEnd={onDragEnd}
       onClick={selectable ? onToggleSelect : undefined}
+      onKeyDown={selectable ? (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onToggleSelect();
+        }
+      } : undefined}
+      role={selectable ? "button" : undefined}
+      aria-pressed={selectable ? selected : undefined}
+      tabIndex={selectable ? 0 : -1}
       onDragOver={(e) => {
-        if (!active || draggingSelf) return;
+        // The Dragged folder dropping onto itself is a no-op we visually
+        // suppress. Computed from the payload so it's reliable on a fresh drag.
+        if (!hasMovePayload(e)) return;
+        if (getMovePayload(e).folderId === folder.id) return;
         e.preventDefault();
         e.stopPropagation();
         e.dataTransfer.dropEffect = "move";
       }}
       onDragEnter={(e) => {
-        if (!active || draggingSelf) return;
-        const t = e.dataTransfer.types;
-        if (!t.includes(MOVE_MIME) && !t.includes(MOVE_FOLDER_MIME)) return;
+        if (!hasMovePayload(e)) return;
+        if (getMovePayload(e).folderId === folder.id) return;
         e.preventDefault();
         e.stopPropagation();
         overCount.current += 1;
         setOver(true);
       }}
       onDragLeave={() => {
-        if (!active) return;
         overCount.current -= 1;
         if (overCount.current <= 0) {
           overCount.current = 0;
@@ -955,15 +1011,14 @@ function FolderCard({
         }
       }}
       onDrop={(e) => {
-        if (!active || draggingSelf) return;
+        if (!hasMovePayload(e)) return;
         e.preventDefault();
         e.stopPropagation();
         overCount.current = 0;
         setOver(false);
-        const fileId = e.dataTransfer.getData(MOVE_MIME);
-        const folderId = e.dataTransfer.getData(MOVE_FOLDER_MIME);
+        const { fileId, folderId: payloadFolderId } = getMovePayload(e);
         if (fileId) onDropFile(fileId);
-        else if (folderId) onDropFolder(folderId);
+        else if (payloadFolderId) onDropFolder(payloadFolderId);
       }}
     >
       <motion.div
@@ -1109,6 +1164,7 @@ function FileCard({
         }
       } : undefined}
       role={selectable ? "button" : undefined}
+      aria-pressed={selectable ? selected : undefined}
       tabIndex={selectable ? 0 : -1}
     >
       <motion.div
@@ -1195,8 +1251,6 @@ function FileCard({
                   onConvert={onConvert}
                   onRename={() => { setDraft(file.file_name); setEditing(true); }}
                   onMove={onMove}
-                  onToggleFavorite={onToggleFavorite}
-                  isFavorite={isFavorite}
                   onDelete={onDelete}
                 />
               )}
@@ -1226,73 +1280,147 @@ function CardMenu({
   onDelete: () => void;
 }) {
   const [open, setOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState<{ top: number; right: number }>({ top: 0, right: 0 });
+
+  // Measure the trigger's viewport position so the portaled menu can be
+  // placed precisely while escaping every card's Framer Motion stacking
+  // context (opacity/transform from `fadeUp`). Without the portal the
+  // menu's own z-index is trapped inside its card's stacking context, so a
+  // later DOM-sibling card paints over it once the grid wraps to a 2nd row.
+  useLayoutEffect(() => {
+    if (!open) return;
+    function measure() {
+      const rect = triggerRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      // Menu width: w-44 = 11rem = 176px, plus two 4px borders. Clamp so it
+      // never runs off the right viewport edge.
+      const menuWidth = 176 + 2;
+      const margin = 8;
+      const right = Math.max(margin, window.innerWidth - rect.right - menuWidth);
+
+      // Prefer opening below the trigger, but flip above when the menu would
+      // spill past the bottom viewport edge (e.g. there are no cards below the
+      // trigger). `offsetHeight` is available because this layout effect runs
+      // after the portaled menu has mounted.
+      const menuHeight = menuRef.current?.offsetHeight ?? 160;
+      const spaceBelow = window.innerHeight - rect.bottom - margin;
+      const top =
+        menuHeight <= spaceBelow
+          ? Math.max(margin, rect.bottom + margin)
+          : Math.max(margin, rect.top - menuHeight - margin);
+      setPos({ top, right });
+    }
+    measure();
+    window.addEventListener("resize", measure);
+    window.addEventListener("scroll", measure, true);
+    return () => {
+      window.removeEventListener("resize", measure);
+      window.removeEventListener("scroll", measure, true);
+    };
+  }, [open]);
+
+  // Focus the first menu item on open; restore focus to the trigger on close.
+  useEffect(() => {
+    if (!open) return;
+    const first = menuRef.current?.querySelector<HTMLElement>("button");
+    first?.focus();
+    return () => triggerRef.current?.focus();
+  }, [open]);
+
+  // Close on Escape.
+  useEffect(() => {
+    if (!open) return;
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setOpen(false);
+    }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [open]);
+
   return (
     <div className="relative" draggable={false}>
       <button
+        ref={triggerRef}
         type="button"
         draggable={false}
         onDragStart={(e) => e.stopPropagation()}
         onClick={() => setOpen((v) => !v)}
         aria-label="More options"
+        aria-haspopup="menu"
         aria-expanded={open}
         className="rounded p-1 text-muted transition-colors hover:bg-surface-variant hover:text-on-background"
       >
         <DotsThreeVertical size={18} />
       </button>
-      {open && (
-        <>
-          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 top-8 z-20 w-44 overflow-hidden rounded-lg border border-outline bg-surface p-1 shadow-xl">
-            {onMove && (
-              <button
-                onClick={() => { setOpen(false); onMove(); }}
-                className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm text-on-background hover:bg-surface-variant"
-              >
-                <FolderSimple size={15} /> Move to…
-              </button>
-            )}
-            {onDownload && (
-              <button
-                onClick={() => { setOpen(false); onDownload(); }}
-                className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm text-on-background hover:bg-surface-variant"
-              >
-                <Download size={15} /> Download
-              </button>
-            )}
-            {onConvert && (
-              <button
-                onClick={() => { setOpen(false); onConvert(); }}
-                className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm text-on-background hover:bg-surface-variant"
-              >
-                <ArrowsClockwise size={15} /> Convert
-              </button>
-            )}
-            {onToggleFavorite && (
-              <button
-                onClick={() => { setOpen(false); onToggleFavorite(); }}
-                className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm text-on-background hover:bg-surface-variant"
-              >
-                <Star size={15} weight={isFavorite ? "fill" : "regular"} className={isFavorite ? "text-warning" : ""} />
-                {isFavorite ? "Remove from favorites" : "Add to favorites"}
-              </button>
-            )}
-            {onRename && (
-              <button
-                onClick={() => { setOpen(false); onRename(); }}
-                className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm text-on-background hover:bg-surface-variant"
-              >
-                <PenNib size={15} /> Rename
-              </button>
-            )}
-            <button
-              onClick={() => { setOpen(false); onDelete(); }}
-              className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm text-error hover:bg-error/10"
+      {open &&
+        createPortal(
+          <>
+            <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
+            <div
+              ref={menuRef}
+              role="menu"
+              style={{ position: "fixed", top: pos.top, right: pos.right }}
+              className="z-[70] w-44 overflow-hidden rounded-lg border border-outline bg-surface p-1 shadow-xl"
             >
-              <Trash size={15} /> Delete
-            </button>
-          </div>
-        </>
-      )}
+              {onMove && (
+                <button
+                  role="menuitem"
+                  onClick={() => { setOpen(false); onMove(); }}
+                  className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm text-on-background hover:bg-surface-variant"
+                >
+                  <FolderSimple size={15} /> Move to…
+                </button>
+              )}
+              {onDownload && (
+                <button
+                  role="menuitem"
+                  onClick={() => { setOpen(false); onDownload(); }}
+                  className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm text-on-background hover:bg-surface-variant"
+                >
+                  <Download size={15} /> Download
+                </button>
+              )}
+              {onConvert && (
+                <button
+                  role="menuitem"
+                  onClick={() => { setOpen(false); onConvert(); }}
+                  className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm text-on-background hover:bg-surface-variant"
+                >
+                  <ArrowsClockwise size={15} /> Convert
+                </button>
+              )}
+              {onToggleFavorite && (
+                <button
+                  role="menuitem"
+                  onClick={() => { setOpen(false); onToggleFavorite(); }}
+                  className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm text-on-background hover:bg-surface-variant"
+                >
+                  <Star size={15} weight={isFavorite ? "fill" : "regular"} className={isFavorite ? "text-warning" : ""} />
+                  {isFavorite ? "Remove from favorites" : "Add to favorites"}
+                </button>
+              )}
+              {onRename && (
+                <button
+                  role="menuitem"
+                  onClick={() => { setOpen(false); onRename(); }}
+                  className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm text-on-background hover:bg-surface-variant"
+                >
+                  <PenNib size={15} /> Rename
+                </button>
+              )}
+              <button
+                role="menuitem"
+                onClick={() => { setOpen(false); onDelete(); }}
+                className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm text-error hover:bg-error/10"
+              >
+                <Trash size={15} /> Delete
+              </button>
+            </div>
+          </>,
+          document.body,
+        )}
     </div>
   );
 }
@@ -1307,8 +1435,10 @@ function SelectionCheckbox({
 }) {
   return (
     <span
-      aria-hidden="false"
+      role="checkbox"
+      aria-checked={selected}
       aria-label={ariaLabel}
+      tabIndex={-1}
       className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-md border transition-colors ${
         selected
           ? "border-primary bg-primary text-on-primary"

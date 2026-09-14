@@ -22,7 +22,7 @@ interface DropdownProps<T extends string = string> {
 }
 
 /** A modern, app-themed dropdown (custom popover with animated open/close,
- *  keyboard support, and a check on the selected item). Replaces native
+ *  full keyboard support, and a check on the selected item). Replaces native
  *  `<select>` everywhere for visual consistency. */
 export function Dropdown<T extends string = string>({
   value,
@@ -35,8 +35,29 @@ export function Dropdown<T extends string = string>({
   disabled = false,
 }: DropdownProps<T>) {
   const [open, setOpen] = useState(false);
+  const [activeIndex, setActiveIndex] = useState<number>(-1);
   const rootRef = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLUListElement>(null);
   const selected = options.find((o) => o.value === value);
+  const selectedIndex = options.findIndex((o) => o.value === value);
+
+  // Move real DOM focus onto the option button at `activeIndex`. Prefer real
+  // focus so screen readers announce each option as it is reached.
+  function focusOption(index: number) {
+    const items = listRef.current?.querySelectorAll<HTMLButtonElement>("button[role='option']");
+    if (!items || items.length === 0) return;
+    const target = items[(index + items.length) % items.length];
+    setActiveIndex((index + items.length) % items.length);
+    target?.focus();
+  }
+
+  // On open, move focus to the selected option (or the first option).
+  useEffect(() => {
+    if (!open) return;
+    const start = selectedIndex >= 0 ? selectedIndex : 0;
+    focusOption(start);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
 
   // Close on outside click.
   useEffect(() => {
@@ -52,11 +73,52 @@ export function Dropdown<T extends string = string>({
   useEffect(() => {
     if (!open) return;
     function onKey(e: KeyboardEvent) {
-      if (e.key === "Escape") setOpen(false);
+      if (e.key === "Escape") {
+        setOpen(false);
+        rootRef.current?.querySelector<HTMLButtonElement>("button[aria-haspopup]")?.focus();
+      }
     }
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [open]);
+
+  const count = options.length;
+
+  function handleListKeyDown(e: React.KeyboardEvent) {
+    if (!open) return;
+    switch (e.key) {
+      case "ArrowDown":
+        e.preventDefault();
+        focusOption(activeIndex + 1);
+        break;
+      case "ArrowUp":
+        e.preventDefault();
+        focusOption(activeIndex - 1);
+        break;
+      case "Home":
+        e.preventDefault();
+        focusOption(0);
+        break;
+      case "End":
+        e.preventDefault();
+        focusOption(count - 1);
+        break;
+      case "Enter":
+      case " ":
+        e.preventDefault();
+        if (activeIndex >= 0 && options[activeIndex]) {
+          onChange(options[activeIndex].value);
+        }
+        setOpen(false);
+        break;
+      case "Tab":
+        // Natural close — let the browser move focus away.
+        setOpen(false);
+        break;
+      default:
+        break;
+    }
+  }
 
   return (
     <div ref={rootRef} className={`relative inline-block ${className}`}>
@@ -67,6 +129,11 @@ export function Dropdown<T extends string = string>({
         aria-label={ariaLabel}
         aria-haspopup="listbox"
         aria-expanded={open}
+        aria-activedescendant={
+          open && activeIndex >= 0 && options[activeIndex]
+            ? `${ariaLabel ?? "dropdown"}-opt-${options[activeIndex].value}`
+            : undefined
+        }
         disabled={disabled}
         className="inline-flex h-9 items-center gap-2 rounded-lg border border-outline-strong bg-surface-variant px-3 text-sm text-on-background transition-colors hover:border-primary/60 focus:border-primary focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
       >
@@ -81,7 +148,9 @@ export function Dropdown<T extends string = string>({
       <AnimatePresence>
         {open && (
           <motion.ul
+            ref={listRef}
             role="listbox"
+            onKeyDown={handleListKeyDown}
             initial={{ opacity: 0, y: 6, scale: 0.98 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 6, scale: 0.98 }}
@@ -96,6 +165,7 @@ export function Dropdown<T extends string = string>({
                 <li key={opt.value}>
                   <button
                     type="button"
+                    id={`${ariaLabel ?? "dropdown"}-opt-${opt.value}`}
                     role="option"
                     aria-selected={isSel}
                     onClick={() => {

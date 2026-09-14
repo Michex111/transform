@@ -95,10 +95,13 @@ def _apply_b2_cors(allowed_origins: list[str]) -> None:
     """Apply Backblaze B2 native CORS rules via the b2sdk."""
     settings = get_settings()
     try:
+        from typing import cast
+
         from b2sdk.v2 import B2Api, InMemoryAccountInfo
+        from b2sdk.v2 import AbstractAccountInfo
         from b2sdk.v2.exception import B2Error
 
-        info = InMemoryAccountInfo()
+        info = cast(AbstractAccountInfo, InMemoryAccountInfo())
         api = B2Api(info)
         api.authorize_account(
             "production",
@@ -107,7 +110,10 @@ def _apply_b2_cors(allowed_origins: list[str]) -> None:
         )
         bucket = api.get_bucket_by_name(settings.S3_BUCKET_NAME)
         cors_rules = _build_b2_cors(allowed_origins)
-        bucket.update(bucket_type=bucket.type_, cors_rules=cors_rules)
+        # b2sdk's stub types ``cors_rules`` as ``dict | None`` but the B2 API
+        # accepts a plain list of rule dicts (see ``_build_b2_cors``). Cast to
+        # the declared type to satisfy the checker; runtime accepts the list.
+        bucket.update(bucket_type=bucket.type_, cors_rules=cast(dict, cors_rules))
         logger.info("Applied B2 bucket CORS rules to %s", settings.S3_BUCKET_NAME)
     except B2Error as e:
         logger.warning("Failed to apply B2 bucket CORS: %s", e)

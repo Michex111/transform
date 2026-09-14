@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { AnimatePresence, motion } from "motion/react";
 import { Warning } from "@phosphor-icons/react";
+import { friendlyErrorMessage } from "@/lib/errorMessages";
 
 /** A small "show error" button for a failed conversion. Clicking it reveals
  *  the record's error message in an animated popover.
@@ -89,7 +90,7 @@ export function ErrorButton({ message }: { message?: string }) {
               <p className="mb-1 flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wide text-error">
                 <Warning size={14} weight="fill" /> Error
               </p>
-              <p className="text-sm text-on-background">{message}</p>
+              <p className="text-sm text-on-background">{friendlyErrorMessage(message)}</p>
             </motion.div>
           </AnimatePresence>,
           document.body,

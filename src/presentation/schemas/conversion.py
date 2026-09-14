@@ -10,6 +10,13 @@ class CreateConversionJobRequest(BaseModel):
     # When set, the job converts a file already stored in the user's library
     # (object storage) without re-uploading it.
     file_id: str | None = None
+    # Client-side (FENCR) encryption. The client encrypts the file in the
+    # browser with a fresh per-file data key and uploads the FENCR blob. The
+    # client may send the RAW data key (base64) here; the server wraps it
+    # immediately with the per-user Fernet key and never persists it in the
+    # clear. ``client_encrypted`` flags that the uploaded object is FENCR.
+    data_key: str | None = None            # raw 32-byte key, base64 (not stored in clear)
+    client_encrypted: bool = False
 
 
 class ConversionJobResponse(BaseModel):
@@ -24,6 +31,10 @@ class ConversionJobResponse(BaseModel):
     error_message: str | None = None
     credits_used: int = 0
     compute_duration_ms: int = 0
+    # Client-side encryption metadata echoed back so the client can confirm its
+    # FENCR blob was registered (and see the wrapped key is stored, not raw).
+    data_key_wrapped: str | None = None
+    client_encrypted: bool = False
 
 
 class ConversionHistoryResponse(BaseModel):

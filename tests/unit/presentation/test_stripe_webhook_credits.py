@@ -100,7 +100,8 @@ def test_checkout_completed_skips_unpaid_sessions() -> None:
             "metadata": {"user_id": "42", "kind": "credit_purchase", "credits": "100"},
         }
         # No DB interaction expected; use a sentinel that would blow up if touched.
-        await webhooks._handle_checkout_completed(None, event)
+        # ``None`` is fine because the unpaid branch returns before touching ``db``.
+        await webhooks._handle_checkout_completed(None, event)  # type: ignore[arg-type]
 
     asyncio.run(_run())
 

@@ -117,11 +117,16 @@ export function ConvertPage() {
 
     setBusy(true);
     try {
-      // Run the full conversion flow: create job, upload file, verify/enqueue.
+      // Run the full conversion flow: encrypt (for files < 1 GB), create job,
+      // upload file, verify/enqueue. The client encrypts the file to a FENCR
+      // blob before upload and passes the data key; if the deployment has no
+      // master key it falls back to plaintext automatically.
       const job = await client.convertWithFile(from, to, file);
 
       // Cache the file against the job id so a later retry can re-upload it
-      // without the user re-selecting the file.
+      // without the user re-selecting the file. We always cache the ORIGINAL
+      // plaintext File — encryption is a per-attempt concern handled inside
+      // convertWithFile, so a retry re-encrypts fresh.
       cacheFileForJob(job.job_id, { file, source: from, target: to });
 
       addJob({

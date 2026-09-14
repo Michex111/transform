@@ -38,4 +38,6 @@ class FakeCreditPort:
         self.consume_calls.append((user_id, period_key, units))
         if self.remaining is not None:
             self.remaining -= units
+        # Clamp at 0 — a credit bucket never goes negative.
+        self.remaining = max(self.remaining or 0, 0)
         return self.remaining
