@@ -1,17 +1,25 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { Check } from "@phosphor-icons/react";
+import { AnimatePresence, motion } from "motion/react";
+import { Check, CaretDown } from "@phosphor-icons/react";
 import { api } from "@/api/client";
 import { useAuth } from "@/auth/AuthContext";
 import { useToast } from "@/auth/ToastContext";
-import { Button, Skeleton } from "@/components/ui";
+import { Button, Card, Skeleton } from "@/components/ui";
 import { Stagger, Item, Reveal } from "@/lib/motion";
 import type { SubscriptionPlanResponse } from "@/api/types";
+
+const FAQS = [
+  { q: "Can I cancel anytime?", a: "Yes. Cancel from Billing and keep your tier until the period ends." },
+  { q: "Do unused credits roll over?", a: "Credits refresh each monthly period on subscription plans." },
+  { q: "What happens to my files after conversion?", a: "Your history is kept for 30 days; files you delete are removed." },
+];
 
 export function PricingPage() {
   const [plans, setPlans] = useState<SubscriptionPlanResponse[]>([]);
   const [loading, setLoading] = useState(true);
   const [checkoutLoading, setCheckoutLoading] = useState<string | null>(null);
+  const [faqOpen, setFaqOpen] = useState<number | null>(0);
   const { error } = useToast();
   const { isAuthenticated } = useAuth();
 
@@ -132,6 +140,43 @@ export function PricingPage() {
         })}
       </Stagger>
       )}
+
+      {/* FAQ — small accordion reusing the Support-page pattern. */}
+      <Card className="mt-16 overflow-hidden">
+        <div className="border-b border-outline px-5 py-4">
+          <h2 className="font-display text-lg font-semibold">Frequently asked</h2>
+        </div>
+        <ul className="divide-y divide-outline">
+          {FAQS.map((f, i) => (
+            <li key={f.q}>
+              <button
+                onClick={() => setFaqOpen(faqOpen === i ? null : i)}
+                className="flex w-full items-center justify-between px-5 py-4 text-left"
+                aria-expanded={faqOpen === i}
+              >
+                <span className="text-sm font-medium text-on-background">{f.q}</span>
+                <CaretDown
+                  size={16}
+                  className={`text-muted transition-transform ${faqOpen === i ? "rotate-180" : ""}`}
+                />
+              </button>
+              <AnimatePresence initial={false}>
+                {faqOpen === i && (
+                  <motion.p
+                    className="px-5 pb-4 text-sm text-muted"
+                    initial={{ height: 0, opacity: 0 }}
+                    animate={{ height: "auto", opacity: 1 }}
+                    exit={{ height: 0, opacity: 0 }}
+                    transition={{ duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
+                  >
+                    {f.a}
+                  </motion.p>
+                )}
+              </AnimatePresence>
+            </li>
+          ))}
+        </ul>
+      </Card>
     </div>
   );
 }

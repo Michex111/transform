@@ -53,7 +53,7 @@ from src.presentation.api.dependencies.service_dependencies import (
     get_minio_url_storage,
     get_transfer_service,
 )
-from src.presentation.api.routers.v1.conversions import _to_response
+from src.presentation.api.routers.v1.conversions import _apply_client_encryption, _to_response
 from src.presentation.schemas.conversion import (
     ConversionMapResponse,
     ConversionJobResponse,
@@ -115,6 +115,7 @@ async def create_conversion_job(
     payload: CreateConversionJobRequest,
     conversion_service: Annotated[ConversionService, Depends(get_conversion_service)],
     cache: Annotated[RedisSessionAdapter, Depends(get_guest_token_cache)],
+    encryption_service: Annotated[FileEncryptionService | None, Depends(get_encryption_service)],
 ) -> GuestJobResponse:
     """Create a guest conversion job and mint its access token."""
     if not payload.source_format or not payload.input_key:
@@ -133,6 +134,9 @@ async def create_conversion_job(
             input_file=payload.input_key,
             user_id=None,
         )
+        # Guest jobs are ownerless; the data key is wrapped under the fixed
+        # "guest" actor so the worker can unwrap it when it converts.
+        _apply_client_encryption(job, payload, encryption_service, "guest")
         await conversion_service.create_conversion_job(job)
 
         guest_token = secrets.token_urlsafe(32)

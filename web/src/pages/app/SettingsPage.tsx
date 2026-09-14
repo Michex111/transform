@@ -4,6 +4,7 @@ import { api } from "@/api/client";
 import { useAuth } from "@/auth/AuthContext";
 import { useToast } from "@/auth/ToastContext";
 import { Button, Card, Field, Skeleton } from "@/components/ui";
+import { Modal } from "@/components/Modal";
 import type { APIKeyListItem } from "@/api/types";
 
 export function SettingsPage() {
@@ -14,6 +15,8 @@ export function SettingsPage() {
   const [loading, setLoading] = useState(true);
   const [newKeyName, setNewKeyName] = useState("");
   const [revealedKey, setRevealedKey] = useState<string | null>(null);
+  const [accountDeleteOpen, setAccountDeleteOpen] = useState(false);
+  const [revokeTarget, setRevokeTarget] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -32,7 +35,9 @@ export function SettingsPage() {
 
   function saveProfile(e: FormEvent) {
     e.preventDefault();
-    success("Profile saved");
+    if (email.trim() !== (user?.email ?? "")) {
+      error("Editing your profile isn't available yet.");
+    }
   }
 
   async function createKey(e: FormEvent) {
@@ -49,14 +54,17 @@ export function SettingsPage() {
     }
   }
 
-  async function revokeKey(id: string) {
-    if (!window.confirm("Revoke this API key? It will stop working immediately.")) return;
+  async function handleRevoke() {
+    if (!revokeTarget) return;
+    const id = revokeTarget;
     try {
       await api.deleteApiKey(id);
       setKeys((prev) => prev.filter((k) => k.id !== id));
       success("API key revoked");
     } catch (err) {
       error(err instanceof Error ? err.message : "Could not revoke API key");
+    } finally {
+      setRevokeTarget(null);
     }
   }
 
@@ -71,9 +79,7 @@ export function SettingsPage() {
   }
 
   function deleteAccount() {
-    if (window.confirm("This will permanently delete your account. Continue?")) {
-      error("Account deletion is not available yet.");
-    }
+    setAccountDeleteOpen(true);
   }
 
   return (
@@ -146,7 +152,7 @@ export function SettingsPage() {
               <li key={k.id} className="flex items-center gap-3 py-2">
                 <span className="min-w-0 flex-1 truncate text-sm text-on-background">{k.name}</span>
                 <span className="font-mono text-xs text-muted">{k.prefix}…</span>
-                <button onClick={() => revokeKey(k.id)} className="text-muted hover:text-error" aria-label={`Revoke ${k.name}`}>
+                <button onClick={() => setRevokeTarget(k.id)} className="text-muted hover:text-error" aria-label={`Revoke ${k.name}`}>
                   <Trash size={16} />
                 </button>
               </li>
@@ -163,6 +169,55 @@ export function SettingsPage() {
           Delete account
         </Button>
       </Card>
+
+      {/* Revoke API key confirmation */}
+      <Modal
+        open={revokeTarget !== null}
+        onClose={() => setRevokeTarget(null)}
+        title="Revoke API key?"
+        maxWidth="max-w-sm"
+      >
+        <p className="text-sm text-on-background">
+          This key will stop working immediately and can't be restored.
+        </p>
+        <div className="mt-6 flex justify-end gap-2">
+          <Button variant="ghost" onClick={() => setRevokeTarget(null)}>
+            Cancel
+          </Button>
+          <Button variant="destructive" onClick={handleRevoke}>
+            Revoke key
+          </Button>
+        </div>
+      </Modal>
+
+      {/* Delete account confirmation */}
+      <Modal
+        open={accountDeleteOpen}
+        onClose={() => setAccountDeleteOpen(false)}
+        title="Delete your account?"
+        description="This permanently deletes your account and all data."
+        maxWidth="max-w-sm"
+      >
+        <p className="text-sm text-on-background">
+          This removes your account, files, and history. This can't be undone.
+        </p>
+        <div className="mt-6 flex justify-end gap-2">
+          <Button variant="ghost" onClick={() => setAccountDeleteOpen(false)}>
+            Cancel
+          </Button>
+          <Button
+            variant="destructive"
+            onClick={() => {
+              setAccountDeleteOpen(false);
+              error(
+                "Account deletion isn't available yet. Contact support to remove your account.",
+              );
+            }}
+          >
+            Delete account
+          </Button>
+        </div>
+      </Modal>
     </div>
   );
 }

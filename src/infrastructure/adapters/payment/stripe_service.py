@@ -53,6 +53,8 @@ class StripeService:
         """Lazily build the StripeClient instance using the secret key."""
         if self._client is None:
             import stripe
+            if self._secret_key is None:
+                raise RuntimeError("Stripe is not configured; cannot build a client.")
             self._client = stripe.StripeClient(self._secret_key)
         return self._client
 

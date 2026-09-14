@@ -80,6 +80,10 @@ class FakeStorage:
         del object_key
         return {"size": 4096, "content_type": "application/pdf"}
 
+    async def read_object_head(self, object_key: str, max_bytes: int = 4096) -> bytes:
+        del object_key, max_bytes
+        return b""
+
     async def remove_object(self, object_key: str) -> bool:
         del object_key
         return True

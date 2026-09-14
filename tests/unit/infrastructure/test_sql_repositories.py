@@ -86,6 +86,42 @@ def test_conversion_job_repo_roundtrip() -> None:
         asyncio.run(_run())
 
 
+def test_conversion_job_repo_client_encryption_roundtrip() -> None:
+    """Client-encryption metadata survives the repo save/load round-trip."""
+    with sqlite_session_factory() as factory:
+
+        async def _run() -> None:
+            async with factory() as session:
+                user = await _create_user(factory)
+                repo = SQLConversionJobRepository(session)
+                job = ConversionJob(
+                    job_id="job-enc",
+                    conversion=ConversionType("pdf", "docx"),
+                    input_file="input.pdf",
+                    object_key="uploads/input.pdf",
+                    user_id=user.id,
+                    client_encrypted=True,
+                    data_key_wrapped="deadbeefcafe",
+                )
+                await repo.save_conversion_job(job)
+
+                fetched = await repo.get_conversion_job("job-enc")
+                assert fetched is not None
+                assert fetched.client_encrypted is True
+                assert fetched.data_key_wrapped == "deadbeefcafe"
+
+                # update_conversion_job persists them too
+                fetched.client_encrypted = False
+                fetched.data_key_wrapped = None
+                await repo.update_conversion_job(fetched)
+                updated = await repo.get_conversion_job("job-enc")
+                assert updated is not None
+                assert updated.client_encrypted is False
+                assert updated.data_key_wrapped is None
+
+        asyncio.run(_run())
+
+
 def test_conversion_job_active_listing() -> None:
     with sqlite_session_factory() as factory:
 

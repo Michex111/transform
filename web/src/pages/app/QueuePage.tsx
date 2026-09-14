@@ -18,7 +18,7 @@ const SORTS: { key: SortKey; label: string }[] = [
   { key: "oldest", label: "Oldest first" },
   { key: "status", label: "By status" },
   { key: "format", label: "By format" },
-  { key: "filename", label: "By filename" },
+  { key: "filename", label: "By name" },
 ];
 
 const STATUS_ORDER: Record<string, number> = {

@@ -1,5 +1,7 @@
 """Tests for the encryption service."""
 
+import base64
+
 import pytest
 from cryptography.fernet import Fernet
 
@@ -188,6 +190,30 @@ class TestStreamingEncryption:
         service.decrypt_file_to(encrypted, decrypted, "user-1")
         assert decrypted.read_bytes() == plain.read_bytes()
 
+    def test_is_encrypted_file_true_for_ciphertext_and_false_for_plaintext(self, tmp_path):
+        """is_encrypted_file must distinguish ciphertext from plaintext objects.
+
+        This is critical because uploads are written to object storage directly
+        from the browser (plaintext) even when a master key is configured; the
+        worker and download path must only decrypt objects that are actually
+        ciphertext, otherwise plaintext uploads fail with a bad-header error and
+        produce 0-byte outputs.
+        """
+        service = _make_service()
+        plain = tmp_path / "upload.pdf"
+        plain.write_bytes(b"%PDF-1.7 real document bytes")
+
+        encrypted = tmp_path / "upload.pdf.enc"
+        service.encrypt_file_to(plain, encrypted, "user-1")
+
+        assert service.is_encrypted_file(encrypted) is True
+        assert service.is_encrypted_file(plain) is False
+
+    def test_is_encrypted_file_missing_path_returns_false(self, tmp_path):
+        service = _make_service()
+        missing = tmp_path / "does-not-exist.bin"
+        assert service.is_encrypted_file(missing) is False
+
     def test_streaming_reuses_master_key_across_services(self):
         key = _make_key()
         svc1 = FileEncryptionService(master_key=key)
@@ -293,3 +319,140 @@ class TestStreamingEncryption:
         assert FileEncryptionService(master_key=key_a).decrypt_bytes(
             ciphertext, "user-1"
         ) == b"format stable"
+
+
+# ---------------------------------------------------------------------------
+# Client-side encryption ("FENCR")
+# ---------------------------------------------------------------------------
+
+class TestClientSideFencrEncryption:
+    """Tests for the browser-produced FENCR decrypt format.
+
+    The FENCR format is produced by WebCrypto in the browser and must be
+    byte-compatible with the Python mirror. The golden vector below is the
+    authoritative cross-language check: re-encrypting the same inputs in the
+    browser must produce the exact blob the server decrypts.
+    """
+
+    # Golden vector (do not change):
+    #   data_key     = bytes([0x42]) * 32
+    #   salt         = bytes(range(1, 17))
+    #   nonce_prefix = bytes([0xAA]) * 8
+    #   chunk_size   = 16
+    #   plaintext    = b"hello world"
+    #   full_blob_b64 = "RkVOQ1IBAAAAEAECAwQFBgcICQoLDA0ODxCqqqqqqqqqqmo21IilUFfrmkg3QRBlt8YA8GfN3r+gZ/Swag=="
+    DATA_KEY_HEX = "4242424242424242424242424242424242424242424242424242424242424242"
+    FILE_KEY_HEX = "1ea3caeecd8f537ce8c168328a16890f718c1689145494b1c23f105d0ec8fef5"
+    GOLDEN_BLOB_B64 = (
+        "RkVOQ1IBAAAAEAECAwQFBgcICQoLDA0ODxCqqqqqqqqqqmo21IilUFfrmkg3QRBlt8YA8GfN3r+gZ/Swag=="
+    )
+
+    def _data_key(self) -> bytes:
+        return bytes.fromhex(self.DATA_KEY_HEX)
+
+    def test_golden_vector_decrypts_to_hello_world(self):
+        """The authoritative cross-language compatibility check."""
+        service = _make_service()
+        blob = base64.b64decode(self.GOLDEN_BLOB_B64)
+
+        plaintext = service.decrypt_fencr_bytes(blob, self._data_key())
+
+        assert plaintext == b"hello world"
+
+    def test_golden_vector_is_fencr_file(self):
+        """The blob must satisfy the FENCR magic probe."""
+        service = _make_service()
+        blob = base64.b64decode(self.GOLDEN_BLOB_B64)
+
+        assert service.is_fencr_file(blob) is True
+
+    def test_is_fencr_file_rejects_plaintext_and_trenc(self):
+        """is_fencr_file must only match the FENCR magic, not other formats."""
+        service = _make_service()
+        assert service.is_fencr_file(b"plain text") is False
+        assert service.is_fencr_file(b"TRENC\x01") is False
+
+    def test_fencr_file_path_roundtrip(self, tmp_path):
+        """Streaming file-based decrypt must reproduce plaintext."""
+        service = _make_service()
+        blob = base64.b64decode(self.GOLDEN_BLOB_B64)
+
+        encrypted = tmp_path / "client-encrypted.bin"
+        decrypted = tmp_path / "decrypted.txt"
+        encrypted.write_bytes(blob)
+
+        service.decrypt_fencr_file(encrypted, decrypted, self._data_key())
+        assert decrypted.read_bytes() == b"hello world"
+
+    def test_fencr_rejects_bad_header(self):
+        """A non-FENCR stream must raise a clear ValueError."""
+        service = _make_service()
+        with pytest.raises(ValueError, match="Not a client-encrypted"):
+            service.decrypt_fencr_bytes(b"not-a-fencr-blob", self._data_key())
+
+    def test_fencr_rejects_unsupported_version(self):
+        """A FENCR blob with a non-v1 version must be rejected."""
+        service = _make_service()
+        blob = bytearray(base64.b64decode(self.GOLDEN_BLOB_B64))
+        blob[5] = 0x02  # version byte
+        with pytest.raises(ValueError, match="Unsupported FENCR version"):
+            service.decrypt_fencr_bytes(bytes(blob), self._data_key())
+
+    def test_fencr_wrong_data_key_detects_tamper(self):
+        """Decrypting with the wrong data key must fail authentication."""
+        service = _make_service()
+        blob = base64.b64decode(self.GOLDEN_BLOB_B64)
+        wrong_key = b"\x00" * 32
+        with pytest.raises(Exception):
+            service.decrypt_fencr_bytes(blob, wrong_key)
+
+    def test_fencr_multi_chunk_roundtrip(self):
+        """A FENCR blob split across several chunks must decrypt fully."""
+        service = _make_service()
+        data_key = self._data_key()
+        salt = bytes(range(1, 17))
+        nonce_prefix = bytes([0xAA]) * 8
+        chunk_size = 16
+        plaintext = b"hello world, hello again, more data"  # > 1 chunk
+
+        # Build a multi-chunk FENCR blob in Python (mirroring WebCrypto).
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+
+        file_key = HKDF(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=salt,
+            info=b"transform-client-v1:enc",
+        ).derive(data_key)
+        cipher = AESGCM(file_key)
+        aad = b"transform-client-v1"
+
+        header = b"FENCR" + b"\x01" + chunk_size.to_bytes(4, "big") + salt + nonce_prefix
+        body = b""
+        counter = 0
+        for i in range(0, len(plaintext), chunk_size):
+            chunk = plaintext[i:i + chunk_size]
+            nonce = nonce_prefix + counter.to_bytes(4, "big")
+            body += cipher.encrypt(nonce, chunk, aad)
+            counter += 1
+        blob = header + body
+
+        assert service.decrypt_fencr_bytes(blob, data_key) == plaintext
+
+    def test_fencr_iter_decrypt_streams_in_chunks(self):
+        """iter_decrypt_fencr yields identical plaintext via a reader callback."""
+        service = _make_service()
+        blob = base64.b64decode(self.GOLDEN_BLOB_B64)
+
+        pos = 0
+
+        def read_n(n: int) -> bytes:
+            nonlocal pos
+            chunk = blob[pos:pos + n]
+            pos += len(chunk)
+            return chunk
+
+        decrypted = b"".join(service.iter_decrypt_fencr(read_n, self._data_key()))
+        assert decrypted == b"hello world"

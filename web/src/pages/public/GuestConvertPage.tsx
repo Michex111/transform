@@ -7,6 +7,7 @@ import { useToast } from "@/auth/ToastContext";
 import { FormatPicker } from "@/components/FormatPicker";
 import { Button, Card, FormatMorph, FormatChip, ProgressBar, StatusBadge } from "@/components/ui";
 import { formatDateTime, formatMeta } from "@/lib/format";
+import { friendlyErrorMessage } from "@/lib/errorMessages";
 import { useGuestHistory } from "@/lib/useGuestHistory";
 import type { GuestHistoryItem } from "@/api/types";
 
@@ -103,16 +104,26 @@ export function GuestConvertPage() {
     setDragOver(false);
     const dropped = e.dataTransfer.files?.[0];
     if (!dropped) return;
-    // Infer the source format from the file extension and switch to it if it's
-    // a valid source, so the job is created with the correct source format.
-    const ext = dropped.name.split(".").pop()?.toLowerCase();
-    if (ext && allowedSources.includes(ext)) {
-      setFrom(ext);
-    } else if (ext) {
-      error(`".${ext}" isn't a supported source format.`);
-      return;
-    }
+    if (!validateFileFormat(dropped)) return;
     setFile(dropped);
+  }
+
+  /**
+   * Validate that a picked/dropped file's extension matches the selected source
+   * format, so a mismatch is rejected before upload instead of failing
+   * mid-conversion (and leaking a server-side error like a temp path).
+   */
+  function validateFileFormat(file: File): boolean {
+    const ext = file.name.split(".").pop()?.toLowerCase();
+    if (!ext) return true;
+    if (ext === from) return true;
+    // Allow switching the source format to match the file if it's a valid one.
+    if (allowedSources.includes(ext)) {
+      setFrom(ext);
+      return true;
+    }
+    error(`".${ext}" isn't a supported source format for this conversion.`);
+    return false;
   }
 
   async function startConversion() {
@@ -127,20 +138,12 @@ export function GuestConvertPage() {
 
     setBusy(true);
     try {
-      // Full guest flow: create job → upload session → PUT bytes → verify/enqueue.
-      const job = await client.guestCreateJob({
-        source_format: from,
-        target_format: to,
-        input_key: file.name,
-      });
+      // Full guest flow: encrypt (for files < 1 GB) → create job → upload
+      // session → PUT bytes → verify/enqueue. The client encrypts the file to
+      // a FENCR blob before upload and passes the data key; if the deployment
+      // has no master key it falls back to plaintext automatically.
+      const job = await client.guestConvertWithFile(from, to, file);
       const guestToken = job.guest_token;
-
-      const upload = await client.guestCreateUploadSession({
-        file_extension: from,
-        file_name: file.name,
-      });
-      await client.guestPutToPresignedUrl(upload.upload_url, file);
-      await client.guestVerifyUpload(upload.upload_id, job.job_id, guestToken);
 
       addItem({
         job_id: job.job_id,
@@ -281,7 +284,16 @@ export function GuestConvertPage() {
               type="file"
               accept={`.${from}`}
               className="hidden"
-              onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+              onChange={(e) => {
+                const picked = e.target.files?.[0] ?? null;
+                if (picked && !validateFileFormat(picked)) {
+                  // Reject mismatched files before upload; clear the input so a
+                  // corrected re-pick triggers a fresh change event.
+                  e.target.value = "";
+                  return;
+                }
+                setFile(picked);
+              }}
             />
           </div>
 
@@ -329,7 +341,7 @@ export function GuestConvertPage() {
                       <span className="font-mono text-[10px] text-muted">{formatDateTime(job.createdAt)}</span>
                     </div>
                     {job.errorMessage && (
-                      <p className="mt-1 truncate font-mono text-xs text-error">{job.errorMessage}</p>
+                      <p className="mt-1 truncate text-xs text-error">{friendlyErrorMessage(job.errorMessage)}</p>
                     )}
                   </div>
                   <div className="flex items-center gap-3">

@@ -130,6 +130,10 @@ class JobStreamConsumer(RedisStreamQueue):
             output_file="",  # This will be set later when the job is completed
             status=JobStatus.PENDING,
             user_id=int(job["user_id"]) if job.get("user_id") else None,
+            # Client-side (FENCR) encryption metadata. ``client_encrypted`` is a
+            # "true"/"false" string in the stream; parse it back to a bool.
+            client_encrypted=JobMessage._to_bool(job.get("client_encrypted")),
+            data_key_wrapped=str(job["data_key_wrapped"]) if job.get("data_key_wrapped") else None,
         )
 
         return str(message_id), conversation_job

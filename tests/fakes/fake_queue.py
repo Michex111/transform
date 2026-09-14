@@ -31,5 +31,11 @@ class FakeQueuePort:
     async def dead_letter_job(self, message_id: str, error_message: str, job: ConversionJob) -> None:
         self.dead_lettered.append((message_id, error_message, job))
 
+    async def reclaim_stale_jobs(self, min_idle_ms: int = 60_000, count: int = 20) -> int:
+        # Best-effort reclaim of pending messages. The fake re-queues them so
+        # they remain fetchable.
+        del min_idle_ms, count
+        return 0
+
     def preload(self, job: ConversionJob, message_id: str = "message-1") -> None:
         self.pending.append((message_id, job))

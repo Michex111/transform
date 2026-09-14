@@ -1,5 +1,7 @@
 import { Link, Outlet, useLocation } from "react-router-dom";
+import { useEffect, useState } from "react";
 import { motion } from "motion/react";
+import { List, X } from "@phosphor-icons/react";
 import { Logo } from "@/components/ui";
 
 export function PublicLayout() {
@@ -24,26 +26,38 @@ export function PublicLayout() {
 }
 
 function PublicHeader() {
+  const location = useLocation();
+  const [menuOpen, setMenuOpen] = useState(false);
+
+  // Close the mobile menu when navigating between pages.
+  useEffect(() => {
+    setMenuOpen(false);
+  }, [location.pathname]);
+
+  const navLinks = [
+    { to: "/convert", label: "Convert" },
+    { to: "/pricing", label: "Pricing" },
+    { to: "/security", label: "Security" },
+  ];
+
   return (
     <header className="sticky top-0 z-30 border-b border-outline bg-background/80 backdrop-blur">
       <div className="mx-auto flex h-16 max-w-6xl items-center justify-between px-4 sm:px-6">
         <Link to="/" aria-label="Transform home">
           <Logo />
         </Link>
-        <nav className="flex items-center gap-4" aria-label="Public">
-          <Link to="/convert" className="text-sm font-medium text-muted hover:text-on-background">
-            Convert
-          </Link>
-          <Link to="/pricing" className="text-sm font-medium text-muted hover:text-on-background">
-            Pricing
-          </Link>
-          <Link
-            to="/security"
-            className="text-sm font-medium text-muted hover:text-on-background"
-            aria-label="Security"
-          >
-            Security
-          </Link>
+
+        {/* Desktop nav — hidden below `md`, replaced by the mobile menu. */}
+        <nav className="hidden items-center gap-4 md:flex" aria-label="Public">
+          {navLinks.map((link) => (
+            <Link
+              key={link.to}
+              to={link.to}
+              className="text-sm font-medium text-muted hover:text-on-background"
+            >
+              {link.label}
+            </Link>
+          ))}
           <Link
             to="/login"
             className="rounded-lg border border-outline-strong px-4 py-2 text-sm font-semibold text-on-background transition-colors hover:bg-surface-variant"
@@ -57,7 +71,53 @@ function PublicHeader() {
             Get started
           </Link>
         </nav>
+
+        {/* Mobile menu toggle — only visible on small screens. */}
+        <button
+          type="button"
+          onClick={() => setMenuOpen((v) => !v)}
+          aria-label={menuOpen ? "Close menu" : "Open menu"}
+          aria-expanded={menuOpen}
+          aria-haspopup="menu"
+          className="flex h-10 w-10 items-center justify-center rounded-lg text-on-background transition-colors hover:bg-surface-variant md:hidden"
+        >
+          {menuOpen ? <X size={22} /> : <List size={22} />}
+        </button>
       </div>
+
+      {/* Mobile menu — collapsible panel so the nav never overflows at 375px. */}
+      {menuOpen && (
+        <nav
+          className="border-t border-outline bg-background px-4 py-3 md:hidden"
+          aria-label="Public"
+        >
+          <div className="flex flex-col gap-1">
+            {navLinks.map((link) => (
+              <Link
+                key={link.to}
+                to={link.to}
+                className="rounded-lg px-3 py-2 text-sm font-medium text-muted transition-colors hover:bg-surface-variant hover:text-on-background"
+              >
+                {link.label}
+              </Link>
+            ))}
+            <div className="mt-2 flex flex-col gap-2">
+              <Link
+                to="/login"
+                className="rounded-lg border border-outline-strong px-4 py-2 text-center text-sm font-semibold text-on-background transition-colors hover:bg-surface-variant"
+              >
+                Sign in
+              </Link>
+              <Link
+                to="/register"
+                className="rounded-lg bg-primary px-4 py-2 text-center text-sm font-semibold text-on-primary transition-colors hover:bg-primary/90"
+              >
+                Get started
+              </Link>
+            </div>
+          </div>
+        </nav>
+      )}
     </header>
   );
 }
@@ -75,9 +135,15 @@ function PublicFooter() {
                 {it.label}
               </Link>
             ) : (
-              <a href="#" className={linkClass}>
+              /* No real route exists yet — render as inert, non-clickable text
+                 instead of a dead `href="#"` link. */
+              <span
+                className="cursor-default text-sm text-muted"
+                title="Coming soon"
+                aria-disabled="true"
+              >
                 {it.label}
-              </a>
+              </span>
             )}
           </li>
         ))}

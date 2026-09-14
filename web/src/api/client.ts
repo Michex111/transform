@@ -1,4 +1,5 @@
 import { downloadFromUrl, saveBlob } from '@/lib/download'
+import { encryptFileToFencr, fencrDataKeyToBase64 } from '@/lib/fencr'
 import type {
   APIKeyCreateRequest,
   APIKeyCreateResponse,
@@ -45,6 +46,25 @@ const TOKEN_KEY = 'transform_access_token'
 const REFRESH_KEY = 'transform_refresh_token'
 
 /**
+ * FENCR client-side encryption is streamed chunk-by-chunk with WebCrypto, so it
+ * can handle large files in principle, but the backend contract targets inputs
+ * under 1 GB. Files at or above this limit skip encryption and go plaintext.
+ */
+const CLIENT_ENCRYPTION_LIMIT_BYTES = 1024 * 1024 * 1024 // 1 GB
+
+/** The exact detail the backend returns when `ENCRYPTION_MASTER_KEY` is unset. */
+const CLIENT_ENCRYPTION_DISABLED_MSG = 'Client-side encryption is not enabled on this deployment'
+
+/**
+ * True when an error is the backend rejecting `client_encrypted: true` because
+ * the master key isn't configured. We sniff the message (the backend returns it
+ * as the 400 detail) so the caller can gracefully re-run the flow plaintext.
+ */
+function isClientEncryptionDisabledError(err: unknown): boolean {
+  return err instanceof Error && err.message.includes(CLIENT_ENCRYPTION_DISABLED_MSG)
+}
+
+/**
  * Resolve a server-relative URL returned in an API payload (e.g. a streaming
  * `download_url`) to an absolute fetch path.
  *
@@ -56,7 +76,12 @@ const REFRESH_KEY = 'transform_refresh_token'
  */
 function resolveServerPath(path: string): string {
   if (/^https?:\/\//i.test(path)) return path
-  return `${API_BASE}${path.startsWith('/') ? path : `/${path}`}`
+  // Strip any leading `/api`/`/api/` from the returned path. The backend emits
+  // download URLs already prefixed with `/api/…`, and `API_BASE` also carries
+  // the `/api` prefix, so naively concatenating yields a doubled `/api/api/…`.
+  // We keep a single copy and never double-prefix.
+  const withoutApi = path.replace(/^\/api(?=\/|$)/, '')
+  return `${API_BASE}${withoutApi.startsWith('/') ? withoutApi : `/${withoutApi}`}`
 }
 
 class ApiClient {
@@ -257,6 +282,15 @@ class ApiClient {
   /**
    * Run the full "normal conversion" flow with a file: create the job, open an
    * upload session, PUT the bytes to the presigned URL, then verify/enqueue.
+   *
+   * Client-side encryption (FENCR): for files under the 1 GB limit, the file is
+   * encrypted in the browser into a FENCR blob BEFORE upload, and the per-file
+   * data key (base64) + `client_encrypted: true` are passed to the backend with
+   * the job. If the deployment has no `ENCRYPTION_MASTER_KEY` set, the backend
+   * rejects the encrypted request with "Client-side encryption is not enabled";
+   * we then transparently retry WITHOUT encryption using the original file, so
+   * the feature degrades gracefully. Files at/over 1 GB keep the plaintext path.
+   *
    * Used for the retry fallback when a job's input object is gone from storage.
    */
   async convertWithFile(
@@ -266,17 +300,46 @@ class ApiClient {
     fileName?: string,
   ): Promise<ConversionJobResponse> {
     const name = fileName || (file instanceof File ? file.name : 'file')
-    // 1. Create the conversion job.
-    const job = await this.createConversion({
-      source_format: source,
-      target_format: target,
-      input_key: name,
-    })
+    // Client-side encryption requires the file to fit under the FENCR streaming
+    // limit. Larger files go straight down the plaintext path.
+    const canEncrypt = file.size < CLIENT_ENCRYPTION_LIMIT_BYTES
+
+    // Encrypt first (before creating the job) so a Master-Key-unset failure can
+    // be detected before we ever create an upload session or PUT the blob.
+    const fencr = canEncrypt ? await encryptFileToFencr(file) : null
+
+    const makeJob = (encrypted: boolean) =>
+      this.createConversion({
+        source_format: source,
+        target_format: target,
+        input_key: name,
+        ...(encrypted && fencr
+          ? { data_key: fencrDataKeyToBase64(fencr.dataKey), client_encrypted: true }
+          : {}),
+      })
+
+    let job: ConversionJobResponse
+    try {
+      job = await makeJob(Boolean(fencr))
+    } catch (err) {
+      // The backend only rejects `client_encrypted: true` when the master key is
+      // unset. Fall back to plaintext in that case so the feature degrades
+      // gracefully instead of erroring the whole conversion.
+      if (fencr && isClientEncryptionDisabledError(err)) {
+        job = await makeJob(false)
+      } else {
+        throw err
+      }
+    }
+
+    // The object we PUT: the FENCR ciphertext when encrypted, else the original.
+    const uploadBytes = fencr ? fencr.encrypted : file
+
     // 2. Create an upload session.
     const upload = await this.createUploadSession({ file_extension: source, file_name: name })
     // 3. Upload bytes directly to the presigned URL (no Content-Type header —
     //    the URL is signed without one, so sending it would 403 on B2/S3).
-    await this.putToPresignedUrl(upload.upload_url, file)
+    await this.putToPresignedUrl(upload.upload_url, uploadBytes)
     // 4. Verify upload completion and enqueue the job.
     await this.verifyUpload(upload.upload_id, job.job_id)
     return job
@@ -357,6 +420,59 @@ class ApiClient {
       `/guest/uploads/sessions/${uploadId}/verify?job_id=${encodeURIComponent(jobId)}&guest_token=${encodeURIComponent(guestToken)}`,
       { method: 'POST' },
     )
+
+  /**
+   * Run the full guest conversion flow with a file: create the job, open an
+   * upload session, PUT the bytes to the presigned URL, then verify/enqueue.
+   *
+   * Mirrors `convertWithFile`'s client-side FENCR encryption + graceful
+   * fallback: files under 1 GB are encrypted in the browser before upload and
+   * the data key (base64) + `client_encrypted: true` are sent with the job. If
+   * the deployment has no master key the backend returns "Client-side encryption
+   * is not enabled", and we retry once plaintext. Returns the created job.
+   */
+  async guestConvertWithFile(
+    source: string,
+    target: string,
+    file: Blob,
+    fileName?: string,
+  ): Promise<GuestJobResponse> {
+    const name = fileName || (file instanceof File ? file.name : 'file')
+    const canEncrypt = file.size < CLIENT_ENCRYPTION_LIMIT_BYTES
+    const fencr = canEncrypt ? await encryptFileToFencr(file) : null
+
+    const makeJob = (encrypted: boolean) =>
+      this.guestCreateJob({
+        source_format: source,
+        target_format: target,
+        input_key: name,
+        ...(encrypted && fencr
+          ? { data_key: fencrDataKeyToBase64(fencr.dataKey), client_encrypted: true }
+          : {}),
+      })
+
+    let job: GuestJobResponse
+    try {
+      job = await makeJob(Boolean(fencr))
+    } catch (err) {
+      if (fencr && isClientEncryptionDisabledError(err)) {
+        job = await makeJob(false)
+      } else {
+        throw err
+      }
+    }
+
+    const guestToken = job.guest_token
+    const uploadBytes = fencr ? fencr.encrypted : file
+
+    const upload = await this.guestCreateUploadSession({
+      file_extension: source,
+      file_name: name,
+    })
+    await this.guestPutToPresignedUrl(upload.upload_url, uploadBytes)
+    await this.guestVerifyUpload(upload.upload_id, job.job_id, guestToken)
+    return job
+  }
 
   /** Fetch a single guest job by id + token. */
   guestGetJob = (jobId: string, guestToken: string) =>

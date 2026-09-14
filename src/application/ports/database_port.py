@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Protocol, Optional
 from src.domain.conversions.entities.conversion_job import ConversionJob
 from src.domain.security.enitities.api_key import APIKey
@@ -24,8 +25,18 @@ class ConversionJobRepositoryPort(ConversionJobWriteRepositoryPort, Protocol):
         user_id: int,
         offset: int,
         limit: int,
+        since: datetime | None = None,
     ) -> tuple[list[ConversionJob], int]:
-        """Return the user's job history (newest first) plus the total count."""
+        """Return the user's job history (newest first) plus the total count.
+
+        When ``since`` is provided, only jobs created on/after that timestamp
+        are returned (used for the time-range filter on the History page).
+        """
+        ...
+
+    async def delete_job(self, job_id: str, user_id: int) -> bool:
+        """Delete a single job owned by ``user_id``. Returns True when a row was
+        removed; False when the job is missing or not owned by the caller."""
         ...
 
     async def list_user_active_jobs(

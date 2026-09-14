@@ -31,6 +31,8 @@ class SQLConversionJobRepository:
             error_message=job_data.error_message,
             compute_duration_ms=job_data.compute_duration_ms,
             credits_used=job_data.credits_used,
+            data_key_wrapped=job_data.data_key_wrapped,
+            client_encrypted=job_data.client_encrypted,
         )
         self.session.add(job_model)
         await self.session.commit()
@@ -50,6 +52,8 @@ class SQLConversionJobRepository:
                 error_message=job.error_message,
                 compute_duration_ms=job.compute_duration_ms,
                 credits_used=job.credits_used,
+                data_key_wrapped=job.data_key_wrapped,
+                client_encrypted=job.client_encrypted,
                 updated_at=datetime.now(UTC),
             )
         )
@@ -181,4 +185,6 @@ class SQLConversionJobRepository:
             compute_duration_ms=job_model.compute_duration_ms,
             credits_used=job_model.credits_used,
             user_id=job_model.user_id,
+            data_key_wrapped=job_model.data_key_wrapped,
+            client_encrypted=job_model.client_encrypted,
         )

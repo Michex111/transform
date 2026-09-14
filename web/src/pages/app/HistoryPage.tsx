@@ -11,7 +11,39 @@ import { Modal } from "@/components/Modal";
 import { Button, Card, FormatChip, StatusBadge } from "@/components/ui";
 import { formatDateTime } from "@/lib/format";
 
-const FILTERS = ["pdf", "docx", "xlsx", "png", "mp3", "mp4"] as const;
+const PRIMARY_FORMATS = ["pdf", "docx", "xlsx", "png"] as const;
+const MORE_FORMATS = ["mp3", "mp4"] as const;
+
+const STATUS_KEY = "historyPageStatus";
+/** The only filter values the status dropdown can take. */
+const VALID_STATUSES = ["all", "COMPLETED", "PROCESSING", "PENDING", "FAILED"] as const;
+type StatusFilter = (typeof VALID_STATUSES)[number];
+
+/**
+ * Read a key from localStorage, tolerating environments where storage is
+ * blocked or unavailable (private mode, sandboxed preview ifranes, disabled
+ * cookies). Mirrors JobsContext's defensive localStorage access.
+ */
+function readStoredStatus(): StatusFilter {
+  try {
+    const raw = localStorage.getItem(STATUS_KEY);
+    return (VALID_STATUSES as readonly string[]).includes(raw ?? "")
+      ? (raw as StatusFilter)
+      : "all";
+  } catch {
+    return "all";
+  }
+}
+
+/** Persist the status filter, ignoring storage failures so a blocked
+ *  localStorage never breaks the page. */
+function writeStoredStatus(status: StatusFilter): void {
+  try {
+    localStorage.setItem(STATUS_KEY, status);
+  } catch {
+    /* storage unavailable — persistence is best-effort */
+  }
+}
 
 interface HistoryRowProps {
   job: UiJob;
@@ -24,7 +56,12 @@ interface HistoryRowProps {
  * Memoized history row. Keyed by stable props (job id + callback identities) so
  * a single SSE progress tick on one job does not re-render every other row.
  */
-const HistoryRow = memo(function HistoryRow({ job, onDownload, onRetry, onDelete }: HistoryRowProps) {
+const HistoryRow = memo(function HistoryRow({
+  job,
+  onDownload,
+  onRetry,
+  onDelete,
+}: HistoryRowProps) {
   return (
     <li className="grid grid-cols-[1fr_auto] items-center gap-4 px-5 py-3 transition-colors hover:bg-surface-variant/50 md:grid-cols-[2fr_1fr_1fr_auto]">
       <span className="min-w-0 truncate text-sm text-on-background">
@@ -78,13 +115,17 @@ export function HistoryPage() {
   const { success, error } = useToast();
   const navigate = useNavigate();
   const [format, setFormat] = useState<string | null>(null);
-  const [status, setStatus] = useState<string>("all");
+  const [status, setStatus] = useState<StatusFilter>(readStoredStatus);
   const [range, setRange] = useState<string>("all");
   const [deleteTarget, setDeleteTarget] = useState<UiJob | null>(null);
+  const [showMoreFormats, setShowMoreFormats] = useState(false);
 
-  // Load persisted history from the server on mount, and re-fetch whenever
-  // the time-range filter changes. "all" omits the `range` query param.
-  // Re-fetch history whenever the time-range filter changes.
+  // Persist the status filter to localStorage so it survives a reload. Safe
+  // writes (never throw) and validated reads (never produce an invalid filter).
+  useEffect(() => {
+    writeStoredStatus(status);
+  }, [status]);
+
   useEffect(() => {
     refresh(range === "all" ? undefined : range);
   }, [refresh, range]);
@@ -110,7 +151,11 @@ export function HistoryPage() {
         success("History record deleted");
       } catch (err) {
         setDeleteTarget(null);
-        error(err instanceof Error ? err.message : "Could not delete history record");
+        error(
+          err instanceof Error
+            ? err.message
+            : "Could not delete history record",
+        );
       }
     },
     [client, removeJob, success, error],
@@ -120,12 +165,18 @@ export function HistoryPage() {
     async (job: UiJob) => {
       // 1. If the input object is gone from storage, fall back to a full
       //    re-upload via the normal conversion route.
-      const exists = await client.objectExists(job.object_key || job.input_file);
+      const exists = await client.objectExists(
+        job.object_key || job.input_file,
+      );
       if (!exists) {
         const cached = getCachedFile(job.job_id);
         if (cached) {
           try {
-            const newJob = await client.convertWithFile(cached.source, cached.target, cached.file);
+            const newJob = await client.convertWithFile(
+              cached.source,
+              cached.target,
+              cached.file,
+            );
             updateJob(job.job_id, {
               ...newJob,
               fileName: cached.file.name,
@@ -136,7 +187,9 @@ export function HistoryPage() {
             dropCachedFile(job.job_id);
             success("Input file was missing — re-uploaded and re-queued.");
           } catch (err) {
-            error(err instanceof Error ? err.message : "Could not re-upload file");
+            error(
+              err instanceof Error ? err.message : "Could not re-upload file",
+            );
           }
           return;
         }
@@ -144,17 +197,26 @@ export function HistoryPage() {
         navigate("/app/convert", {
           state: { source: job.source_format, target: job.target_format },
         });
-        error("The input file is no longer in storage. Re-select it to convert.");
+        error(
+          "The input file is no longer in storage. Re-select it to convert.",
+        );
         return;
       }
 
       // 2. Input still exists — re-enqueue server-side without re-uploading.
       try {
         const updated = await client.retryJob(job.job_id);
-        updateJob(job.job_id, { status: "PENDING", progress: 0, output_file: updated.output_file, download_url: updated.download_url });
+        updateJob(job.job_id, {
+          status: "PENDING",
+          progress: 0,
+          output_file: updated.output_file,
+          download_url: updated.download_url,
+        });
         success("Conversion re-queued — tracking it now.");
       } catch (err) {
-        error(err instanceof Error ? err.message : "Could not retry conversion");
+        error(
+          err instanceof Error ? err.message : "Could not retry conversion",
+        );
       }
     },
     [client, navigate, updateJob, success, error],
@@ -162,7 +224,8 @@ export function HistoryPage() {
 
   const filtered = useMemo(() => {
     return jobs.filter((j) => {
-      if (format && j.source_format !== format && j.target_format !== format) return false;
+      if (format && j.source_format !== format && j.target_format !== format)
+        return false;
       if (status !== "all" && j.status !== status) return false;
       return true;
     });
@@ -178,7 +241,7 @@ export function HistoryPage() {
       {/* Filters */}
       <div className="flex flex-wrap items-center gap-2">
         <div className="flex flex-wrap gap-2">
-          {FILTERS.map((f) => (
+          {PRIMARY_FORMATS.map((f) => (
             <button
               key={f}
               onClick={() => setFormat(format === f ? null : f)}
@@ -191,6 +254,42 @@ export function HistoryPage() {
               {f.toUpperCase()}
             </button>
           ))}
+          {/* A chip from the “more” set that is currently active must ALWAYS
+              stay visible; the toggle only reveals the remaining ones. */}
+          {MORE_FORMATS.filter((f) => format === f).map((f) => (
+            <button
+              key={f}
+              onClick={() => setFormat(format === f ? null : f)}
+              className={`rounded-full border px-3 py-1 text-xs font-semibold transition-colors ${
+                format === f
+                  ? "border-primary bg-primary-container text-on-primary-container"
+                  : "border-outline-strong text-muted hover:bg-surface-variant"
+              }`}
+            >
+              {f.toUpperCase()}
+            </button>
+          ))}
+          {showMoreFormats &&
+            MORE_FORMATS.filter((f) => format !== f).map((f) => (
+              <button
+                key={f}
+                onClick={() => setFormat(format === f ? null : f)}
+                className={`rounded-full border px-3 py-1 text-xs font-semibold transition-colors ${
+                  format === f
+                    ? "border-primary bg-primary-container text-on-primary-container"
+                    : "border-outline-strong text-muted hover:bg-surface-variant"
+                }`}
+              >
+                {f.toUpperCase()}
+              </button>
+            ))}
+          <button
+            onClick={() => setShowMoreFormats((v) => !v)}
+            aria-expanded={showMoreFormats}
+            className="rounded-full border border-outline-strong px-3 py-1 text-xs font-semibold text-muted hover:bg-surface-variant"
+          >
+            {showMoreFormats ? "Less" : "More formats"}
+          </button>
         </div>
         <div className="ml-auto flex flex-wrap items-center gap-2">
           <Dropdown
@@ -232,9 +331,16 @@ export function HistoryPage() {
 
         {filtered.length === 0 ? (
           <div className="px-5 py-16 text-center">
-            <p className="font-display text-lg font-semibold">Nothing here yet</p>
-            <p className="mt-1 text-sm text-muted">Completed and failed conversions will show up here.</p>
-            <Link to="/app/convert" className="mt-4 inline-block text-sm font-medium text-primary hover:underline">
+            <p className="font-display text-lg font-semibold">
+              Nothing here yet
+            </p>
+            <p className="mt-1 text-sm text-muted">
+              Completed and failed conversions will show up here.
+            </p>
+            <Link
+              to="/app/convert"
+              className="mt-4 inline-block text-sm font-medium text-primary hover:underline"
+            >
               Convert a file
             </Link>
           </div>
@@ -258,17 +364,24 @@ export function HistoryPage() {
         open={deleteTarget !== null}
         onClose={() => setDeleteTarget(null)}
         title="Delete history record?"
-        description={deleteTarget ? (deleteTarget.fileName ?? deleteTarget.input_file) : undefined}
+        description={
+          deleteTarget
+            ? (deleteTarget.fileName ?? deleteTarget.input_file)
+            : undefined
+        }
       >
         <p className="text-sm text-on-background">
-          This will permanently remove this conversion from your history. This cannot be
-          undone.
+          This will permanently remove this conversion from your history. This
+          cannot be undone.
         </p>
         <div className="mt-6 flex justify-end gap-2">
           <Button variant="ghost" onClick={() => setDeleteTarget(null)}>
             Cancel
           </Button>
-          <Button variant="destructive" onClick={() => deleteTarget && handleDelete(deleteTarget)}>
+          <Button
+            variant="destructive"
+            onClick={() => deleteTarget && handleDelete(deleteTarget)}
+          >
             Delete
           </Button>
         </div>

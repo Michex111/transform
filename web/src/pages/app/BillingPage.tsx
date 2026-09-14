@@ -4,6 +4,7 @@ import { Coins } from "@phosphor-icons/react";
 import { useAuth } from "@/auth/AuthContext";
 import { useToast } from "@/auth/ToastContext";
 import { Button, Card, Skeleton, SkeletonText } from "@/components/ui";
+import { Modal } from "@/components/Modal";
 import { formatDate } from "@/lib/format";
 import type {
   CreditBalanceResponse,
@@ -23,6 +24,8 @@ export function BillingPage() {
   const [history, setHistory] = useState<CreditTransactionResponse[]>([]);
   const [loading, setLoading] = useState(true);
   const [portalLoading, setPortalLoading] = useState(false);
+  const [cancelOpen, setCancelOpen] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
 
   // Show feedback when the user returns from Stripe-hosted Checkout or the
   // Customer Portal, then strip the query params so a refresh doesn't re-show it.
@@ -112,14 +115,18 @@ export function BillingPage() {
   }
 
   async function cancel() {
-    if (!window.confirm("Cancel your subscription? You'll keep your tier until the period ends.")) return;
+    if (cancelling) return;
+    setCancelling(true);
     try {
       await client.cancelSubscription();
       const p = await client.subscriptionStatus();
       setPlan(p);
       success("Subscription cancelled");
+      setCancelOpen(false);
     } catch (err) {
       error(err instanceof Error ? err.message : "Could not cancel subscription");
+    } finally {
+      setCancelling(false);
     }
   }
 
@@ -154,7 +161,7 @@ export function BillingPage() {
                 {portalLoading ? "Opening…" : "Manage subscription"}
               </Button>
               {plan && plan.tier !== "FREE" && (
-                <Button variant="destructive" onClick={cancel}>
+                <Button variant="destructive" onClick={() => setCancelOpen(true)}>
                   Cancel subscription
                 </Button>
               )}
@@ -234,6 +241,28 @@ export function BillingPage() {
           </ul>
         )}
       </Card>
+
+      {/* Cancel subscription confirmation */}
+      <Modal
+        open={cancelOpen}
+        onClose={() => {
+          if (!cancelling) setCancelOpen(false);
+        }}
+        title="Cancel subscription?"
+        maxWidth="max-w-sm"
+      >
+        <p className="text-sm text-on-background">
+          You'll keep your current tier until the period ends.
+        </p>
+        <div className="mt-6 flex justify-end gap-2">
+          <Button variant="ghost" onClick={() => setCancelOpen(false)} disabled={cancelling}>
+            Cancel
+          </Button>
+          <Button variant="destructive" onClick={cancel} disabled={cancelling}>
+            {cancelling ? "Cancelling…" : "Cancel subscription"}
+          </Button>
+        </div>
+      </Modal>
     </div>
   );
 }

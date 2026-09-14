@@ -51,6 +51,44 @@ DEFAULT_CHUNK_SIZE = 1024 * 1024  # 1 MiB chunks
 # replayed/decrypted under a different application context or user identity.
 _APP_AAD_PREFIX = b"transform-v1:"
 
+# ---------------------------------------------------------------------------
+# Client-side encryption format ("FENCR" v1)
+#
+# The browser (WebCrypto) encrypts files BEFORE upload with a NEW format so the
+# server never sees plaintext content. This is the mirror of the JS format and
+# is byte-compatible with it — verified against a fixed golden vector.
+#
+#   header = MAGIC("FENCR") + VERSION(\x01) + chunk_size u32 BE (4)
+#            + salt (16) + nonce_prefix (8)                    # 34 bytes
+#   blob   = header + for each chunk: AESGCM_encrypt(nonce, chunk, AAD)
+#
+#   file_key = HKDF(SHA-256, length=32, salt=salt, info=b"transform-client-v1:enc")
+#   aad      = b"transform-client-v1"
+#   nonce    = nonce_prefix + counter.to_bytes(4, "big")    # counter starts at 0
+#
+# The client generates a random 32-byte ``data_key``. The server NEVER persists
+# it in the clear: it wraps the raw key with the existing per-user Fernet key
+# (``encrypt_file`` + ``derive_user_key``) and stores only the ciphertext. The
+# worker unwraps it with ``decrypt_file`` to recover the raw key for FENCR
+# decryption before conversion.
+#
+# .. note::
+#   This is client-side / zero-knowledge encryption: the server only ever has
+#   the wrapped data key and the FENCR ciphertext, never the plaintext content
+#   nor the raw data key at rest.
+# ---------------------------------------------------------------------------
+_FENCR_MAGIC = b"FENCR"
+_FENCR_VERSION = b"\x01"
+_FENCR_SALT_LEN = 16
+_FENCR_NONCE_PREFIX_LEN = 8
+# GCM tag length in bytes (AES-GCM appends a 16-byte tag to each ciphertext).
+_FENCR_TAG_LEN = 16
+# AAD bound into AES-GCM for the client-side format.
+_FENCR_AAD = b"transform-client-v1"
+# HKDF info string for deriving the per-file FENCR key from the raw data key.
+_FENCR_HKDF_INFO = b"transform-client-v1:enc"
+_FENCR_HEADER_LEN = len(_FENCR_MAGIC) + 1 + 4 + _FENCR_SALT_LEN + _FENCR_NONCE_PREFIX_LEN  # 34
+
 
 def _validate_master_key(key: bytes) -> None:
     """Validate a Fernet-format master key (base64 of 32 raw bytes)."""
@@ -247,6 +285,23 @@ class FileEncryptionService:
         with open(input_path, "rb") as src, open(output_path, "wb") as dst:
             self.decrypt_stream(src, dst, user_id)
 
+    def is_encrypted_file(self, path: str | Path) -> bool:
+        """
+        Return True when ``path`` begins with the streaming ciphertext magic.
+
+        Used by the worker (and download path) to decide whether a stored
+        object is at-rest ciphertext or plaintext. Because uploads are written
+        to object storage directly from the browser (no ingest-time
+        encryption), an object may legitimately be plaintext even when
+        ``ENCRYPTION_MASTER_KEY`` is configured — in that case we must pass it
+        through rather than failing to "decrypt" it.
+        """
+        try:
+            with open(path, "rb") as f:
+                return f.read(len(_STREAM_MAGIC)) == _STREAM_MAGIC
+        except OSError:
+            return False
+
     def iter_decrypt(
         self,
         read_chunk: Callable[[int], bytes],
@@ -316,6 +371,120 @@ class FileEncryptionService:
             nonce = nonce_prefix + counter.to_bytes(4, "big")
             yield selected.decrypt(nonce, chunk, aad)
             counter += 1
+
+    # ------------------------------------------------------------------
+    # Client-side encryption ("FENCR") — decrypt-only
+    # ------------------------------------------------------------------
+
+    def _derive_fencr_file_key(self, salt: bytes, data_key: bytes) -> bytes:
+        """Derive the per-file FENCR AES-256-GCM key from a raw data key.
+
+        Mirrors WebCrypto's ``HKDF(SHA-256, salt=salt, info=b'...enc').derive``:
+        the raw 32-byte ``data_key`` is the input key material, the FENCR blob's
+        salt is the HKDF salt, and the domain-separation info is
+        ``b\"transform-client-v1:enc\"``.
+        """
+        hkdf = HKDF(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=salt,
+            info=_FENCR_HKDF_INFO,
+        )
+        return hkdf.derive(data_key)
+
+    def is_fencr_file(self, path: str | Path | bytes) -> bool:
+        """
+        Return True when ``path`` (or the given bytes) begins with the FENCR
+        magic used by client-side encrypted uploads.
+
+        Unlike :meth:`is_encrypted_file` (which detects at-rest TRENC
+        ciphertext produced by the worker), this detects the browser-produced
+        ``FENCR`` format. Both formats may coexist, so callers should probe
+        FENCR first, then TRENC.
+        """
+        if isinstance(path, bytes):
+            return path.startswith(_FENCR_MAGIC)
+        try:
+            with open(path, "rb") as f:
+                return f.read(len(_FENCR_MAGIC)) == _FENCR_MAGIC
+        except OSError:
+            return False
+
+    def iter_decrypt_fencr(
+        self,
+        read_chunk: Callable[[int], bytes],
+        data_key: bytes,
+    ) -> Iterator[bytes]:
+        """
+        Yield plaintext chunks from a FENCR v1 blob via a chunk-reading callback.
+
+        Memory-bounded: the whole blob is never loaded into memory. The caller
+        supplies a ``read_chunk(n)`` callback (e.g. a file object's ``read`` or
+        a Minio ``get_object`` stream).
+
+        Args:
+            read_chunk: Callable returning exactly ``n`` bytes (or fewer at end).
+            data_key: The raw 32-byte per-file key (already unwrapped by the
+                caller from its at-rest ciphertext form).
+
+        Raises:
+            ValueError: If the header is missing/invalid or the version is not v1.
+        """
+        header = read_chunk(_FENCR_HEADER_LEN)
+        if len(header) != _FENCR_HEADER_LEN or not header.startswith(_FENCR_MAGIC):
+            raise ValueError("Not a client-encrypted (FENCR) blob (bad header)")
+
+        version = header[len(_FENCR_MAGIC)]
+        if version != _FENCR_VERSION[0]:
+            raise ValueError(f"Unsupported FENCR version: {version}")
+
+        chunk_size = int.from_bytes(
+            header[len(_FENCR_MAGIC) + 1: len(_FENCR_MAGIC) + 5], "big"
+        )
+        salt = header[len(_FENCR_MAGIC) + 5: len(_FENCR_MAGIC) + 5 + _FENCR_SALT_LEN]
+        nonce_prefix = header[
+            len(_FENCR_MAGIC) + 5 + _FENCR_SALT_LEN: _FENCR_HEADER_LEN
+        ]
+        if chunk_size <= 0:
+            raise ValueError("Invalid FENCR chunk_size (must be positive)")
+
+        file_key = self._derive_fencr_file_key(salt, data_key)
+        cipher = AESGCM(file_key)
+
+        counter = 0
+        while True:
+            chunk = read_chunk(chunk_size + _FENCR_TAG_LEN)  # ciphertext + GCM tag
+            if not chunk:
+                break
+            if counter >= 2**32:
+                raise OverflowError("File too large: FENCR chunk counter exhausted")
+            # Each encryption message is a full chunk: 12-byte nonce = the
+            # 8-byte per-file prefix + a 4-byte big-endian counter.
+            nonce = nonce_prefix + counter.to_bytes(4, "big")
+            yield cipher.decrypt(nonce, chunk, _FENCR_AAD)
+            counter += 1
+
+    def decrypt_fencr(self, src: BinaryIO, dst: BinaryIO, data_key: bytes) -> None:
+        """Decrypt a FENCR v1 stream from ``src`` into ``dst``."""
+        for chunk in self.iter_decrypt_fencr(src.read, data_key):
+            dst.write(chunk)
+
+    def decrypt_fencr_file(
+        self,
+        input_path: str | Path,
+        output_path: str | Path,
+        data_key: bytes,
+    ) -> None:
+        """Decrypt a FENCR v1 blob on disk into a plaintext file on disk."""
+        with open(input_path, "rb") as src, open(output_path, "wb") as dst:
+            self.decrypt_fencr(src, dst, data_key)
+
+    def decrypt_fencr_bytes(self, blob: bytes, data_key: bytes) -> bytes:
+        """In-memory convenience wrapper over :meth:`iter_decrypt_fencr`."""
+        src = io.BytesIO(blob)
+        dst = io.BytesIO()
+        self.decrypt_fencr(src, dst, data_key)
+        return dst.getvalue()
 
     def encrypt_bytes(self, data: bytes, user_id: str) -> bytes:
         """In-memory wrapper over the streaming format."""

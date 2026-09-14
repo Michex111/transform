@@ -80,6 +80,8 @@ class WorkerCreditRepository(CreditPort):
                 if attempt == 1:
                     raise
                 continue
+        # Unreachable: the loop above always returns or raises.
+        raise RuntimeError("unreachable: credit tier resolution loop exhausted")
 
     async def consume(self, user_id: int, period_key: str, units: int) -> int:
         for attempt in range(2):
@@ -90,6 +92,8 @@ class WorkerCreditRepository(CreditPort):
                 if attempt == 1:
                     raise
                 continue
+        # Unreachable: the loop above always returns or raises.
+        raise RuntimeError("unreachable: credit consume loop exhausted")
 
     async def _consume_once(
         self,

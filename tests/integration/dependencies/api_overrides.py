@@ -10,6 +10,7 @@ from src.application.exceptions.conversion_job_exception import InvalidConversio
 from src.application.exceptions.file_system_exceptions import FileRecordNotFoundError
 from src.domain.conversions.entities.conversion_job import ConversionJob
 from src.domain.conversions.value_object.conversion_type import ConversionType
+from src.domain.subscriptions.value_object.tier import SubscriptionTier
 from src.infrastructure.database.models import UserFileModel
 from src.presentation.api.dependencies.auth_dependencies import get_current_user
 from src.presentation.api.dependencies.service_dependencies import (
