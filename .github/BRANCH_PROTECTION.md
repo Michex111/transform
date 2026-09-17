@@ -21,24 +21,22 @@ gh auth status
 
 ## Branch strategy
 
-Promotion order (each step is a PR, never a direct push):
+Three branches, three stages. Each promotion is a PR — never a direct push:
 
 ```
-dev-branch ──▶ staging-branch ──▶ main ──▶ master ──▶ deploy
-   (dev)          (staging)      (FINAL     (approved    (triggers
-                               PRODUCTION)   staging)    deployment)
+dev ──▶ staging ──▶ main
+(implementation)  (testing)   (FINAL PRODUCTION)
 ```
 
-**`main` is the FINAL PRODUCTION branch.** It is not a development trunk: only
-releases that have passed staging and owner approval are merged into it.
+| Branch    | Purpose                  | Protected | Deploys to  |
+| --------- | ------------------------ | --------- | ----------- |
+| `dev`     | Implementation           | No        | —           |
+| `staging` | Testing / pre-production | Yes       | —           |
+| `main`    | **Final production**     | Yes       | production  |
 
-| Branch           | Purpose                          | Protected | Deploys to  |
-| ---------------- | -------------------------------- | --------- | ----------- |
-| `dev-branch`     | Active development               | No        | —           |
-| `staging-branch` | Pre-production / staging         | Yes       | —           |
-| `main`           | **Final production**             | Yes       | —           |
-| `master`         | Approved-staging gate            | Yes       | staging     |
-| `deploy`         | Deployment trigger               | Yes       | production  |
+`main` holds only releases that have passed `staging`. A push to `main`
+triggers the `Deploy` workflow, which re-runs the full test suite before
+deploying.
 
 ## Apply protection
 
@@ -48,12 +46,10 @@ changes.
 ```bash
 REPO="Michex111/transform"
 
-# ---- Strictly protected: main, master, deploy -------------------------------
+# ---- main (final production): strictest protection ---------------------------
 # Require PRs, passing CI, an approving review, and no force-pushes/deletions.
-for BRANCH in main master deploy; do
-  echo "Protecting $BRANCH..."
-  gh api -X PUT "repos/$REPO/branches/$BRANCH/protection" \
-    --input - <<'JSON'
+gh api -X PUT "repos/$REPO/branches/main/protection" \
+  --input - <<'JSON'
 {
   "required_status_checks": {
     "strict": true,
@@ -71,10 +67,9 @@ for BRANCH in main master deploy; do
   "required_conversation_resolution": true
 }
 JSON
-done
 
-# ---- staging-branch: same, but allow the maintainer to self-merge faster ----
-gh api -X PUT "repos/$REPO/branches/staging-branch/protection" \
+# ---- staging: same checks, but allow the maintainer to self-merge faster ----
+gh api -X PUT "repos/$REPO/branches/staging/protection" \
   --input - <<'JSON'
 {
   "required_status_checks": {
@@ -95,26 +90,24 @@ JSON
 
 ## Required GitHub secrets
 
-The `Deploy` workflow reads these. Add them under
+The `Deploy` workflow reads this. Add it under
 **Settings → Secrets and variables → Actions**.
 
-| Secret                       | Used by                | Where to get it                          |
-| ---------------------------- | ---------------------- | ---------------------------------------- |
-| `RENDER_STAGING_DEPLOY_HOOK` | staging deploy job     | Render → Service → Settings → Deploy Hook |
-| `RENDER_PROD_DEPLOY_HOOK`    | production deploy job  | Render → Service → Settings → Deploy Hook |
+| Secret                    | Used by               | Where to get it                           |
+| ------------------------- | --------------------- | ----------------------------------------- |
+| `RENDER_PROD_DEPLOY_HOOK` | production deploy job | Render → Service → Settings → Deploy Hook |
 
-Optional repository **variables** (Settings → Variables) used for the
-environment links displayed on deployments:
+Optional repository **variable** (Settings → Variables) used for the
+environment link displayed on deployments:
 
-| Variable             | Example                          |
-| -------------------- | -------------------------------- |
-| `STAGING_APP_URL`    | `https://transform-staging.onrender.com` |
-| `PRODUCTION_APP_URL` | `https://app.example.com`        |
+| Variable             | Example                   |
+| -------------------- | ------------------------- |
+| `PRODUCTION_APP_URL` | `https://app.example.com` |
 
 ## Verify protection
 
 ```bash
-for BRANCH in main master deploy staging-branch; do
+for BRANCH in main staging; do
   echo "== $BRANCH =="
   gh api "repos/$REPO/branches/$BRANCH/protection" \
     --jq '{required_checks: .required_status_checks.contexts, reviews: .required_pull_request_reviews.required_approving_review_count, force_push: .allow_force_pushes.enabled, deletions: .allow_deletions.enabled}'

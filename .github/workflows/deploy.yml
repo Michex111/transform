@@ -1,33 +1,25 @@
 name: Deploy
 
-# Deploys are triggered when a change lands on either deployment branch:
-#   - `master`  -> staging environment (gate: approved staging)
-#   - `deploy`  -> production environment (gate: production)
+# Deployment is triggered by a push to `main` — the final production branch.
 #
-# Each job re-runs the full CI suite on the exact commit being shipped before
-# any deploy hook is fired, so a deploy can never proceed on failing tests.
+# Promotion flow:
+#   dev  ->  staging  ->  main
+#   (implementation)  (testing)   (final production)
+#
+# The full CI suite is re-run on the exact commit being shipped before any
+# deploy hook fires, so a deploy can never proceed on failing tests.
 on:
   push:
     branches:
-      - master
-      - deploy
+      - main
   workflow_dispatch:
-    inputs:
-      environment:
-        description: "Target environment"
-        required: true
-        default: staging
-        type: choice
-        options:
-          - staging
-          - production
 
 permissions:
   contents: read
 
 concurrency:
-  # Never run two deploys for the same branch at once.
-  group: deploy-${{ github.ref }}
+  # Never run two production deploys at once; never cancel one mid-flight.
+  group: deploy-production
   cancel-in-progress: false
 
 jobs:
@@ -38,38 +30,11 @@ jobs:
     uses: ./.github/workflows/ci.yml
 
   # ---------------------------------------------------------------------------
-  # Staging deployment (triggered by `master`).
-  # ---------------------------------------------------------------------------
-  staging:
-    name: Deploy to staging
-    needs: verify
-    if: github.ref == 'refs/heads/master' || inputs.environment == 'staging'
-    runs-on: ubuntu-latest
-    environment:
-      name: staging
-      url: ${{ vars.STAGING_APP_URL }}
-    steps:
-      - name: Trigger staging deploy
-        env:
-          # Add a repository/environment secret named RENDER_STAGING_DEPLOY_HOOK.
-          # Create it in Render: Service -> Settings -> Deploy Hook.
-          DEPLOY_HOOK: ${{ secrets.RENDER_STAGING_DEPLOY_HOOK }}
-        run: |
-          if [ -z "$DEPLOY_HOOK" ]; then
-            echo "::error::Secret RENDER_STAGING_DEPLOY_HOOK is not configured."
-            echo "Create a deploy hook in Render and add it as a repository secret."
-            exit 1
-          fi
-          echo "Triggering staging deploy for ${GITHUB_SHA}..."
-          curl -fsS -X POST "$DEPLOY_HOOK"
-
-  # ---------------------------------------------------------------------------
-  # Production deployment (triggered by `deploy`).
+  # Production deployment.
   # ---------------------------------------------------------------------------
   production:
     name: Deploy to production
     needs: verify
-    if: github.ref == 'refs/heads/deploy' || inputs.environment == 'production'
     runs-on: ubuntu-latest
     environment:
       name: production
