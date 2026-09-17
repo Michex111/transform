@@ -49,6 +49,12 @@ Agents.MD
 # Production secrets backup — must never be baked into an image
 .env.production.backup
 
+# Frontend dependencies and build output. node_modules is large and is
+# reinstalled by `npm ci` in the frontend build stage; a locally-built dist
+# must never leak in, because that stage builds its own.
+web/node_modules/
+web/dist/
+
 # Deployment helpers not needed inside the image
 deployment/docker/compose.yaml
 deployment/docker/nginx.conf
