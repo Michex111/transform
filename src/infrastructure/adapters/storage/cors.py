@@ -92,15 +92,31 @@ def apply_bucket_cors(origins: list[str] | None = None) -> None:
 
 
 def _apply_b2_cors(allowed_origins: list[str]) -> None:
-    """Apply Backblaze B2 native CORS rules via the b2sdk."""
+    """Apply Backblaze B2 native CORS rules via the b2sdk.
+
+    ``b2sdk`` is an optional dependency. Importing it *inside* the ``try`` that
+    also contains ``except B2Error`` is a trap: if the import fails, ``B2Error``
+    is never bound and evaluating the handler raises ``UnboundLocalError``,
+    which masks the real cause. Import it in its own guarded block instead, and
+    fall back to the S3 ``PutBucketCors`` API (which Backblaze also accepts)
+    rather than leaving the bucket with no CORS rules at all.
+    """
     settings = get_settings()
+
     try:
         from typing import cast
 
-        from b2sdk.v2 import B2Api, InMemoryAccountInfo
-        from b2sdk.v2 import AbstractAccountInfo
+        from b2sdk.v2 import AbstractAccountInfo, B2Api, InMemoryAccountInfo
         from b2sdk.v2.exception import B2Error
+    except ImportError as exc:
+        logger.warning(
+            "b2sdk unavailable (%s) — falling back to the S3 PutBucketCors API.",
+            exc,
+        )
+        _apply_s3_cors(allowed_origins)
+        return
 
+    try:
         info = cast(AbstractAccountInfo, InMemoryAccountInfo())
         api = B2Api(info)
         api.authorize_account(
@@ -121,8 +137,25 @@ def _apply_b2_cors(allowed_origins: list[str]) -> None:
         logger.warning("Failed to apply B2 bucket CORS: %s", e)
 
 
+def _derive_region(endpoint: str) -> str:
+    """Derive the SigV4 region from an S3-compatible endpoint.
+
+    Backblaze rejects a signature whose region does not match the endpoint
+    (e.g. ``s3.us-east-005.backblazeb2.com`` requires ``us-east-005``), and
+    boto3 would otherwise default to ``us-east-1`` and fail with a signature
+    error. Falls back to ``us-east-1`` when the endpoint carries no region.
+    """
+    import re
+
+    host = (endpoint or "").lower()
+    match = re.search(r"\b([a-z]{2}-[a-z]+-\d+)\.", host) or re.search(
+        r"s3[.-]([a-z]{2}-[a-z]+-\d+)", host
+    )
+    return match.group(1) if match else "us-east-1"
+
+
 def _apply_s3_cors(allowed_origins: list[str]) -> None:
-    """Apply a generic S3-compatible CORS policy (Minio, AWS S3)."""
+    """Apply a generic S3-compatible CORS policy (Minio, AWS S3, Backblaze)."""
     settings = get_settings()
     import boto3
     from botocore.config import Config
@@ -133,6 +166,7 @@ def _apply_s3_cors(allowed_origins: list[str]) -> None:
             endpoint_url=settings.BACKBLAZE_ENDPOINT,
             aws_access_key_id=settings.BACKBLAZE_ACCESS_KEY.get_secret_value(),
             aws_secret_access_key=settings.BACKBLAZE_SECRET_KEY.get_secret_value(),
+            region_name=_derive_region(settings.BACKBLAZE_ENDPOINT),
             config=Config(signature_version="s3v4"),
         )
         client.put_bucket_cors(
