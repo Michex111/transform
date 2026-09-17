@@ -3,9 +3,11 @@ Worker bootstrap entry point.
 Orchestrates dependency injection and runs the converter worker.
 """
 
+import asyncio
+import os
+import socket
 import sys
 from pathlib import Path
-import asyncio
 
 # Add project root to sys.path to enable imports
 project_root = Path(__file__).parent.parent.parent
@@ -27,16 +29,35 @@ from workers.converter_workers.worker import ConverterWorker
 from workers.converter_workers.processor import process_job
 
 
-async def build_worker(worker_name: str = "file_converter_worker") -> ConverterWorker:
+def _default_worker_name() -> str:
+    """Return a consumer name that is unique to this worker process.
+
+    Redis Streams identify consumers by name, so a fixed name collapses every
+    replica (and every restart) into a single consumer identity. The group's
+    `pending`/`idle` figures then become aggregates across processes, and the
+    stale-job reclaimer can steal messages that a live replica is still
+    processing. Host + PID keeps each process distinct.
+
+    Set WORKER_NAME to override with a stable name when required.
+    """
+    override = os.getenv("WORKER_NAME")
+    if override:
+        return override
+    return f"file_converter_worker-{socket.gethostname()}-{os.getpid()}"
+
+
+async def build_worker(worker_name: str | None = None) -> ConverterWorker:
     """
     Factory function to create and configure a ConverterWorker.
-    
+
     Args:
-        worker_name: Optional worker identifier for logging
-        
+        worker_name: Optional worker identifier. Defaults to a name unique to
+            this process so replicas never share a Redis consumer identity.
+
     Returns:
         Configured ConverterWorker instance ready to run
     """
+    worker_name = worker_name or _default_worker_name()
     storage_port: StoragePort = get_storage()
     queue_port: QueuePort = await get_consumer_queue(consumer_group="conversion-workers", consumer_name=worker_name)
     event_port = get_event_queue()
