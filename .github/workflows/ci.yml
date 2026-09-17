@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+    branches:
+      - "**"
+  workflow_dispatch:
+  # Allow the deploy workflows to re-run the full suite on the exact commit
+  # being shipped, so a deploy can never proceed on failing tests.
+  workflow_call:
+
+# Cancel superseded runs on the same ref to save CI minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    name: Backend (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.14
+
+      - name: Install dependencies
+        run: uv sync --frozen --group dev
+
+      - name: Run tests
+        # These are placeholder values for CI only. The test suite never talks
+        # to a real Postgres/Redis/S3 instance; it uses fakes and aiosqlite.
+        env:
+          SECRET_KEY: ci-secret-key-ci-secret-key-ci-secret-key
+          DATABASE_URL: postgresql+asyncpg://ci:ci@localhost:5432/ci
+          REDIS_URL: redis://localhost:6379/0
+          BACKBLAZE_ENDPOINT: https://s3.example.invalid
+          BACKBLAZE_ACCESS_KEY: ci-access-key
+          BACKBLAZE_SECRET_KEY: ci-secret-key
+          BASE_TARGET_KEY: output/
+          ENCRYPTION_MASTER_KEY: _CSwMykTxf4UE59LhJ5JDPvGi_dHBEBQqPbwPP2Agew=
+        run: uv run pytest -q
+
+  frontend:
+    name: Frontend (lint, test, build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build

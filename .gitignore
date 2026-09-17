@@ -23,6 +23,11 @@ docs/
 scripts/docker/
 alembic.ini
 
+# Local SQLite database (dev/test artifact)
+file_converter.db
+*.db
+*.sqlite3
+
 # ---------------------------------------------------------------------------
 # Local-only AI agent tooling. These live on the developer's machine and must
 # never be committed or pushed. They are intentionally untracked.

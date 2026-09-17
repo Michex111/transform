@@ -1,12 +1,9 @@
 .
-|-- .agents
-|-- .codex
 |-- .env
 |-- .gitignore
 |-- .python-version
 |-- .vscode
 |   `-- settings.json
-|-- Agents.MD
 |-- LICENSE
 |-- README.md
 |-- alembic.ini

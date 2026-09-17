@@ -31,6 +31,24 @@ venv/
 logs/
 *.log
 
+# Local databases (dev/test artifacts)
+*.db
+*.sqlite3
+
+# Local-only AI agent tooling — never ship these inside the image
+.agents/
+.claude/
+.impeccable/
+skills-lock.json
+.github/agents/
+.github/skills/
+.github/hooks/
+.github/prompts/
+Agents.MD
+
+# Production secrets backup — must never be baked into an image
+.env.production.backup
+
 # Deployment helpers not needed inside the image
 deployment/docker/compose.yaml
 deployment/docker/nginx.conf
