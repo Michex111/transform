@@ -21,20 +21,24 @@ gh auth status
 
 ## Branch strategy
 
+Promotion order (each step is a PR, never a direct push):
+
 ```
-dev-branch ──PR──▶ staging-branch ──(approved)──▶ main
-                                                      │
-                                                      ├──▶ master  (approved-staging gate)
-                                                      └──▶ deploy  (production deployment)
+dev-branch ──▶ staging-branch ──▶ main ──▶ master ──▶ deploy
+   (dev)          (staging)      (FINAL     (approved    (triggers
+                               PRODUCTION)   staging)    deployment)
 ```
 
-| Branch           | Purpose                        | Protected | Deploys to  |
-| ---------------- | ------------------------------ | --------- | ----------- |
-| `dev-branch`     | Active development             | No        | —           |
-| `staging-branch` | Pre-production / staging       | Yes       | —           |
-| `main`           | Approved, releasable trunk     | Yes       | —           |
-| `master`         | Approved-staging gate          | Yes       | staging     |
-| `deploy`         | Production deployment branch   | Yes       | production  |
+**`main` is the FINAL PRODUCTION branch.** It is not a development trunk: only
+releases that have passed staging and owner approval are merged into it.
+
+| Branch           | Purpose                          | Protected | Deploys to  |
+| ---------------- | -------------------------------- | --------- | ----------- |
+| `dev-branch`     | Active development               | No        | —           |
+| `staging-branch` | Pre-production / staging         | Yes       | —           |
+| `main`           | **Final production**             | Yes       | —           |
+| `master`         | Approved-staging gate            | Yes       | staging     |
+| `deploy`         | Deployment trigger               | Yes       | production  |
 
 ## Apply protection
 
