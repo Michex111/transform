@@ -91,8 +91,12 @@ export function PricingPage() {
                 )}
                 <h2 className="font-display text-lg font-semibold">{plan.name}</h2>
                 <p className="mt-3 font-display text-3xl font-semibold">
-                  {plan.price_monthly_usd == null ? "Custom" : `$${plan.price_monthly_usd}`}
-                  {plan.price_monthly_usd != null && (
+                  {enterprise
+                    ? "Custom"
+                    : plan.price_monthly_usd == null
+                      ? "$0"
+                      : `$${plan.price_monthly_usd}`}
+                  {!enterprise && (
                     <span className="text-base font-normal text-muted">/mo</span>
                   )}
                 </p>
