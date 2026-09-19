@@ -3,6 +3,7 @@ import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 // Use vitest/config so the `test` block is typed (vitest re-exports Vite config).
 import { defineConfig } from "vitest/config";
+import { spaRouteStubs } from "./vite-plugins/spa-route-stubs";
 
 const alias = {
   "@": fileURLToPath(new URL("./src", import.meta.url)),
@@ -10,7 +11,9 @@ const alias = {
 
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [react(), tailwindcss()],
+  // `spaRouteStubs` makes client-side routes resolvable on the static host so
+  // deep links and the post-Checkout redirect don't 404. See the plugin file.
+  plugins: [react(), tailwindcss(), spaRouteStubs()],
   resolve: { alias },
   server: {
     proxy: {
