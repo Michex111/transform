@@ -34,6 +34,7 @@ import { useToast } from "@/auth/ToastContext";
 import { Button, Skeleton } from "@/components/ui";
 import { Modal } from "@/components/Modal";
 import { FileThumbnail } from "@/components/FileThumbnail";
+import { resolveServerPath } from "@/api/client";
 import { downloadFromUrl } from "@/lib/download";
 import { formatExt } from "@/lib/format";
 import { FilesUploadModal } from "./FilesUploadModal";
@@ -386,7 +387,10 @@ export function FilesPage() {
       if (download_url.startsWith("http")) {
         downloadFromUrl(download_url, file.file_name);
       } else {
-        const res = await fetch(download_url, {
+        // The backend returns a server-relative path (e.g. `/api/v1/files/:id/stream`).
+        // Resolve it against the configured API origin — the SPA is hosted
+        // separately from the API, so a bare relative fetch would hit the wrong host.
+        const res = await fetch(resolveServerPath(download_url), {
           headers: { Authorization: `Bearer ${localStorage.getItem("transform_access_token")}` },
         });
         if (!res.ok) throw new Error(`Download failed (${res.status})`);
