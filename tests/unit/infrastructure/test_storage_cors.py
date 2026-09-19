@@ -38,6 +38,27 @@ def test_build_s3_cors_allows_methods_and_origins() -> None:
     assert set(rules[0]["AllowedMethods"]) == {"GET", "PUT", "POST", "HEAD"}
 
 
+def test_build_s3_cors_supports_the_separately_hosted_spa_origin() -> None:
+    """The SPA is a distinct origin now — the bucket must allow it verbatim.
+
+    Direct-to-bucket presigned uploads preflight from the static-site origin, so
+    that origin must appear in ``AllowedOrigins`` with ``PUT`` (upload),
+    ``GET``/``HEAD`` (download) permitted.
+    """
+    static_site = "https://transform-web.onrender.com"
+    rules = _build_s3_cors([static_site])
+    assert rules[0]["AllowedOrigins"] == [static_site]
+    methods = set(rules[0]["AllowedMethods"])
+    assert {"PUT", "GET", "HEAD"} <= methods
+
+
+def test_build_b2_cors_supports_the_separately_hosted_spa_origin() -> None:
+    static_site = "https://transform-web.onrender.com"
+    rules = _build_b2_cors([static_site])
+    assert rules[0]["allowedOrigins"] == [static_site]
+    assert {"s3_put", "s3_get", "s3_head"} <= set(rules[0]["allowedOperations"])
+
+
 @pytest.mark.parametrize(
     ("endpoint", "expected"),
     [

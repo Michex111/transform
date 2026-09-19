@@ -75,9 +75,13 @@ class Settings(BaseSettings):
     SENTRY_DSN: SecretStr | None = None
 
     # Frontend (SPA) static serving
-    # Absolute or project-relative path to the built frontend `dist` folder.
-    # When None, the frontend is not served by the API (frontend runs separately).
-    FRONTEND_DIST_DIR: str | None = "web/dist"
+    # DEPRECATED / NO-OP: the API no longer serves the SPA. The React app is
+    # built and hosted as a separate static site (Render static site
+    # `transform-web`) and reaches this API cross-origin. The field is retained
+    # only so an existing deployment that still sets FRONTEND_DIST_DIR in its
+    # environment does not crash the boot (Settings uses `extra="forbid"`); its
+    # value is never read. It defaults to None and should not be set.
+    FRONTEND_DIST_DIR: str | None = None
 
     # File size limits (bytes)
     GUEST_MAX_FILE_SIZE: int = 50 * 1024 * 1024     # 50MB

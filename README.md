@@ -21,8 +21,31 @@ A production-ready file conversion SaaS platform built with FastAPI, featuring r
                                 └─────────────┘     └───────────────┘
 ```
 
+### Service Topology
+
+The API and the web UI are **separate deployables** that communicate
+cross-origin:
+
+| Service | What it is | Serves |
+|---------|------------|--------|
+| `transform-api` | FastAPI backend (Docker, `deployment/docker/worker.Dockerfile`) | `/api/*`, `/health`, `/ready`, `/metrics`, `/docs`, `/redoc`, `/openapi.json` |
+| `transform-web` | React SPA (static site, `web/`) | the UI, with a client-side-routing fallback to `index.html` |
+
+The API deliberately does **not** serve the SPA — `/` and any unknown path
+return a JSON `404`, never an HTML application shell. Two consequences:
+
+- The API must allow-list the SPA origin in `ALLOWED_ORIGINS` (CORS) and in
+  `S3_CORS_ALLOWED_ORIGINS` (the browser uploads directly to object storage
+  with a presigned `PUT`).
+- The SPA learns the API origin at **build** time from `VITE_API_BASE_URL`
+  (Vite inlines `VITE_*` variables, so it must be set when `npm run build` runs).
+
+Locally the two run same-origin through the Vite dev-server proxy, so no CORS
+setup is needed for development.
+
 ### Tech Stack
 - **API Framework**: FastAPI (async Python)
+- **Frontend**: React 18 + TypeScript + Vite SPA (`web/`), deployed as a separate static site
 - **Database**: PostgreSQL 15 with SQLAlchemy 2.0 (async)
 - **Queue/Events**: Redis Streams with consumer groups
 - **Storage**: S3-compatible (Minio local, Backblaze B2/AWS S3 production)
@@ -133,6 +156,21 @@ uv run python -m workers.converter_workers.main
 uv run python -m workers.cleanup_worker.main
 ```
 
+### Local Development (frontend)
+
+The SPA lives in `web/`. In development it runs on the Vite dev server and
+proxies `/api` to the backend, so everything stays same-origin:
+
+```bash
+cd web
+npm install
+npm run dev        # http://localhost:5173  (proxies /api -> http://localhost:8000)
+```
+
+Other useful scripts: `npm run lint`, `npm test` (Vitest), `npm run build`
+(production bundle in `web/dist`). The backend keeps its default localhost
+origins in `ALLOWED_ORIGINS` so this works with no extra CORS configuration.
+
 ## Cleanup Worker
 
 The cleanup worker runs as an **independent process** from the converter worker
@@ -210,12 +248,33 @@ All configuration is via environment variables (see `.env.example`):
 | `STRIPE_SECRET_KEY` | No | Stripe API key for payments |
 | `STRIPE_WEBHOOK_SECRET` | No | Stripe webhook signing secret |
 | `STRIPE_PRICE_*` | No | Stripe price IDs for subscription checkout |
+| `STRIPE_SUCCESS_URL` / `STRIPE_CANCEL_URL` / `STRIPE_CREDIT_*` / `STRIPE_PORTAL_RETURN_URL` | No | Where Stripe sends the user back after Checkout / Customer Portal. **Must point at the SPA origin** in production |
+| `ALLOWED_ORIGINS` | Yes in production | JSON list of browser origins allowed to call the API. Must include the SPA origin. Wildcard `"*"` is refused at boot in production |
+| `S3_CORS_ALLOWED_ORIGINS` | Yes when uploading from a browser | JSON list of origins allowed to `PUT`/`GET` directly against object storage. Must include the SPA origin |
+| `FRONTEND_DIST_DIR` | No | **Deprecated / no-op.** The API no longer serves the SPA; the value is never read. Retained only so an environment that still sets it does not fail boot |
 | `ENCRYPTION_MASTER_KEY` | No | Fernet key for file encryption |
+
+### Frontend Configuration (`web/`)
+
+The SPA is configured at **build** time (see `web/.env.example`):
+
+| Variable | Description |
+|----------|-------------|
+| `VITE_API_BASE_URL` | Base URL of the API **including the `/api` prefix**. Defaults to `/api` (local dev via the Vite proxy). For production use the API origin, e.g. `https://transform-api-7b3g.onrender.com/api` |
+
+`web/.env.development` sets `/api` (proxied to `localhost:8000`).
+`web/.env.production` carries the deployed API origin as a fallback; the static
+host's build environment variable always wins over it.
 
 ### Production Checklist
 
 - Set `ENVIRONMENT=production`, a strong `SECRET_KEY` (>=32 random chars), and
   explicit `ALLOWED_ORIGINS` (no `*`) — the app refuses to boot otherwise.
+- **Add the SPA origin** (`https://transform-web.onrender.com`) to both
+  `ALLOWED_ORIGINS` and `S3_CORS_ALLOWED_ORIGINS`, otherwise every browser call
+  from the deployed UI fails the CORS preflight (and direct uploads are blocked).
+- Point all `STRIPE_*_URL` settings at the SPA origin, e.g.
+  `https://transform-web.onrender.com/app/billing?checkout=success`.
 - Set `BACKBLAZE_USE_SSL=true` with an HTTPS storage endpoint.
 - Run migrations as a one-shot step (`RUN_MIGRATIONS=false` on replicas), or
   rely on the startup migration with a single API replica.
@@ -246,6 +305,15 @@ src/
 workers/
 ├── converter_workers/   # Async worker, processor, dependencies
 └── cleanup_worker/      # Guest-data cleanup worker (separate process)
+web/                     # React SPA (React 18 + TypeScript + Vite + Tailwind v4)
+├── src/                 # App source (api client, pages, components)
+├── .env.example         # VITE_API_BASE_URL documentation
+└── vite.config.ts       # Dev proxy: /api -> http://localhost:8000
+deployment/
+├── docker/              # Dockerfile (API + workers) and compose stack
+└── ...
+render.yaml              # Render Blueprint: transform-api + transform-web
+.github/workflows/       # ci.yml (quality gates) + deploy.yml (both services)
 ```
 
 ## Testing
@@ -261,6 +329,15 @@ uv run pytest --cov=src --cov-report=term-missing
 uv run pytest tests/unit/domain/test_subscription.py -v
 ```
 
+### Frontend tests
+
+```bash
+cd web
+npm run lint          # ESLint
+npm test              # Vitest
+npm run build         # tsc -b && vite build
+```
+
 ## Deployment
 
 ### Production Considerations
@@ -271,6 +348,74 @@ uv run pytest tests/unit/domain/test_subscription.py -v
 - Set strong `SECRET_KEY` and `ENCRYPTION_MASTER_KEY`
 - Configure proper CORS origins
 - Set up monitoring (Prometheus + Grafana, Sentry)
+
+### Render — two services
+
+Production runs two Render services in the `oregon` region, both on the `main`
+branch with **Auto-Deploy OFF** (deploys go through CI/CD, never on push):
+
+| Service | Type | Config |
+|---------|------|--------|
+| `transform-api` | Web service (Docker, free) | Dockerfile `deployment/docker/worker.Dockerfile`, context `.`, command `uv run uvicorn src.presentation.api.main:app --host 0.0.0.0 --port $PORT` |
+| `transform-web` | Static site (free) | root dir `web`, build `npm ci && npm run build`, publish `dist`, rewrite `/*` → `/index.html` |
+
+Both are declared in `render.yaml` (Render Blueprint) so the infrastructure is
+reproducible. **Review the Blueprint sync diff in the dashboard before
+applying**: the API service already exists and is adopted by name.
+
+Ambient URLs:
+
+- API: `https://transform-api-7b3g.onrender.com`
+- SPA: `https://transform-web.onrender.com`
+
+#### Environment variables
+
+`transform-api` (dashboard-managed secrets; see `.env.example`):
+
+| Variable | Value for production |
+|----------|----------------------|
+| `ENVIRONMENT` | `production` |
+| `ALLOWED_ORIGINS` | `["https://transform-web.onrender.com"]` (plus any localhost origin you still need) |
+| `S3_CORS_ALLOWED_ORIGINS` | `["https://transform-web.onrender.com"]` |
+| `STRIPE_SUCCESS_URL` | `https://transform-web.onrender.com/app/billing?checkout=success` |
+| `STRIPE_CANCEL_URL` | `https://transform-web.onrender.com/app/billing?checkout=cancelled` |
+| `STRIPE_CREDIT_SUCCESS_URL` | `https://transform-web.onrender.com/app/billing?credits=success` |
+| `STRIPE_CREDIT_CANCEL_URL` | `https://transform-web.onrender.com/app/billing?credits=cancelled` |
+| `STRIPE_PORTAL_RETURN_URL` | `https://transform-web.onrender.com/app/billing` |
+
+> Do **not** set `FRONTEND_DIST_DIR`; it is a deprecated no-op. Also note that
+> `Settings` uses `extra="forbid"`, so a mistyped env var crashes the boot.
+
+`transform-web` (build-time):
+
+| Variable | Value |
+|----------|-------|
+| `VITE_API_BASE_URL` | `https://transform-api-7b3g.onrender.com/api` |
+
+#### Deploy & rollback
+
+Deploys are driven by `.github/workflows/deploy.yml`:
+
+1. `verify` re-runs `ci.yml` (`Backend (pytest)` + `Frontend (lint, test, build)`)
+   on the exact commit — a deploy cannot proceed if tests fail.
+2. `deploy-api` POSTs the `transform-api` deploy hook.
+3. `deploy-web` POSTs the `transform-web` deploy hook.
+
+Each deploy job requires its own repository/environment secret:
+
+| Secret | Service |
+|--------|---------|
+| `RENDER_PROD_DEPLOY_HOOK` | `transform-api` |
+| `RENDER_WEB_DEPLOY_HOOK` | `transform-web` |
+
+Create each hook in Render → service → **Settings → Deploy Hook**, and store the
+full URL. A missing or malformed hook fails the job loudly (it is never silently
+skipped).
+
+Rollback: in the Render dashboard open the service → **Events** → pick the last
+known-good deploy → **Rollback**. (Free static sites and web services both
+retain deploy history.) Reverting the commit on `main` and letting CI/CD run is
+equally valid, and keeps the repository the source of truth.
 
 ### Kubernetes Deployment
 ```bash
