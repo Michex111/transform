@@ -40,36 +40,17 @@ jobs:
       name: production
       url: ${{ vars.PRODUCTION_APP_URL }}
     steps:
+      - uses: actions/checkout@v4
+
       - name: Trigger production deploy
         env:
           # Add a repository/environment secret named RENDER_PROD_DEPLOY_HOOK.
           DEPLOY_HOOK: ${{ secrets.RENDER_PROD_DEPLOY_HOOK }}
         run: |
-          if [ -z "$DEPLOY_HOOK" ]; then
-            echo "::error::Secret RENDER_PROD_DEPLOY_HOOK is not configured."
-            echo "Create a deploy hook in Render and add it as a repository secret."
-            exit 1
-          fi
-
-          # Validate the hook's shape WITHOUT printing its value. A malformed
-          # hook otherwise surfaces only as a cryptic
-          # `curl: (6) Could not resolve host`, which gives no clue that the
-          # problem is the secret's format rather than the network.
-          if [[ ! "$DEPLOY_HOOK" =~ ^https:// ]]; then
-            echo "::error::RENDER_PROD_DEPLOY_HOOK must be a full URL starting with https://"
-            echo "The stored value is ${#DEPLOY_HOOK} characters and does not start with https://."
-            echo "Expected the complete URL from Render -> Service -> Settings -> Deploy Hook."
-            exit 1
-          fi
-          if [[ "$DEPLOY_HOOK" != *"api.render.com/deploy/"* ]]; then
-            echo "::error::RENDER_PROD_DEPLOY_HOOK does not look like a Render deploy hook."
-            echo "Expected it to contain 'api.render.com/deploy/'."
-            echo "Check you did not paste only the 'key=' query parameter."
-            exit 1
-          fi
+          NORMALIZED_DEPLOY_HOOK="$(python3 .github/scripts/render_deploy_hook.py)"
 
           echo "Triggering production deploy for ${GITHUB_SHA}..."
-          if ! curl -fsS -X POST "$DEPLOY_HOOK"; then
+          if ! curl -fsS -X POST "$NORMALIZED_DEPLOY_HOOK"; then
             echo "::error::The deploy hook was rejected or unreachable."
             echo "Verify the URL is still current — Render regenerates the hook"
             echo "if the service was recreated, and old hooks stop working."
