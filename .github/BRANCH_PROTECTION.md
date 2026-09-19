@@ -112,6 +112,9 @@ URL. It looks like:
 https://api.render.com/deploy/srv-xxxxxxxxxxxx?key=yyyyyyyyyyyy
 ```
 
+The deploy workflow also accepts the trimmed `srv-xxxxxxxxxxxx?key=yyyyyyyyyyyy`
+fragment, but storing the full URL is still recommended.
+
 ### 2. Add it as a repository secret
 
 Interactive (the value is never echoed):
