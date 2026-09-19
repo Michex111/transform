@@ -14,12 +14,26 @@ makes to this API is cross-origin. The API must therefore:
 same code path regardless of which concrete origin is configured.
 """
 
+import src.presentation.api.main as api_main
 from tests.integration.dependencies.api_overrides import create_test_client
 
-# The configured dev origin (see .env / .env.example). In production the
+# Allow-listed in tests/conftest.py *before* the app is imported, so this suite
+# does not depend on the developer's gitignored .env. In production the
 # static-site origin (https://transform-web.onrender.com) plays this role.
 SPA_ORIGIN = "http://localhost:5173"
 DISALLOWED_ORIGIN = "https://not-allowed.example.com"
+
+
+def test_spa_origin_is_allow_listed() -> None:
+    """Precondition: surface a misconfigured allow-list as an actionable failure.
+
+    Without this the remaining tests fail with a bare ``KeyError``/400 that
+    hides the actual cause (an origin that was never allow-listed).
+    """
+    assert SPA_ORIGIN in api_main.settings.ALLOWED_ORIGINS, (
+        f"{SPA_ORIGIN} must be allow-listed for these cross-origin tests to be "
+        f"meaningful (got {api_main.settings.ALLOWED_ORIGINS!r})"
+    )
 
 
 def test_preflight_allows_authorization_with_credentials() -> None:
