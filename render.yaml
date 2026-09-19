@@ -1,0 +1,73 @@
+# Render Blueprint — reproducible infrastructure for the Transform app.
+#
+# Two services, deliberately decoupled:
+#
+#   1. transform-api  — the FastAPI backend (Docker, free plan). It does NOT
+#                       serve the React SPA. It serves /api/*, /health, /ready,
+#                       /metrics, /docs, /redoc, /openapi.json only.
+#   2. transform-web  — the React SPA (static site, global CDN). It is built
+#                       from ./web and talks to transform-api cross-origin.
+#
+# Deploys are intentionally NOT automatic. `autoDeployTrigger: off` on both
+# services means a deploy only happens when CI/CD explicitly triggers it (see
+# .github/workflows/deploy.yml), so nothing ships without the quality gates.
+#
+# IMPORTANT: the API service already exists (created in the dashboard). This
+# Blueprint declares it by name so a Blueprint sync *adopts* the existing
+# service instead of creating a second one. Review the sync diff in the Render
+# Dashboard before applying. Secrets for transform-api are dashboard-managed
+# (see README "Deployment" / .env.example) and are intentionally not listed here.
+
+services:
+  # -------------------------------------------------------------------------
+  # Backend API (existing service; adopted by name on Blueprint sync)
+  # -------------------------------------------------------------------------
+  - type: web
+    name: transform-api
+    runtime: docker
+    plan: free
+    region: oregon
+    branch: main
+    autoDeployTrigger: off
+    dockerfilePath: ./deployment/docker/worker.Dockerfile
+    dockerContext: .
+    dockerCommand: uv run uvicorn src.presentation.api.main:app --host 0.0.0.0 --port $PORT
+
+  # -------------------------------------------------------------------------
+  # Frontend SPA (static site)
+  # -------------------------------------------------------------------------
+  - type: web
+    name: transform-web
+    runtime: static
+    branch: main
+    autoDeployTrigger: off
+    # Monorepo: the SPA lives in ./web. Both the build command and the publish
+    # path are written relative to the repository root, matching the live
+    # service (which was created without a Root Directory) so that syncing this
+    # Blueprint does not rewrite the existing service configuration.
+    buildCommand: cd web && npm ci && npm run build
+    staticPublishPath: web/dist
+    envVars:
+      # Baked into the bundle at build time (Vite inlines VITE_* vars). Public,
+      # non-secret value — the browser needs the API origin. The `/api` suffix
+      # is required and matches the API's router prefix.
+      - key: VITE_API_BASE_URL
+        value: https://transform-api-7b3g.onrender.com/api
+    routes:
+      # SPA fallback: React Router owns the client-side routes (/app/dashboard,
+      # /pricing, /login, …). Render only applies this rewrite when no file
+      # exists at the requested path, so hashed /assets/* files are still served
+      # normally.
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    headers:
+      # Vite emits content-hashed asset filenames → safe to cache immutably.
+      - path: /assets/*
+        name: Cache-Control
+        value: public, max-age=31536000, immutable
+      # The SPA shell must always revalidate so a new deploy is picked up
+      # immediately (mirrors the previous API-side `Cache-Control: no-cache`).
+      - path: /index.html
+        name: Cache-Control
+        value: no-cache

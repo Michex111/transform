@@ -9,13 +9,11 @@ and secure file storage.
 import logging
 import time
 from contextlib import asynccontextmanager
-from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 from sqlalchemy import text
 
@@ -154,84 +152,16 @@ app.include_router(events.router)
 
 
 # ---------------------------------------------------------------------------
-# Frontend (SPA) static serving
+# Frontend: served separately
 # ---------------------------------------------------------------------------
-
-def _resolve_frontend_dist() -> Path | None:
-    """Resolve the built frontend `dist` directory, or None if unavailable."""
-    configured = settings.FRONTEND_DIST_DIR
-    if not configured:
-        logger.info("FRONTEND_DIST_DIR not set — frontend will not be served")
-        return None
-
-    candidate = Path(configured)
-    if not candidate.is_absolute():
-        candidate = Path(__file__).resolve().parents[3] / candidate
-
-    index_html = candidate / "index.html"
-    if not index_html.is_file():
-        logger.warning(
-            "Frontend build not found at %s (expected %s). "
-            "Run the frontend build before starting the API.",
-            candidate,
-            index_html,
-        )
-        return None
-    return candidate
-
-
-def mount_frontend(app: FastAPI) -> None:
-    """Serve the built SPA from FastAPI when a valid build exists.
-
-    Assets are served from ``/assets`` and any non-API path falls back to
-    ``index.html`` so React Router's client-side navigation works on refresh
-    and direct deep links. Must be called after the API routers are included.
-    """
-    dist = _resolve_frontend_dist()
-    if dist is None:
-        return
-
-    assets_dir = dist / "assets"
-    if assets_dir.is_dir():
-        app.mount("/assets", StaticFiles(directory=str(assets_dir)), name="assets")
-        logger.info("Serving frontend assets from %s", assets_dir)
-
-    index_html = dist / "index.html"
-
-    def _index_response() -> FileResponse:
-        # Always revalidate index.html so browser caches pick up the latest
-        # hashed bundle after a rebuild (the asset files themselves stay
-        # immutable via their content hash, so they can be cached long-term).
-        return FileResponse(
-            str(index_html),
-            headers={"Cache-Control": "no-cache"},
-        )
-
-    @app.get("/", include_in_schema=False)
-    async def spa_index() -> FileResponse:
-        return _index_response()
-
-    @app.get("/{full_path:path}", include_in_schema=False)
-    async def spa_fallback(full_path: str) -> Response:
-        # Keep API, docs, and health paths as backend responses (JSON 404/…),
-        # never hand them to the SPA.
-        if (
-            full_path.startswith("api/")
-            or full_path in {"docs", "redoc", "openapi.json", "health", "ready", "metrics"}
-        ):
-            return JSONResponse(status_code=404, content={"detail": "Not Found"})
-
-        # Serve an existing static file directly (e.g. favicon or other assets).
-        target = (dist / full_path).resolve()
-        if target.is_file() and str(target).startswith(str(dist.resolve())):
-            return FileResponse(str(target))
-        # Otherwise hand the route to the SPA.
-        return _index_response()
-
-    logger.info("Frontend mounted at / (dist=%s)", dist)
-
-
-mount_frontend(app)
+# The React SPA is *not* served by the API. It is built and hosted as a
+# standalone static site (Render static site `transform-web`) which talks to
+# this API cross-origin. Keeping the API free of SPA/static-file concerns means
+# the API image no longer needs a Node toolchain, and any unknown path correctly
+# returns a JSON 404 instead of an HTML application shell.
+#
+# The browser is expected to reach this API cross-origin, so `ALLOWED_ORIGINS`
+# (and the object-storage bucket CORS origin list) must include the SPA origin.
 
 
 if __name__ == "__main__":

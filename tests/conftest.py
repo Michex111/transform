@@ -12,6 +12,21 @@ os.environ.setdefault("BACKBLAZE_ACCESS_KEY", "dummy-access-key")
 os.environ.setdefault("BACKBLAZE_SECRET_KEY", "dummy-secret-key")
 os.environ.setdefault("BASE_TARGET_KEY", "output/")
 
+# CORS: the SPA is now hosted on its own origin, so it must be allow-listed
+# BEFORE src.presentation.api.main is imported (the app builds its
+# CORSMiddleware at import time from get_settings()). Without this the
+# cross-origin tests only passed when the developer's gitignored .env happened
+# to define ALLOWED_ORIGINS; in CI the unset setting defaults to [] and the
+# preflight is rejected. Set unconditionally so the suite is deterministic.
+os.environ.setdefault(
+    "ALLOWED_ORIGINS",
+    '["http://localhost:5173","https://transform-web.onrender.com"]',
+)
+os.environ.setdefault(
+    "S3_CORS_ALLOWED_ORIGINS",
+    '["http://localhost:5173","https://transform-web.onrender.com"]',
+)
+
 import pytest  # noqa: E402
 
 from src.infrastructure.converters.converter_registry import ConverterRegistry  # noqa: E402

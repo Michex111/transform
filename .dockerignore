@@ -49,9 +49,9 @@ Agents.MD
 # Production secrets backup — must never be baked into an image
 .env.production.backup
 
-# Frontend dependencies and build output. node_modules is large and is
-# reinstalled by `npm ci` in the frontend build stage; a locally-built dist
-# must never leak in, because that stage builds its own.
+# Frontend dependencies and build output. The SPA is built and hosted
+# separately (Render static site, root dir `web/`), so neither belongs in the
+# API/worker image; a locally-built dist must never leak into the runtime image.
 web/node_modules/
 web/dist/
 

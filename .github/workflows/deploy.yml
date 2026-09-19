@@ -8,6 +8,12 @@ name: Deploy
 #
 # The full CI suite is re-run on the exact commit being shipped before any
 # deploy hook fires, so a deploy can never proceed on failing tests.
+#
+# Two independent services are deployed, each behind the same `verify` gate:
+#   * transform-api — FastAPI backend (Docker web service)
+#   * transform-web — React SPA (static site)
+# They are separate jobs so a broken/missing deploy hook for one service fails
+# *loudly* without silently blocking or skipping the other.
 on:
   push:
     branches:
@@ -30,10 +36,10 @@ jobs:
     uses: ./.github/workflows/ci.yml
 
   # ---------------------------------------------------------------------------
-  # Production deployment.
+  # Backend API (transform-api) — Docker web service.
   # ---------------------------------------------------------------------------
-  production:
-    name: Deploy to production
+  deploy-api:
+    name: Deploy API (transform-api)
     needs: verify
     runs-on: ubuntu-latest
     environment:
@@ -42,18 +48,52 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Trigger production deploy
+      - name: Trigger API deploy
         env:
-          # Add a repository/environment secret named RENDER_PROD_DEPLOY_HOOK.
+          # Repository/environment secret holding the *full* Render deploy hook
+          # URL (e.g. https://api.render.com/deploy/srv-xxx?key=yyy).
+          # If it is missing or malformed, render_deploy_hook.py exits non-zero
+          # and this step fails loudly — a deploy is never silently skipped.
           DEPLOY_HOOK: ${{ secrets.RENDER_PROD_DEPLOY_HOOK }}
         run: |
           NORMALIZED_DEPLOY_HOOK="$(python3 .github/scripts/render_deploy_hook.py)"
 
-          echo "Triggering production deploy for ${GITHUB_SHA}..."
+          echo "Triggering transform-api deploy for ${GITHUB_SHA}..."
           if ! curl -fsS -X POST "$NORMALIZED_DEPLOY_HOOK"; then
             echo "::error::The deploy hook was rejected or unreachable."
             echo "Verify the URL is still current — Render regenerates the hook"
             echo "if the service was recreated, and old hooks stop working."
             exit 1
           fi
-          echo "Deploy hook accepted; Render build queued."
+          echo "Deploy hook accepted; Render build queued for transform-api."
+
+  # ---------------------------------------------------------------------------
+  # Frontend SPA (transform-web) — static site.
+  # ---------------------------------------------------------------------------
+  deploy-web:
+    name: Deploy SPA (transform-web)
+    needs: verify
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: ${{ vars.PRODUCTION_WEB_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Trigger static-site deploy
+        env:
+          # Separate hook for the static site. The site has auto-deploy OFF, so
+          # without this secret the SPA would never be redeployed — fail loudly
+          # instead of shipping a stale UI behind a fresh API.
+          DEPLOY_HOOK: ${{ secrets.RENDER_WEB_DEPLOY_HOOK }}
+          DEPLOY_HOOK_NAME: RENDER_WEB_DEPLOY_HOOK
+        run: |
+          NORMALIZED_DEPLOY_HOOK="$(python3 .github/scripts/render_deploy_hook.py)"
+
+          echo "Triggering transform-web deploy for ${GITHUB_SHA}..."
+          if ! curl -fsS -X POST "$NORMALIZED_DEPLOY_HOOK"; then
+            echo "::error::The static-site deploy hook was rejected or unreachable."
+            echo "Verify the URL in Render -> transform-web -> Settings -> Deploy Hook."
+            exit 1
+          fi
+          echo "Deploy hook accepted; Render build queued for transform-web."

@@ -73,8 +73,13 @@ function isClientEncryptionDisabledError(err: unknown): boolean {
  * doubled prefix (`/api/api/…`). This helper joins them correctly, and is
  * safe whether `API_BASE` is a local prefix (`/api`) or an absolute origin
  * (`https://api.example.com/api`).
+ *
+ * Exported so pages that fetch a server-returned path directly (rather than
+ * through `ApiClient.request`) resolve it against the configured API origin
+ * instead of the SPA origin — which matters now that the SPA is hosted
+ * separately (cross-origin) from the API.
  */
-function resolveServerPath(path: string): string {
+export function resolveServerPath(path: string): string {
   if (/^https?:\/\//i.test(path)) return path
   // Strip any leading `/api`/`/api/` from the returned path. The backend emits
   // download URLs already prefixed with `/api/…`, and `API_BASE` also carries
