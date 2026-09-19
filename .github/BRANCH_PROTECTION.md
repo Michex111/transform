@@ -1,8 +1,10 @@
 # Branch Protection Setup
 
 Branch protection **cannot be configured from the repository** — it is a
-GitHub server-side setting. The rules below are not applied automatically; use
-the commands/checklist in this file to apply them once.
+GitHub server-side setting.
+
+> **Status: ACTIVE on `main` and `staging`.** Applied 2026-09-17. The commands
+> below double as the reference for re-applying or changing it.
 
 ## Prerequisites
 
@@ -21,18 +23,20 @@ gh auth status
 
 ## Branch strategy
 
-Three branches, three stages. Each promotion is a PR — never a direct push:
+Four branches. Each promotion is a PR — never a direct push:
 
 ```
 dev ──▶ staging ──▶ main
 (implementation)  (testing)   (FINAL PRODUCTION)
+design ──┘  (design-system work, merged into main)
 ```
 
-| Branch    | Purpose                  | Protected | Deploys to  |
-| --------- | ------------------------ | --------- | ----------- |
-| `dev`     | Implementation           | No        | —           |
-| `staging` | Testing / pre-production | Yes       | —           |
-| `main`    | **Final production**     | Yes       | production  |
+| Branch    | Purpose                     | Protected | Deploys to  |
+| --------- | --------------------------- | --------- | ----------- |
+| `dev`     | Implementation              | No        | —           |
+| `staging` | Testing / pre-production    | Yes       | —           |
+| `design`  | Design-system work          | No        | —           |
+| `main`    | **Final production**        | Yes       | production  |
 
 `main` holds only releases that have passed `staging`. A push to `main`
 triggers the `Deploy` workflow, which re-runs the full test suite before
@@ -47,7 +51,11 @@ changes.
 REPO="Michex111/transform"
 
 # ---- main (final production): strictest protection ---------------------------
-# Require PRs, passing CI, an approving review, and no force-pushes/deletions.
+# Require PRs, passing CI, and no force-pushes/deletions.
+#
+# NOTE: required_approving_review_count is 0 on purpose. GitHub forbids
+# approving your own PR, so a count of 1 would make main permanently
+# unmergeable for a solo maintainer. Raise it only if a second reviewer exists.
 gh api -X PUT "repos/$REPO/branches/main/protection" \
   --input - <<'JSON'
 {
@@ -55,11 +63,11 @@ gh api -X PUT "repos/$REPO/branches/main/protection" \
     "strict": true,
     "contexts": ["Backend (pytest)", "Frontend (lint, test, build)"]
   },
-  "enforce_admins": true,
+  "enforce_admins": false,
   "required_pull_request_reviews": {
     "dismiss_stale_reviews": true,
     "require_code_owner_reviews": false,
-    "required_approving_review_count": 1
+    "required_approving_review_count": 0
   },
   "restrictions": null,
   "allow_force_pushes": false,
@@ -90,8 +98,37 @@ JSON
 
 ## Required GitHub secrets
 
-The `Deploy` workflow reads this. Add it under
-**Settings → Secrets and variables → Actions**.
+The `Deploy` workflow reads `RENDER_PROD_DEPLOY_HOOK`. **Without it the deploy
+job fails closed** (`::error::Secret RENDER_PROD_DEPLOY_HOOK is not configured`)
+rather than silently passing — so a missing secret can never be mistaken for a
+successful deploy.
+
+### 1. Get the deploy hook URL
+
+Render Dashboard → **transform-api** → **Settings** → **Deploy Hook** → copy the
+URL. It looks like:
+
+```
+https://api.render.com/deploy/srv-xxxxxxxxxxxx?key=yyyyyyyyyyyy
+```
+
+### 2. Add it as a repository secret
+
+Interactive (the value is never echoed):
+
+```bash
+gh secret set RENDER_PROD_DEPLOY_HOOK --repo Michex111/transform
+```
+
+Or via UI: **Settings → Secrets and variables → Actions → New repository
+secret**, name it exactly `RENDER_PROD_DEPLOY_HOOK`.
+
+### 3. Verify
+
+```bash
+gh api repos/Michex111/transform/actions/secrets --jq '.secrets[].name'
+# expected: RENDER_PROD_DEPLOY_HOOK
+```
 
 | Secret                    | Used by               | Where to get it                           |
 | ------------------------- | --------------------- | ----------------------------------------- |
@@ -100,9 +137,31 @@ The `Deploy` workflow reads this. Add it under
 Optional repository **variable** (Settings → Variables) used for the
 environment link displayed on deployments:
 
-| Variable             | Example                   |
-| -------------------- | ------------------------- |
-| `PRODUCTION_APP_URL` | `https://app.example.com` |
+```bash
+gh variable set PRODUCTION_APP_URL --repo Michex111/transform \
+  --body "https://transform-api-7b3g.onrender.com"
+```
+
+| Variable             | Example                                   |
+| -------------------- | ----------------------------------------- |
+| `PRODUCTION_APP_URL` | `https://transform-api-7b3g.onrender.com` |
+
+## GitHub environments
+
+Both environments exist but currently have **0 protection rules**, so deploys
+run without a manual approval gate.
+
+| Environment  | Used by                  |
+| ------------ | ------------------------ |
+| `production` | `deploy.yml` prod job    |
+| `staging`    | reserved                 |
+
+To require a manual approval before each production deploy, add yourself as a
+required reviewer in the GitHub UI: **Settings → Environments → production →
+Required reviewers**.
+
+Unlike PR reviews, a required environment reviewer **may approve their own**
+deployment, so this does not deadlock a solo maintainer.
 
 ## Verify protection
 
