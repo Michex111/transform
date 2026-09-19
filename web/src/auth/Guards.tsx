@@ -15,7 +15,17 @@ export function ProtectedRoute() {
   }
 
   if (!isAuthenticated) {
-    return <Navigate to="/login" state={{ from: location.pathname }} replace />;
+    // Preserve the query string too: Stripe returns users to paths like
+    // `/app/billing?credits=success`, and BillingPage reads those params to
+    // show the payment result. Dropping them would hide the confirmation
+    // when the session expires while the user is on the hosted Checkout page.
+    return (
+      <Navigate
+        to="/login"
+        state={{ from: `${location.pathname}${location.search}` }}
+        replace
+      />
+    );
   }
 
   return <Outlet />;
