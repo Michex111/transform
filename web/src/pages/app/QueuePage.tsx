@@ -52,9 +52,9 @@ const QueueRow = memo(function QueueRow({ job, onDownload, onRetry }: QueueRowPr
       <span className="min-w-0 truncate text-sm text-on-background">
         {job.fileName ?? job.input_file}
       </span>
-      <span className="hidden items-center gap-1 sm:flex">
-        <FormatChip format={job.source_format} />
-        <FormatChip format={job.target_format} />
+      <span className="hidden items-center gap-1.5 sm:flex">
+        <FormatChip format={job.source_format} size="xs" />
+        <FormatChip format={job.target_format} size="xs" />
       </span>
       <StatusBadge status={job.status} />
       <div className="hidden sm:block">

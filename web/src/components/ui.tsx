@@ -2,6 +2,7 @@ import type { InputHTMLAttributes, ReactNode } from "react";
 import { motion, useReducedMotion, type HTMLMotionProps } from "motion/react";
 import { Coins } from "@phosphor-icons/react";
 import { formatMeta, statusMeta } from "@/lib/format";
+import { FormatThumb, type FormatThumbSize } from "@/components/FormatThumb";
 
 /* ---------------- Skeleton (loading) ---------------- */
 
@@ -56,9 +57,9 @@ export function PageLoader({ label = "Loading…" }: { label?: string }) {
         animate={{ opacity: [0.4, 1, 0.4] }}
         transition={{ duration: 1.2, repeat: Infinity, ease: "easeInOut" }}
       >
-        <span className="inline-flex h-7 items-center rounded-md bg-fmt-pdf/20 px-2 font-mono text-xs font-bold text-fmt-pdf">PDF</span>
+        <FormatThumb format="pdf" size="sm" />
         <span className="block h-0.5 w-5 rounded-full bg-gradient-to-r from-fmt-pdf to-fmt-word" />
-        <span className="inline-flex h-7 items-center rounded-md bg-fmt-word/20 px-2 font-mono text-xs font-bold text-fmt-word">DOC</span>
+        <FormatThumb format="docx" size="sm" />
       </motion.span>
       <p className="text-sm text-muted">{label}</p>
     </div>
@@ -183,19 +184,30 @@ export function CreditsBadge({ credits }: { credits: number }) {
 
 /* ---------------- FormatChip + FormatMorph ---------------- */
 
-export function FormatChip({ format }: { format: string }) {
+/** Format thumbnail + the format name. Used in queue/history tables and cards. */
+export function FormatChip({
+  format,
+  size = "sm",
+}: {
+  format: string;
+  size?: FormatThumbSize;
+}) {
   const meta = formatMeta(format);
   return (
-    <span
-      className="inline-flex items-center rounded-md px-2 py-0.5 font-mono text-xs font-semibold"
-      style={{ color: meta.color, backgroundColor: `${meta.color}1a`, border: `1px solid ${meta.color}40` }}
-    >
-      {meta.label}
+    <span className="inline-flex items-center gap-1.5">
+      {/* label="" — the format name is rendered below, so the tile is decorative */}
+      <FormatThumb format={format} size={size} label="" />
+      <span
+        className="font-mono text-xs font-semibold whitespace-nowrap"
+        style={{ color: meta.color }}
+      >
+        {meta.label}
+      </span>
     </span>
   );
 }
 
-/** The brand signature: source → target chips joined by a gradient stream. */
+/** The brand signature: source → target thumbnails joined by a gradient stream. */
 export function FormatMorph({
   from,
   to,
@@ -209,23 +221,35 @@ export function FormatMorph({
 }) {
   const f = formatMeta(from);
   const t = formatMeta(to);
-  const chip = size === "lg" ? "px-3 py-1.5 text-sm" : size === "sm" ? "px-1.5 py-0.5 text-xs" : "px-2 py-1 text-xs";
+  const thumbSize: FormatThumbSize = size === "lg" ? "lg" : size === "sm" ? "sm" : "md";
+  // The `sm` tile is too small to hold its own extension badge, so name the
+  // format in text beside it — otherwise a dense row would show two anonymous
+  // icons and the target format would be unreadable.
+  const showText = size === "sm";
   return (
     <motion.span
       className="inline-flex items-center gap-1.5"
+      role="img"
       aria-label={`${f.label} to ${t.label}`}
       layout
       transition={{ type: "spring", stiffness: 320, damping: 26 }}
     >
       <motion.span
         key={f.label}
-        className={`inline-flex items-center rounded-md font-mono font-semibold ${chip}`}
-        style={{ color: f.color, backgroundColor: `${f.color}1a`, border: `1px solid ${f.color}40` }}
+        className="inline-flex items-center gap-1"
         initial={animated ? { scale: 0.6, opacity: 0 } : false}
         animate={{ scale: 1, opacity: 1 }}
         transition={{ type: "spring", stiffness: 380, damping: 20 }}
       >
-        {f.label}
+        <FormatThumb format={from} size={thumbSize} label={showText ? "" : undefined} />
+        {showText && (
+          <span
+            className="font-mono text-xs font-semibold whitespace-nowrap"
+            style={{ color: f.color }}
+          >
+            {f.label}
+          </span>
+        )}
       </motion.span>
       <span className="inline-flex items-center" aria-hidden>
         <span
@@ -248,13 +272,20 @@ export function FormatMorph({
       </span>
       <motion.span
         key={t.label}
-        className={`inline-flex items-center rounded-md font-mono font-semibold ${chip}`}
-        style={{ color: t.color, backgroundColor: `${t.color}1a`, border: `1px solid ${t.color}40` }}
+        className="inline-flex items-center gap-1"
         initial={animated ? { scale: 0.6, opacity: 0 } : false}
         animate={{ scale: 1, opacity: 1 }}
         transition={{ type: "spring", stiffness: 380, damping: 20, delay: 0.05 }}
       >
-        {t.label}
+        <FormatThumb format={to} size={thumbSize} label={showText ? "" : undefined} />
+        {showText && (
+          <span
+            className="font-mono text-xs font-semibold whitespace-nowrap"
+            style={{ color: t.color }}
+          >
+            {t.label}
+          </span>
+        )}
       </motion.span>
     </motion.span>
   );
@@ -320,9 +351,9 @@ export function Logo({ withWordmark = true }: { withWordmark?: boolean }) {
   return (
     <span className="inline-flex items-center gap-2">
       <span className="flex items-center gap-0.5" aria-hidden>
-        <span className="inline-flex h-6 items-center rounded-md bg-fmt-pdf/20 px-1.5 font-mono text-[10px] font-bold text-fmt-pdf">PDF</span>
+        <FormatThumb format="pdf" size="xs" />
         <span className="block h-0.5 w-3 rounded-full bg-gradient-to-r from-fmt-pdf to-fmt-word" />
-        <span className="inline-flex h-6 items-center rounded-md bg-fmt-word/20 px-1.5 font-mono text-[10px] font-bold text-fmt-word">DOC</span>
+        <FormatThumb format="docx" size="xs" />
       </span>
       {withWordmark && (
         <span className="font-display text-lg font-semibold tracking-tight text-on-background">

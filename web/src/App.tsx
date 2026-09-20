@@ -23,6 +23,11 @@ const LoginPage = lazy(() =>
 const RegisterPage = lazy(() =>
   import("@/pages/public/RegisterPage").then((m) => ({ default: m.RegisterPage })),
 );
+// Single dynamic public route: `/{ext}-converter` and `/{from}-to-{to}`.
+// Static segments outrank it, so `/pricing`, `/convert`, `/login`, … still win.
+const FormatRoutePage = lazy(() =>
+  import("@/pages/public/FormatRoutePage").then((m) => ({ default: m.FormatRoutePage })),
+);
 const DashboardPage = lazy(() =>
   import("@/pages/app/DashboardPage").then((m) => ({ default: m.DashboardPage })),
 );
@@ -66,6 +71,8 @@ export default function App() {
         <Route path="/pricing" element={<PricingPage />} />
         <Route path="/security" element={<SecurityPage />} />
         <Route path="/convert" element={<GuestConvertPage />} />
+        {/* Dynamic format routes, ranked below every static segment above. */}
+        <Route path="/:slug" element={<FormatRoutePage />} />
       </Route>
 
       {/* Signed-out-only auth routes */}

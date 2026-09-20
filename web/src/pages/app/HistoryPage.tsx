@@ -67,9 +67,9 @@ const HistoryRow = memo(function HistoryRow({
       <span className="min-w-0 truncate text-sm text-on-background">
         {job.fileName ?? job.input_file}
       </span>
-      <span className="hidden items-center gap-1 md:flex">
-        <FormatChip format={job.source_format} />
-        <FormatChip format={job.target_format} />
+      <span className="hidden items-center gap-1.5 md:flex">
+        <FormatChip format={job.source_format} size="xs" />
+        <FormatChip format={job.target_format} size="xs" />
       </span>
       <StatusBadge status={job.status} />
       <div className="flex items-center justify-end gap-3">
