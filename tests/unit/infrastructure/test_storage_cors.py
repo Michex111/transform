@@ -1,8 +1,12 @@
 """Tests for the storage bucket CORS policy builder."""
 
+import logging
 import sys
+import types
+from types import SimpleNamespace
 
 import pytest
+from pydantic import SecretStr
 
 from src.infrastructure.adapters.storage import cors as cors_module
 from src.infrastructure.adapters.storage.cors import (
@@ -131,3 +135,199 @@ def test_apply_bucket_cors_skips_when_no_origins(
     cors_module.apply_bucket_cors([])
 
     assert called == []
+
+
+# ---------------------------------------------------------------------------
+# Shared-bucket origin pinning + read-back verification
+#
+# Production uploads broke because bucket CORS is BUCKET-GLOBAL: a local dev
+# process rewrote the single rule set from its own localhost-only config and
+# silently deleted the deployed SPA's origin. Backblaze then answered the
+# browser's preflight with a bare 403 (no CORS headers) and the SPA reported a
+# generic object-storage error. The production container could not repair it
+# either, because ``b2sdk`` was not installed and Backblaze rejects the S3
+# PutBucketCors fallback once native rules exist.
+# ---------------------------------------------------------------------------
+
+
+def _settings_namespace(**overrides: object) -> SimpleNamespace:
+    """A minimal stand-in for Settings covering what cors.py reads."""
+    base: dict[str, object] = {
+        "BACKBLAZE_ENDPOINT": "https://s3.us-east-005.backblazeb2.com",
+        "BACKBLAZE_ACCESS_KEY": SecretStr("key"),
+        "BACKBLAZE_SECRET_KEY": SecretStr("secret"),
+        "S3_BUCKET_NAME": "test-bucket",
+        "ALLOWED_ORIGINS": [],
+        "S3_CORS_ALLOWED_ORIGINS": [],
+    }
+    base.update(overrides)
+    return SimpleNamespace(**base)
+
+
+def test_normalize_origins_trims_dedupes_and_drops_blanks() -> None:
+    assert cors_module._normalize_origins(
+        ["  http://a.test ", "http://a.test", "", None, "http://b.test"]
+    ) == ["http://a.test", "http://b.test"]
+
+
+def test_configured_origins_merges_both_settings_and_pinned_baseline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``ALLOWED_ORIGINS`` and ``S3_CORS_ALLOWED_ORIGINS`` drift; both are needed."""
+    monkeypatch.setattr(
+        cors_module,
+        "get_settings",
+        lambda: _settings_namespace(
+            S3_CORS_ALLOWED_ORIGINS=["https://spa.test"],
+            ALLOWED_ORIGINS=["https://spa.test", "https://api.test"],
+        ),
+    )
+
+    origins = cors_module._configured_origins()
+
+    assert "https://spa.test" in origins
+    assert "https://api.test" in origins
+    for pinned in cors_module.ALWAYS_ALLOWED_ORIGINS:
+        assert pinned in origins
+
+
+def test_apply_bucket_cors_keeps_production_origin_alongside_local_dev(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: a dev config listing only localhost must not drop the SPA origin."""
+    monkeypatch.setattr(
+        cors_module,
+        "get_settings",
+        lambda: _settings_namespace(
+            S3_CORS_ALLOWED_ORIGINS=["http://localhost:5173"],
+            ALLOWED_ORIGINS=["http://localhost:5173"],
+        ),
+    )
+    written: list[list[str]] = []
+    monkeypatch.setattr(cors_module, "_apply_b2_cors", lambda origins: written.append(origins))
+
+    cors_module.apply_bucket_cors()
+
+    assert len(written) == 1
+    assert written[0] == [
+        "http://localhost:5173",
+        "http://localhost:5174",
+        "http://localhost:8000",
+        "https://transform-web.onrender.com",
+    ]
+
+
+def test_origins_from_b2_rules_flattens_and_dedupes() -> None:
+    assert cors_module._origins_from_b2_rules(
+        [
+            {"allowedOrigins": ["https://a.test", "https://b.test"]},
+            {"allowedOrigins": ["https://b.test"]},
+            {"allowedOrigins": []},
+            {},
+        ]
+    ) == ["https://a.test", "https://b.test"]
+
+
+def test_missing_origins_treats_unreadable_rules_as_missing() -> None:
+    """An unverifiable policy must never be reported as OK."""
+    assert cors_module._missing_origins(["https://a.test"], None) == ["https://a.test"]
+
+
+def test_missing_origins_reports_only_absent_origins() -> None:
+    assert cors_module._missing_origins(
+        ["https://a.test", "https://b.test"], ["https://a.test"]
+    ) == ["https://b.test"]
+
+
+def test_apply_b2_cors_logs_error_when_b2sdk_missing(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The fallback is unreliable on B2, so the log must be an actionable ERROR."""
+    monkeypatch.setitem(sys.modules, "b2sdk", None)
+    monkeypatch.setitem(sys.modules, "b2sdk.v2", None)
+    monkeypatch.setattr(cors_module, "_apply_s3_cors", lambda origins: None)
+
+    with caplog.at_level(logging.ERROR, logger=cors_module.__name__):
+        cors_module._apply_b2_cors(["https://app.example.com"])
+
+    assert "b2sdk is not installed" in caplog.text
+
+
+def test_apply_b2_cors_logs_error_when_bucket_did_not_record_origin(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A dropped origin is invisible to the browser until uploads fail — report it."""
+    _install_fake_b2sdk(monkeypatch, recorded_origins=["http://localhost:5173"])
+    monkeypatch.setattr(cors_module, "get_settings", lambda: _settings_namespace())
+
+    with caplog.at_level(logging.ERROR, logger=cors_module.__name__):
+        cors_module._apply_b2_cors(["https://transform-web.onrender.com"])
+
+    assert "did not record" in caplog.text
+    assert "https://transform-web.onrender.com" in caplog.text
+
+
+def test_apply_b2_cors_logs_verification_when_all_origins_recorded(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    _install_fake_b2sdk(monkeypatch)
+    monkeypatch.setattr(cors_module, "get_settings", lambda: _settings_namespace())
+
+    with caplog.at_level(logging.INFO, logger=cors_module.__name__):
+        cors_module._apply_b2_cors(["https://transform-web.onrender.com"])
+
+    assert "Verified 1 bucket CORS origin(s)" in caplog.text
+
+
+def _install_fake_b2sdk(
+    monkeypatch: pytest.MonkeyPatch, *, recorded_origins: list[str] | None = None
+) -> None:
+    """Install a minimal fake ``b2sdk`` into ``sys.modules``.
+
+    ``recorded_origins`` overrides what the bucket reports back, simulating a
+    rule the service silently dropped (``None`` echoes what was written).
+    """
+    state: dict[str, list[dict]] = {"rules": []}
+
+    class FakeBucket:
+        type_ = "allPrivate"
+
+        def update(self, bucket_type: str | None = None, cors_rules=None) -> None:
+            origins = (
+                recorded_origins
+                if recorded_origins is not None
+                else cors_rules[0]["allowedOrigins"]
+            )
+            state["rules"] = [{"allowedOrigins": list(origins)}]
+
+        def as_dict(self) -> dict:
+            return {"corsRules": state["rules"]}
+
+    class FakeB2Api:
+        def __init__(self, _info) -> None:
+            self.bucket = FakeBucket()
+
+        def authorize_account(self, *_args, **_kwargs) -> None:
+            return None
+
+        def get_bucket_by_name(self, _name: str) -> FakeBucket:
+            return self.bucket
+
+    v2 = types.ModuleType("b2sdk.v2")
+    v2.AbstractAccountInfo = object  # type: ignore[attr-defined]
+    v2.InMemoryAccountInfo = lambda: object()  # type: ignore[attr-defined]
+    v2.B2Api = FakeB2Api  # type: ignore[attr-defined]
+
+    exception = types.ModuleType("b2sdk.v2.exception")
+
+    class B2Error(Exception):
+        pass
+
+    exception.B2Error = B2Error  # type: ignore[attr-defined]
+
+    b2sdk = types.ModuleType("b2sdk")
+    b2sdk.v2 = v2  # type: ignore[attr-defined]
+
+    monkeypatch.setitem(sys.modules, "b2sdk", b2sdk)
+    monkeypatch.setitem(sys.modules, "b2sdk.v2", v2)
+    monkeypatch.setitem(sys.modules, "b2sdk.v2.exception", exception)
