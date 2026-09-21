@@ -74,12 +74,6 @@ export function fencrDataKeyToBase64(dataKey: Bytes): string {
   return bytesToBase64(dataKey);
 }
 
-/** Base64 of a WebCrypto key's raw bytes (the key MUST be extractable). */
-export async function webcryptoKeyToBase64(key: CryptoKey): Promise<string> {
-  const raw = await crypto.subtle.exportKey("raw", key);
-  return bytesToBase64(new Uint8Array(raw));
-}
-
 /** Derive the 32-byte per-file AES-256-GCM key from the raw data key + salt. */
 async function deriveFileKey(dataKey: Bytes, salt: Bytes): Promise<ArrayBuffer> {
   const hkdfKey = await crypto.subtle.importKey("raw", dataKey, { name: "HKDF" }, false, [

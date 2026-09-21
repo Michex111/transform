@@ -7,25 +7,36 @@ Business rules live in ``FileService``; this router stays presentation-only.
 
 from typing import Annotated
 
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.responses import StreamingResponse
 
 from src.application.exceptions.file_system_exceptions import FileSystemError
 from src.application.services.file_service import FileService
 from src.application.services.file_transfer_service import TransferService
+from src.infrastructure.adapters.repository.sql_conversion_job_repo import SQLConversionJobRepository
+from src.infrastructure.adapters.repository.sql_user_file_repo import SQLUserFileRepository
 from src.infrastructure.adapters.security.encryption import FileEncryptionService
 from src.infrastructure.adapters.storage.minio_storage_adapter import (
     MinioFileStorageAdapter,
     MinioUrlStorageAdapter,
 )
+from src.infrastructure.adapters.storage.sanitize import (
+    UnsafeObjectKeyError,
+    sanitize_object_key,
+)
+from src.infrastructure.logging.audit import log_data_access
 from src.presentation.api.dependencies.auth_dependencies import CurrentUser
 from src.presentation.api.dependencies.download_stream import iter_decrypted_object
 from src.presentation.api.dependencies.service_dependencies import (
+    get_conversion_repository,
     get_encryption_service,
     get_file_service,
     get_minio_download_adapter,
     get_minio_url_storage,
     get_transfer_service,
+    get_user_file_repository,
 )
 from src.application.dtos.upload_dto import UploadResponse
 from src.presentation.schemas.files import (
@@ -235,12 +246,46 @@ async def generate_presigned_urls(
     payload: PresignedUrlsRequest,
     current_user: CurrentUser,
     storage: Annotated[MinioUrlStorageAdapter, Depends(get_minio_url_storage)],
+    file_repo: Annotated[SQLUserFileRepository, Depends(get_user_file_repository)],
+    job_repo: Annotated[SQLConversionJobRepository, Depends(get_conversion_repository)],
 ) -> list[PresignedUrlResponse]:
-    """Generate multiple pre-signed GET (download) URLs for objects in the bucket."""
-    del current_user
-    results: list[PresignedUrlResponse] = []
+    """Generate pre-signed GET (download) URLs for the caller's own objects.
+
+    A key is only presigned when it belongs to the caller: one of their
+    ``user_files.file_key`` rows, or a ``conversion_jobs.object_key`` /
+    ``output_file``. Anything else is a 404, so the endpoint can be used neither
+    to read another tenant's object nor to enumerate the bucket via the
+    404/200 difference. The first unusable key still aborts the whole batch.
+    """
+    # Sanitize first — an unsafe key can never be one of the caller's objects.
+    safe_keys: list[str] = []
     for key in payload.object_keys:
-        if not await storage.object_exists(key):
+        try:
+            safe_keys.append(sanitize_object_key(key))
+        except UnsafeObjectKeyError:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Object not found: {key}",
+            ) from None
+
+    # Ownership: one query per repository instead of a probe per key.
+    owned = await file_repo.list_owned_keys(current_user.id, safe_keys)
+    owned |= await job_repo.list_owned_object_keys(current_user.id, safe_keys)
+
+    # Existence: one storage round-trip per *owned* unique key, in parallel.
+    # Keys the caller does not own are never probed, so their presence cannot
+    # be inferred from timing or from which 404 is returned.
+    keys_to_check = [key for key in dict.fromkeys(safe_keys) if key in owned]
+    checked = (
+        await asyncio.gather(*(storage.object_exists(key) for key in keys_to_check))
+        if keys_to_check
+        else []
+    )
+    existence = dict(zip(keys_to_check, checked))
+
+    results: list[PresignedUrlResponse] = []
+    for key in safe_keys:
+        if key not in owned or not existence.get(key, False):
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Object not found: {key}",
@@ -401,6 +446,12 @@ async def download_file(
     except FileSystemError as exc:
         raise _map_fs_error(exc) from exc
 
+    log_data_access(
+        user_id=str(current_user.id),
+        action="download",
+        resource="library_file",
+        file_id=file_id,
+    )
     if encryption_service is not None:
         return FileDownloadResponse(
             download_url=f"/api/v1/files/{file_id}/stream",
@@ -437,6 +488,12 @@ async def stream_file(
     except FileSystemError as exc:
         raise _map_fs_error(exc) from exc
 
+    log_data_access(
+        user_id=str(current_user.id),
+        action="download",
+        resource="library_file",
+        file_id=file_id,
+    )
     return StreamingResponse(
         iter_decrypted_object(storage, row.file_key, encryption_service, str(current_user.id)),
         media_type=row.mime_type or "application/octet-stream",

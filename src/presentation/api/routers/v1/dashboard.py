@@ -1,14 +1,11 @@
 """User dashboard API endpoints."""
 
 from datetime import UTC, datetime
-from typing import Annotated, cast
-
-import asyncio
+from typing import Annotated
 
 from fastapi import APIRouter, Depends
 
-from src.domain.security.enitities.api_key import APIKey, APIKeyStatus
-from src.domain.subscriptions.entities.credit import Credit
+from src.domain.security.enitities.api_key import APIKeyStatus
 from src.domain.subscriptions.policies.tier_policy import TierPolicy
 from src.domain.subscriptions.value_object.credit_period import (
     current_period_key,
@@ -18,10 +15,7 @@ from src.infrastructure.adapters.repository.sql_api_key_repo import SQLAPIKeyRep
 from src.infrastructure.adapters.repository.sql_conversion_job_repo import SQLConversionJobRepository
 from src.infrastructure.adapters.repository.sql_credit_repo import SQLCreditRepository
 from src.infrastructure.adapters.repository.sql_subscription_repo import SQLSubscriptionRepository
-from src.infrastructure.adapters.repository.sql_user_file_repo import (
-    SQLUserFileRepository,
-    StorageBreakdownRow,
-)
+from src.infrastructure.adapters.repository.sql_user_file_repo import SQLUserFileRepository
 from src.presentation.api.dependencies.auth_dependencies import CurrentUser
 from src.presentation.api.dependencies.service_dependencies import (
     get_api_key_repository,
@@ -61,31 +55,18 @@ async def get_dashboard(
     allowance = policy.monthly_conversion_credits
     credits_reset_at = next_period_start(now) if allowance is not None else None
 
-    # These queries are independent of one another, so run them concurrently
-    # instead of serially (previously 6 sequential DB round-trips per request).
-    # ``asyncio.gather`` only ships precise overloads for up to six awaitables,
-    # so the seven-way result shape is spelled out for the type checker.
+    # Run these sequentially: all repositories share the request's single
+    # ``AsyncSession``, which is NOT safe for concurrent tasks (and asyncpg
+    # serialises them anyway). The previous ``asyncio.gather`` therefore bought
+    # no parallelism and risked a second pooled connection being checked out.
     period_key = current_period_key(now)
-    counts, credits_used, used_bytes, file_count, breakdown, credit, api_keys = cast(
-        tuple[
-            dict[str, int],
-            int,
-            int,
-            int,
-            list[StorageBreakdownRow],
-            Credit | None,
-            list[APIKey],
-        ],
-        await asyncio.gather(
-            job_repo.count_by_status(current_user.id),
-            job_repo.sum_credits_used(current_user.id),
-            file_repo.get_user_storage_used(current_user.id),
-            file_repo.count_user_files(current_user.id),
-            file_repo.get_storage_breakdown_by_extension(current_user.id),
-            credit_repo.get_credit(str(current_user.id), period_key),
-            api_key_repo.find_by_user(current_user.id),
-        ),
-    )
+    counts = await job_repo.count_by_status(current_user.id)
+    credits_used = await job_repo.sum_credits_used(current_user.id)
+    used_bytes = await file_repo.get_user_storage_used(current_user.id)
+    file_count = await file_repo.count_user_files(current_user.id)
+    breakdown = await file_repo.get_storage_breakdown_by_extension(current_user.id)
+    credit = await credit_repo.get_credit(str(current_user.id), period_key)
+    api_keys = await api_key_repo.find_by_user(current_user.id)
 
     balance = credit.remaining if credit is not None else (allowance or 0)
     active_api_keys = sum(1 for k in api_keys if k.status == APIKeyStatus.ACTIVE)

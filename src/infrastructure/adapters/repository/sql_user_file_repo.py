@@ -4,7 +4,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, UTC
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.infrastructure.adapters.storage.sanitize import normalize_extension
@@ -55,6 +55,37 @@ class SQLUserFileRepository:
             select(UserFileModel).where(UserFileModel.id == file_id)
         )
         return result.scalar_one_or_none()
+
+    async def find_by_key(self, user_id: int, file_key: str) -> UserFileModel | None:
+        """Fetch a user's file record for a given object key, if any.
+
+        Used to keep upload verification idempotent: the same object key must
+        not produce two library rows.
+        """
+        result = await self._session.execute(
+            select(UserFileModel).where(
+                UserFileModel.user_id == user_id,
+                UserFileModel.file_key == file_key,
+            )
+        )
+        return result.scalars().first()
+
+    async def list_owned_keys(self, user_id: int, file_keys: list[str]) -> set[str]:
+        """Return the subset of ``file_keys`` that belong to ``user_id``.
+
+        One ``IN`` query instead of a probe per key; used to authorise
+        presigned-URL requests without leaking other tenants' objects.
+        """
+        unique_keys = list(dict.fromkeys(file_keys))
+        if not unique_keys:
+            return set()
+        result = await self._session.execute(
+            select(UserFileModel.file_key).where(
+                UserFileModel.user_id == user_id,
+                UserFileModel.file_key.in_(unique_keys),
+            )
+        )
+        return set(result.scalars().all())
 
     async def list_by_user(
         self, user_id: int, *, folder_id: str | None = None,
@@ -138,12 +169,38 @@ class SQLUserFileRepository:
 
     async def delete(self, file_id: str) -> bool:
         """Delete a file record by ID. Returns True if a row was removed."""
-        record = await self.get_by_id(file_id)
-        if record is None:
-            return False
-        await self._session.delete(record)
+        result = await self._session.execute(
+            delete(UserFileModel).where(UserFileModel.id == file_id)
+        )
         await self._session.commit()
-        return True
+        return result.rowcount > 0  # type: ignore[attr-defined]
+
+    async def delete_many(self, user_id: int, file_ids: list[str]) -> list[UserFileModel]:
+        """Delete several file records owned by ``user_id`` in one statement.
+
+        Returns the rows that were actually deleted. Unknown or foreign ids are
+        silently skipped (never an error).
+        """
+        unique_ids = list(dict.fromkeys(file_ids))
+        if not unique_ids:
+            return []
+        result = await self._session.execute(
+            select(UserFileModel).where(
+                UserFileModel.user_id == user_id,
+                UserFileModel.id.in_(unique_ids),
+            )
+        )
+        rows = list(result.scalars().all())
+        if not rows:
+            return []
+        await self._session.execute(
+            delete(UserFileModel).where(
+                UserFileModel.user_id == user_id,
+                UserFileModel.id.in_([row.id for row in rows]),
+            )
+        )
+        await self._session.commit()
+        return rows
 
     async def count_user_files(self, user_id: int) -> int:
         """Total number of file records owned by a user (all folders)."""

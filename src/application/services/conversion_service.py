@@ -6,6 +6,7 @@ from src.application.ports.queue_port import JobQueuePort
 from src.application.services.priority_queue_dispatcher import PriorityQueueDispatcher
 from src.domain.conversions.entities.conversion_job import ConversionJob
 from src.domain.conversions.policies.conversion_policy import is_supported
+from src.domain.conversions.policies.job_ownership import is_job_owner
 from src.domain.conversions.value_object.conversion_type import ConversionType
 from src.domain.subscriptions.value_object.tier import SubscriptionTier
 from src.infrastructure.converters.converter_registry import get_registry
@@ -141,9 +142,7 @@ class ConversionService:
                 by the caller, or is not in a retryable (FAILED) state.
         """
         job = await self.db_repository.get_conversion_job(job_id)
-        if job is None:
-            raise InvalidConversionJobError("Job not found")
-        if job.user_id is not None and job.user_id != user_id:
+        if not is_job_owner(job, user_id):
             raise InvalidConversionJobError("Job not found")
 
         # Reset FAILED -> PENDING (keeps object_key so the existing file is reused).

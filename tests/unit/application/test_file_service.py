@@ -40,6 +40,12 @@ class FakeFileRepo:
     async def get_by_id(self, file_id: str) -> UserFileModel | None:
         return self.files.get(file_id)
 
+    async def find_by_key(self, user_id, file_key):
+        for row in self.files.values():
+            if row.user_id == user_id and row.file_key == file_key:
+                return row
+        return None
+
     async def list_by_user(self, user_id, *, folder_id=None, offset=0, limit=20):
         rows = [f for f in self.files.values() if f.user_id == user_id and f.folder_id == folder_id]
         rows.sort(key=lambda f: f.id)
@@ -61,6 +67,14 @@ class FakeFileRepo:
 
     async def delete(self, file_id: str) -> bool:
         return self.files.pop(file_id, None) is not None
+
+    async def delete_many(self, user_id, file_ids):
+        deleted = []
+        for file_id in dict.fromkeys(file_ids):
+            row = self.files.get(file_id)
+            if row is not None and row.user_id == user_id:
+                deleted.append(self.files.pop(file_id))
+        return deleted
 
     async def set_favorite(self, file_id: str, is_favorite: bool) -> bool:
         row = self.files.get(file_id)
@@ -373,6 +387,27 @@ def test_complete_upload_prefers_session_extension(service, file_repo, storage) 
     )
     row = file_repo.files[file_id]
     assert row.file_extension == "tar.bz2"  # normalised from the session value
+
+
+def test_complete_upload_derives_compound_extension_from_name(service, file_repo, storage) -> None:
+    """DEDUP-1: a ``.tar.gz`` name must resolve to the compound extension."""
+    storage.sizes["uploads/archive.bin"] = 10
+    file_id = _run(
+        service.complete_upload(1, _session(key="uploads/archive.bin", name="backup.tar.gz"))
+    )
+    assert file_repo.files[file_id].file_extension == "tar.gz"
+
+
+def test_complete_upload_is_idempotent_for_the_same_object_key(
+    service, file_repo, storage
+) -> None:
+    """QUAL-1: re-verifying the same upload must not create a second row."""
+    storage.sizes["uploads/abc.pdf"] = 1234
+    first = _run(service.complete_upload(1, _session()))
+    second = _run(service.complete_upload(1, _session()))
+
+    assert first == second
+    assert len(file_repo.files) == 1
 
 
 def test_complete_upload_uses_session_file_name_and_folder(service, file_repo) -> None:

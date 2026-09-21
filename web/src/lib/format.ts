@@ -34,6 +34,20 @@ export function formatMeta(fmt: string): FormatMeta {
   };
 }
 
+/**
+ * The lowercased extension segment of a file name, `""` when there is none
+ * (`"Report.PDF"` → `"pdf"`, `"README"` → `"readme"`, `""` → `""`).
+ *
+ * The single parsing helper for "what does the user's file claim to be". It is
+ * deliberately NOT `formatExt`: that function falls back to the MIME type and
+ * then to `"txt"`, which would silently reclassify an extensionless or
+ * long-extension file — wrong for the callers that validate the user's own file
+ * against the supported conversion graph.
+ */
+export function fileNameExtension(fileName: string): string {
+  return fileName.split(".").pop()?.toLowerCase() ?? "";
+}
+
 /** Derive a file extension from a file name (or mime type fallback). */
 export function formatExt(fileName: string, mimeType?: string): string {
   const fromName = fileName.split(".").pop()?.toLowerCase().trim();

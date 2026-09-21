@@ -5,13 +5,21 @@ from pathlib import Path
 import pytest
 
 import workers.converter_workers.processor as processor_module
+from src.domain.conversions.entities.conversion_job import ConversionJob
 from src.domain.conversions.value_object.conversion_type import ConversionType
 from src.domain.conversions.value_object.job_status import JobStatus
 from src.domain.subscriptions.value_object.tier import SubscriptionTier
 from tests.fakes.fake_credit_port import FakeCreditPort
+from tests.fakes.fake_db_repository import FakeDatabaseRepository
 from tests.fakes.fake_logger import FakeLogger
 from workers.converter_workers.context.worker_context import WorkerContext
-from workers.converter_workers.processor import _convert_file, process_job, resolve_path
+from workers.converter_workers.processor import (
+    _convert_file,
+    _download_input_file,
+    _upload_output_file,
+    process_job,
+    resolve_path,
+)
 from workers.converter_workers.processor import resolve_input_path, resolve_output_path
 
 
@@ -926,3 +934,201 @@ def test_process_job_credit_precheck_failure_proceeds_best_effort(
     assert fake_storage_port.objects["output/user/42/job/job-1/input.md"] == b"HELLO WORLD"
     assert len(credit_port.consume_calls) == 1  # still deducted after successful conversion
     assert any(level == "warning" and "pre-check" in message for level, message, _ in logger.records)
+
+
+# ----------------------------------------------------------------------
+# W-9 — idempotency guard against a redelivered job (double charge)
+# ----------------------------------------------------------------------
+
+
+def test_process_job_skips_a_job_already_completed_in_the_database(
+    conversion_job,
+    fake_storage_port,
+    fake_queue_port,
+    fake_event_publisher,
+    fake_converter_registry,
+    fake_repository_port,
+) -> None:
+    """A redelivered job must not be converted — or charged — twice.
+
+    ``fetch_job`` rebuilds a fresh PENDING entity from the stream fields only,
+    so without reading the persisted row a replay re-converts the file and calls
+    ``consume`` a second time. The queue can legitimately redeliver (the stale
+    reclaim re-queues a job whose worker crashed).
+    """
+    credit_port = FakeCreditPort(remaining=50)
+    _register_uppercase_converter(conversion_job, fake_converter_registry)
+    conversion_job.user_id = 42
+    conversion_job.pending_processing()
+
+    context = _build_context(
+        fake_storage_port,
+        fake_queue_port,
+        fake_event_publisher,
+        fake_converter_registry,
+        credit_port=credit_port,
+        job_repository=fake_repository_port,
+    )
+
+    # First pass: converts, completes, persists the row, consumes credits once.
+    asyncio.run(process_job(context, conversion_job))
+    assert conversion_job.status == JobStatus.COMPLETED
+    assert len(credit_port.consume_calls) == 1
+
+    # A redelivery rebuilds a fresh PENDING entity for the same job id.
+    redelivered = ConversionJob(
+        job_id=conversion_job.job_id,
+        conversion=conversion_job.conversion,
+        input_file=conversion_job.input_file,
+        object_key=conversion_job.object_key,
+        user_id=42,
+    )
+    redelivered.pending_processing()
+    downloads_before = len(fake_storage_port.download_calls)
+    uploads_before = len(fake_storage_port.upload_calls)
+
+    asyncio.run(process_job(context, redelivered))
+
+    # Exactly ONE consume call in total, and no second conversion/upload.
+    assert len(credit_port.consume_calls) == 1
+    assert len(fake_storage_port.download_calls) == downloads_before
+    assert len(fake_storage_port.upload_calls) == uploads_before
+    # A terminal event is still emitted so a client waiting on SSE for this
+    # delivery learns the job finished.
+    terminal = fake_event_publisher.published_events[-1]
+    assert terminal["status"] == JobStatus.COMPLETED
+    assert terminal["progress"] == 100
+
+
+def test_process_job_does_not_skip_a_job_that_has_no_completed_row(
+    conversion_job,
+    fake_storage_port,
+    fake_queue_port,
+    fake_event_publisher,
+    fake_converter_registry,
+    fake_repository_port,
+) -> None:
+    """The guard must not block a first-time run (nothing persisted yet)."""
+    credit_port = FakeCreditPort(remaining=50)
+    _register_uppercase_converter(conversion_job, fake_converter_registry)
+    conversion_job.user_id = 42
+    conversion_job.pending_processing()
+
+    context = _build_context(
+        fake_storage_port,
+        fake_queue_port,
+        fake_event_publisher,
+        fake_converter_registry,
+        credit_port=credit_port,
+        job_repository=fake_repository_port,
+    )
+
+    asyncio.run(process_job(context, conversion_job))
+
+    assert conversion_job.status == JobStatus.COMPLETED
+    assert len(credit_port.consume_calls) == 1
+    assert len(fake_storage_port.download_calls) == 1
+
+
+def test_process_job_proceeds_when_the_idempotency_read_fails(
+    conversion_job,
+    fake_storage_port,
+    fake_queue_port,
+    fake_event_publisher,
+    fake_converter_registry,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A DB hiccup on the guard read must not block a legitimate conversion."""
+    repository = FakeDatabaseRepository()
+
+    async def exploding_get(job_id: str):
+        raise RuntimeError("db is down")
+
+    monkeypatch.setattr(repository, "get_conversion_job", exploding_get)
+    _register_uppercase_converter(conversion_job, fake_converter_registry)
+    conversion_job.pending_processing()
+
+    context = _build_context(
+        fake_storage_port,
+        fake_queue_port,
+        fake_event_publisher,
+        fake_converter_registry,
+        job_repository=repository,
+    )
+
+    asyncio.run(process_job(context, conversion_job))
+
+    assert conversion_job.status == JobStatus.COMPLETED
+
+
+# ----------------------------------------------------------------------
+# W-8 — object-storage calls must be bounded
+# ----------------------------------------------------------------------
+
+
+def test_hung_storage_transfer_fails_the_job_instead_of_hanging_the_worker(
+    conversion_job,
+    fake_storage_port,
+    fake_converter_registry,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A stalled object-store socket must not park the worker loop forever.
+
+    Storage calls are blocking and were previously unbounded: no other job ran,
+    no stale sweep happened, and the container never exited so
+    ``restart: unless-stopped`` never fired. ``asyncio.wait_for`` bounds the
+    await (the underlying thread still runs — see the converter-timeout test).
+    """
+    import time as time_module
+
+    def stalled_download(key: str, dest_path: Path) -> None:
+        del key, dest_path
+        time_module.sleep(1)
+
+    monkeypatch.setattr(fake_storage_port, "download", stalled_download)
+    monkeypatch.setattr(processor_module, "_STORAGE_OP_TIMEOUT_SECONDS", 0.05)
+
+    context = WorkerContext(
+        storage_port=fake_storage_port,
+        queue_port=None,  # type: ignore[arg-type]
+        event_port=None,  # type: ignore[arg-type]
+        converter_registry=fake_converter_registry,
+        worker_name="storage-timeout-test",
+    )
+
+    # ``_download_input_file`` is retried, so the final error is the timeout.
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(
+            _download_input_file(context, conversion_job, Path("/tmp/in.txt"))
+        )
+
+
+def test_hung_storage_upload_fails_the_job_instead_of_hanging_the_worker(
+    conversion_job,
+    fake_storage_port,
+    fake_converter_registry,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import time as time_module
+
+    def stalled_upload(target_key: str, source_path: Path) -> None:
+        del target_key, source_path
+        time_module.sleep(1)
+
+    monkeypatch.setattr(fake_storage_port, "upload", stalled_upload)
+    monkeypatch.setattr(processor_module, "_STORAGE_OP_TIMEOUT_SECONDS", 0.05)
+
+    output_file = tmp_path / "converted.md"
+    output_file.write_text("done", encoding="utf-8")
+
+    context = WorkerContext(
+        storage_port=fake_storage_port,
+        queue_port=None,  # type: ignore[arg-type]
+        event_port=None,  # type: ignore[arg-type]
+        converter_registry=fake_converter_registry,
+        worker_name="storage-timeout-test",
+    )
+
+    with pytest.raises(asyncio.TimeoutError):
+        asyncio.run(_upload_output_file(context, conversion_job, output_file))

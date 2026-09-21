@@ -129,6 +129,63 @@ class TestMultiPagePdf:
                 with Image.open(archive.open(name)) as image:
                     assert image.format == "PNG"
 
+    def test_tiff_streams_pages_instead_of_materialising_them(
+        self, multi_page_pdf: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A multi-page TIFF must not hold every decoded page in memory.
+
+        Materialising a long document costs ~11.6 MB per A4 page at 200 DPI
+        (~3.5 GB for 300 pages), which has OOMed the worker. Only the first page
+        may be rendered before the writer starts; the rest stream into it.
+        """
+        rendered: list[int] = []
+        pulls_when_save_started: list[int] = []
+
+        def counting_render(pdf_path, dpi):
+            for index in range(5):
+                rendered.append(index)
+                yield Image.new("RGB", (8, 8), (index, 0, 0))
+
+        monkeypatch.setattr(pdf_image, "_render_pages", counting_render)
+
+        original_save = Image.Image.save
+
+        def spy_save(self, fp, *args, **kwargs):
+            if kwargs.get("save_all"):
+                pulls_when_save_started.append(len(rendered))
+            return original_save(self, fp, *args, **kwargs)
+
+        monkeypatch.setattr(Image.Image, "save", spy_save)
+
+        output = tmp_path / "streamed.tiff"
+        assert pdf_image._write_multi_frame_pages(str(multi_page_pdf), str(output), "tiff", 72) == 5
+
+        assert len(rendered) == 5, "every page must still be written"
+        assert pulls_when_save_started == [1], (
+            "the TIFF writer must receive the remaining pages lazily; rendering "
+            f"all of them up front means the whole document is resident (saw {pulls_when_save_started})"
+        )
+
+    def test_tiff_output_is_identical_to_the_materialised_version(
+        self, multi_page_pdf: Path, tmp_path: Path
+    ):
+        """Streaming must not change a single byte of the produced file."""
+        streamed = tmp_path / "streamed.tiff"
+        pdf_image._write_multi_frame_pages(str(multi_page_pdf), str(streamed), "tiff", pdf_image.DEFAULT_DPI)
+
+        # Reference: the previous implementation, which built a full list.
+        frames = list(pdf_image._render_pages(str(multi_page_pdf), pdf_image.DEFAULT_DPI))
+        materialised = tmp_path / "materialised.tiff"
+        frames[0].save(
+            materialised,
+            format="TIFF",
+            save_all=True,
+            append_images=frames[1:],
+            compression="tiff_deflate",
+        )
+
+        assert streamed.read_bytes() == materialised.read_bytes()
+
 
 class TestOutputExtensionHook:
     def test_single_page_keeps_the_target_extension(self, single_page_pdf: Path):

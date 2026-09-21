@@ -56,7 +56,10 @@ def verify_access_token(token: str) -> str | None:
         )
     except jwt.InvalidTokenError:
         return None
-    if payload.get("type") not in (None, "access"):
+    # Every minted access token sets ``type: access``; requiring it stops a
+    # refresh token (or any other JWT signed with the same key) being accepted
+    # as an access token.
+    if payload.get("type") != "access":
         return None
     return payload.get("sub")
 

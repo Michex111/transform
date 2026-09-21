@@ -6,11 +6,12 @@ import { useAuth } from "@/auth/AuthContext";
 import { useToast } from "@/auth/ToastContext";
 import { FormatPicker } from "@/components/FormatPicker";
 import { Button, Card, FormatMorph, FormatChip, ProgressBar, StatusBadge } from "@/components/ui";
-import { formatDateTime, formatMeta } from "@/lib/format";
+import { fileNameExtension, formatDateTime, formatMeta } from "@/lib/format";
 import { normalizeExt } from "@/lib/formatVisual";
 import { friendlyErrorMessage } from "@/lib/errorMessages";
 import { useConversionMap } from "@/lib/useConversionMap";
 import { useGuestHistory } from "@/lib/useGuestHistory";
+import { jobProgress } from "@/jobs/jobStore";
 import type { GuestHistoryItem } from "@/api/types";
 
 const MAX_BYTES = 100 * 1024 * 1024; // 100 MB
@@ -122,7 +123,7 @@ export function GuestConvertPage() {
    * mid-conversion (and leaking a server-side error like a temp path).
    */
   function validateFileFormat(file: File): boolean {
-    const ext = file.name.split(".").pop()?.toLowerCase();
+    const ext = fileNameExtension(file.name);
     if (!ext) return true;
     if (ext === from) return true;
     // Allow switching the source format to match the file if it's a valid one.
@@ -216,7 +217,7 @@ export function GuestConvertPage() {
 
         {/* Conversion panel */}
         <Card className="space-y-6 p-6">
-          <div className="flex items-center justify-center gap-6">
+          <div className="flex items-center justify-center gap-4 sm:gap-6">
             <div className="flex flex-col items-center gap-2">
               <span className="text-xs font-medium uppercase tracking-wide text-muted">From</span>
               <FormatPicker
@@ -369,10 +370,7 @@ export function GuestConvertPage() {
                   <div className="flex items-center gap-3">
                     <div className="hidden w-32 sm:block">
                       <ProgressBar
-                        value={
-                          job.progress ??
-                          (job.status === "COMPLETED" ? 100 : job.status === "PROCESSING" ? 45 : 0)
-                        }
+                        value={jobProgress(job)}
                         from={formatMeta(job.source_format).color}
                         to={formatMeta(job.target_format).color}
                       />

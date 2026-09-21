@@ -63,9 +63,12 @@ class FakeTransferService:
 
 
 class FakeConversionService:
+    def __init__(self, job: ConversionJob | None = None) -> None:
+        self._job = job
+
     async def get_conversion_job(self, job_id: str) -> ConversionJob | None:
         del job_id
-        return None
+        return self._job
 
     async def push_conversion_job(self, job: ConversionJob) -> str:
         del job
@@ -134,7 +137,10 @@ class SqliteBackend:
 
 @contextmanager
 def verify_client(
-    db_path: str, folder_id: str | None = None, transfer: FakeTransferService | None = None
+    db_path: str,
+    folder_id: str | None = None,
+    transfer: FakeTransferService | None = None,
+    conversion: FakeConversionService | None = None,
 ) -> Generator[tuple[TestClient, SqliteBackend], None, None]:
     backend = SqliteBackend(db_path, folder_id=folder_id)
 
@@ -145,7 +151,7 @@ def verify_client(
         return transfer or FakeTransferService()
 
     async def override_conversion():
-        return FakeConversionService()
+        return conversion or FakeConversionService()
 
     async def override_file_service():
         factory = await backend.ensure()
@@ -268,3 +274,58 @@ def test_verify_rejects_oversized_upload(tmp_path) -> None:
 
 def _make_plain_backend(db_path: str) -> SqliteBackend:
     return SqliteBackend(db_path)
+
+
+def _job(job_id: str, user_id: int | None) -> ConversionJob:
+    from src.domain.conversions.value_object.conversion_type import ConversionType
+
+    return ConversionJob(
+        job_id=job_id,
+        conversion=ConversionType(source_format="pdf", target_format="docx"),
+        input_file="in.pdf",
+        object_key="uploads/original.pdf",
+        user_id=user_id,
+    )
+
+
+def test_verify_rejects_repointing_another_users_job(tmp_path) -> None:
+    """SEC-2: the ``job_id`` query param must not mutate a job the caller
+    does not own (IDOR write)."""
+    foreign_job = _job("job-foreign", user_id=999)
+    with verify_client(
+        str(tmp_path / "verify.db"),
+        conversion=FakeConversionService(job=foreign_job),
+    ) as (client, _backend):
+        response = client.post("/api/uploads/sessions/sess-1/verify?job_id=job-foreign")
+
+        assert response.status_code == 404
+        # The foreign job must not have been re-pointed at this session's object.
+        assert foreign_job.object_key == "uploads/original.pdf"
+
+
+def test_verify_repoints_the_callers_own_job(tmp_path) -> None:
+    """The legitimate same-user flow (SPA ``verifyUpload(upload_id, job_id)``)
+    must keep working."""
+    own_job = _job("job-mine", user_id=1)
+    with verify_client(
+        str(tmp_path / "verify.db"),
+        conversion=FakeConversionService(job=own_job),
+    ) as (client, _backend):
+        response = client.post("/api/uploads/sessions/sess-1/verify?job_id=job-mine")
+
+        assert response.status_code == 200
+        assert own_job.object_key == "uploads/abc123.pdf"
+
+
+def test_verify_twice_creates_only_one_file_record(tmp_path) -> None:
+    """QUAL-1: a repeated verify (double click / client retry) must not insert a
+    second ``user_files`` row for the same object key."""
+    with verify_client(str(tmp_path / "verify.db")) as (client, _backend):
+        first = client.post("/api/uploads/sessions/sess-1/verify")
+        second = client.post("/api/uploads/sessions/sess-1/verify")
+
+        assert first.status_code == 200
+        assert second.status_code == 200
+
+        listing = client.get("/api/v1/files").json()
+        assert listing["total"] == 1

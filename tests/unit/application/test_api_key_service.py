@@ -1,6 +1,7 @@
 """Tests for the API key application service."""
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -13,6 +14,7 @@ class FakeAPIKeyRepository:
 
     def __init__(self) -> None:
         self._rows: dict[str, APIKey] = {}
+        self.touch_calls = 0
 
     async def save(self, api_key: APIKey) -> None:
         self._rows[api_key.id] = api_key
@@ -33,6 +35,7 @@ class FakeAPIKeyRepository:
         self._rows[api_key.id] = api_key
 
     async def touch_last_used(self, api_key_id: str) -> None:
+        self.touch_calls += 1
         api_key = self._rows.get(api_key_id)
         if api_key is not None:
             api_key.last_used_at = api_key.last_used_at or api_key.created_at
@@ -118,3 +121,23 @@ def test_authenticate_valid_key_touches_last_used(service) -> None:
 def test_authenticate_unknown_key_returns_none(service) -> None:
     svc, _ = service
     assert asyncio.run(svc.authenticate("tr_does-not-exist")) is None
+
+
+def test_authenticate_only_touches_last_used_when_stale(service) -> None:
+    """PERF-8: a hot key must not issue an UPDATE + COMMIT on every request."""
+    svc, repo = service
+    plaintext, api_key = asyncio.run(svc.create(user_id=1, name="a"))
+
+    # Never used -> touched once.
+    asyncio.run(svc.authenticate(plaintext))
+    assert repo.touch_calls == 1
+
+    # Recently used -> no second write.
+    api_key.last_used_at = datetime.now(UTC)
+    asyncio.run(svc.authenticate(plaintext))
+    assert repo.touch_calls == 1
+
+    # Stale (>5 min) -> touched again.
+    api_key.last_used_at = datetime.now(UTC) - timedelta(minutes=10)
+    asyncio.run(svc.authenticate(plaintext))
+    assert repo.touch_calls == 2

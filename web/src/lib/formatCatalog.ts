@@ -188,23 +188,3 @@ export const FORMAT_CATEGORIES: FormatCategory[] = [
     ],
   },
 ];
-
-const ALL: Map<string, { category: string; def: FormatDef }> = new Map();
-for (const cat of FORMAT_CATEGORIES) {
-  for (const f of cat.formats) ALL.set(f.ext, { category: cat.name, def: f });
-}
-
-/** Flatten every format into a single lookup by extension. */
-export function getFormatDef(ext: string): FormatDef | undefined {
-  return ALL.get(ext.toLowerCase())?.def;
-}
-
-/** Flatten all categories for search across the whole catalog. */
-export function allFormats(): FormatDef[] {
-  return FORMAT_CATEGORIES.flatMap((c) => c.formats);
-}
-
-/** Find a format def by its exact extension (case-insensitive). */
-export function findFormat(ext: string): FormatDef | undefined {
-  return getFormatDef(ext);
-}

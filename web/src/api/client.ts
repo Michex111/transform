@@ -51,6 +51,23 @@ const TOKEN_KEY = 'transform_access_token'
 const REFRESH_KEY = 'transform_refresh_token'
 
 /**
+ * The API's origin, i.e. `API_BASE` without its `/api` suffix.
+ *
+ * The API serves a few paths at its *root* rather than under `/api` — its
+ * OpenAPI docs (`/docs`, `/redoc`, `/openapi.json`) and its health probes
+ * (`/health`, `/ready`). Those must be built from this origin: the SPA is
+ * hosted separately, so a same-origin `/docs` would load the SPA itself and
+ * render the router's empty catch-all page.
+ *
+ * Empty when `API_BASE` is a same-origin prefix (`/api` in local dev, where
+ * the Vite dev server proxies both `/api` and the root API paths).
+ */
+export const API_ORIGIN = API_BASE.replace(/\/api$/, '')
+
+/** True for an absolute `http(s)` URL (vs. a server-relative path). */
+const ABSOLUTE_URL = /^https?:\/\//i
+
+/**
  * FENCR client-side encryption is streamed chunk-by-chunk with WebCrypto, so it
  * can handle large files in principle, but the backend contract targets inputs
  * under 1 GB. Files at or above this limit skip encryption and go plaintext.
@@ -382,6 +399,69 @@ class ApiClient {
   /** Relative path to the (auth-required) streaming download endpoint. */
   getJobDownloadUrl = (id: string) => `/conversions/jobs/${id}/download`
 
+  /** Relative path to the (auth-required) streaming endpoint for a library file. */
+  getFileStreamUrl = (id: string) => `/v1/files/${id}/stream`
+
+  /**
+   * Fetch a download URL with the Authorization header, retrying once after a
+   * silent token refresh on 401 — the same recovery `request()` applies to JSON
+   * calls, so a streamed download never fails just because the access token
+   * expired while the page was open.
+   */
+  private async authedFetch(url: string): Promise<Response> {
+    const init = (): RequestInit => ({
+      headers: this.token ? { Authorization: `Bearer ${this.token}` } : {},
+    })
+    let res = await fetch(url, init())
+    if (res.status === 401 && this.refreshToken && (await this.refresh())) {
+      res = await fetch(url, init())
+    }
+    return res
+  }
+
+  /**
+   * Stream a server-relative path to a browser download.
+   *
+   * `auth: false` is used by the guest flow, which authenticates with its token
+   * in the query string instead of a bearer header (and so must not turn the
+   * request into a credentialed one).
+   */
+  private async saveStreamedDownload(
+    path: string,
+    filename: string,
+    { query = '', auth = true }: { query?: string; auth?: boolean } = {},
+  ): Promise<void> {
+    const url = `${resolveServerPath(path)}${query}`
+    const res = auth ? await this.authedFetch(url) : await fetch(url)
+    if (!res.ok) throw new Error(`Download failed (${res.status})`)
+    saveBlob(await res.blob(), filename)
+  }
+
+  /**
+   * Save a server-supplied download URL, preferring the pre-signed absolute URL
+   * the API returned.
+   *
+   * An absolute URL is only handed to the browser when its scheme is trusted
+   * (`https:`, or loopback `http:` for local dev). A rejected scheme — e.g. a
+   * plain-http URL from a misconfigured deployment — falls back to the
+   * authenticated streaming endpoint (`fallbackPath`) rather than navigating the
+   * tab to an untrusted host or failing silently.
+   */
+  private async saveDownload(
+    url: string,
+    fallbackPath: string,
+    filename: string,
+    stream: { query?: string; auth?: boolean } = {},
+  ): Promise<void> {
+    if (!ABSOLUTE_URL.test(url)) {
+      await this.saveStreamedDownload(url, filename, stream)
+      return
+    }
+    if (!downloadFromUrl(url, filename)) {
+      await this.saveStreamedDownload(fallbackPath, filename, stream)
+    }
+  }
+
   /**
    * Download the converted output of a completed job.
    *
@@ -394,20 +474,11 @@ class ApiClient {
     if (job.status !== 'COMPLETED' || !job.download_url) {
       throw new Error('This conversion is not ready to download yet.')
     }
-    const url = job.download_url
-
-    if (url.startsWith('http')) {
-      // Pre-signed GET URL — no auth header needed, download directly.
-      downloadFromUrl(url, filename ?? jobOutputFilename(job))
-    } else {
-      // Same-origin streaming endpoint — requires the Authorization header.
-      const res = await fetch(resolveServerPath(url), {
-        headers: this.token ? { Authorization: `Bearer ${this.token}` } : {},
-      })
-      if (!res.ok) throw new Error(`Download failed (${res.status})`)
-      const blob = await res.blob()
-      saveBlob(blob, filename ?? jobOutputFilename(job))
-    }
+    await this.saveDownload(
+      job.download_url,
+      this.getJobDownloadUrl(jobId),
+      filename ?? jobOutputFilename(job),
+    )
   }
 
   // ---- Guest (no-account) ----
@@ -558,16 +629,29 @@ class ApiClient {
       throw new Error('This conversion is not ready to download yet.')
     }
 
-    if (url.startsWith('http')) {
-      // Pre-signed GET URL — no auth header needed, download directly.
-      downloadFromUrl(url, jobOutputFilename(job))
-    } else {
-      // Same-origin streaming endpoint — requires the guest token.
-      const res = await fetch(`${resolveServerPath(url)}?guest_token=${encodeURIComponent(job.guest_token)}`)
-      if (!res.ok) throw new Error(`Download failed (${res.status})`)
-      const blob = await res.blob()
-      saveBlob(blob, jobOutputFilename(job))
+    const guestQuery = `?guest_token=${encodeURIComponent(job.guest_token)}`
+    const guestStreamPath = `/guest/conversions/jobs/${job.job_id}/download`
+    if (ABSOLUTE_URL.test(url) && !job.job_id) {
+      // Nothing to fall back to if the scheme is rejected.
+      if (!downloadFromUrl(url, jobOutputFilename(job))) {
+        throw new Error('Download failed: the download URL was rejected.')
+      }
+      return
     }
+    await this.saveDownload(url, guestStreamPath, jobOutputFilename(job), {
+      query: guestQuery,
+      auth: false,
+    })
+  }
+
+  /**
+   * Download a file from the library (auth-required unless the API returned a
+   * pre-signed URL). Shares the streaming/auth/blob path with the conversion
+   * download so both resolve the API origin and recover from a 401 identically.
+   */
+  async downloadLibraryFile(fileId: string, filename: string): Promise<void> {
+    const { download_url } = await this.getFileDownload(fileId)
+    await this.saveDownload(download_url, this.getFileStreamUrl(fileId), filename)
   }
 
   // ---- Files ----

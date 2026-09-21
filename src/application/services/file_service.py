@@ -9,6 +9,8 @@ unit-testable here.
 from pathlib import Path
 from typing import Protocol
 
+import asyncio
+
 from sqlalchemy.exc import IntegrityError
 
 from src.application.dtos.upload_dto import UploadSession
@@ -40,6 +42,10 @@ class FileRepositoryPort(Protocol):
 
     async def get_by_id(self, file_id: str) -> UserFileModel | None: ...
 
+    async def find_by_key(
+        self, user_id: int, file_key: str,
+    ) -> UserFileModel | None: ...
+
     async def list_by_user(
         self, user_id: int, *, folder_id: str | None = None,
         offset: int = 0, limit: int = 20,
@@ -56,6 +62,10 @@ class FileRepositoryPort(Protocol):
     ) -> tuple[list[UserFileModel], int]: ...
 
     async def delete(self, file_id: str) -> bool: ...
+
+    async def delete_many(
+        self, user_id: int, file_ids: list[str],
+    ) -> list[UserFileModel]: ...
 
 
 class FolderRepositoryPort(Protocol):
@@ -305,17 +315,18 @@ class FileService:
 
     async def delete_files(self, user_id: int, file_ids: list[str]) -> int:
         """Delete each owned file (object + DB record). Returns the number of
-        files actually removed. Unknown/foreign ids are skipped."""
-        deleted = 0
-        for file_id in file_ids:
-            try:
-                row = await self.get_file(user_id, file_id)
-            except FileRecordNotFoundError:
-                continue
-            await self._storage.remove_object(row.file_key)
-            if await self._files.delete(row.id):
-                deleted += 1
-        return deleted
+        files actually removed. Unknown/foreign ids are skipped.
+
+        The owned rows are fetched and deleted in a single statement each
+        (instead of 2 SELECTs + 1 COMMIT per id), then the object-storage
+        deletes are fanned out concurrently.
+        """
+        rows = await self._files.delete_many(user_id, file_ids)
+        if rows:
+            await asyncio.gather(
+                *(self._storage.remove_object(row.file_key) for row in rows)
+            )
+        return len(rows)
 
     async def delete_folders(self, user_id: int, folder_ids: list[str]) -> int:
         """Delete each owned folder recursively (DB subtree + object keys).
@@ -354,8 +365,9 @@ class FileService:
 
         # Reject extension-spoofed uploads (e.g. an executable named ".pdf")
         # before they reach a converter. Defense-in-depth on top of the size
-        # and per-converter guards.
-        ext = Path(session.file_name or session.object_key).suffix.lstrip(".").lower()
+        # and per-converter guards. Use the canonical parser so compound
+        # archives (".tar.gz") resolve the same way everywhere.
+        ext = extension_from_filename(session.file_name or session.object_key)
         try:
             head = await self._storage.read_object_head(session.object_key)
         except Exception:
@@ -376,6 +388,13 @@ class FileService:
         file_extension = normalize_extension(session.file_extension) or extension_from_filename(
             file_name
         )
+
+        # Idempotency: verifying the same upload session twice (double click or
+        # client retry) must not create a second row for the same object key.
+        existing = await self._files.find_by_key(user_id, session.object_key)
+        if existing is not None:
+            return existing.id
+
         return await self._files.save(
             user_id=user_id,
             file_key=session.object_key,

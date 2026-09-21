@@ -11,6 +11,7 @@ import { ErrorButton } from "@/components/ErrorButton";
 import { Modal } from "@/components/Modal";
 import { Button, Card, CreditsBadge, FormatChip, StatusBadge } from "@/components/ui";
 import { formatDateTime } from "@/lib/format";
+import { HISTORY_HEADER_GRID, HISTORY_ROW_GRID } from "@/lib/tableColumns";
 
 const PRIMARY_FORMATS = ["pdf", "docx", "xlsx", "png"] as const;
 const MORE_FORMATS = ["mp3", "mp4"] as const;
@@ -64,7 +65,7 @@ const HistoryRow = memo(function HistoryRow({
   onDelete,
 }: HistoryRowProps) {
   return (
-    <li className="grid grid-cols-[1fr_auto] items-center gap-4 px-5 py-3 transition-colors hover:bg-surface-variant/50 md:grid-cols-[2fr_1fr_1fr_auto]">
+    <li className={HISTORY_ROW_GRID}>
       <span className="min-w-0 truncate text-sm text-on-background">
         {job.fileName ?? job.input_file}
       </span>
@@ -73,10 +74,13 @@ const HistoryRow = memo(function HistoryRow({
         <FormatChip format={job.target_format} size="xs" />
       </span>
       <StatusBadge status={job.status} />
-      <div className="flex items-center justify-end gap-3">
-        <span className="hidden font-mono text-xs text-muted lg:block">
-          {formatDateTime(job.createdAt)}
-        </span>
+      {/* Created sits in its own track: it used to share the actions cell, so
+          the header's "Created" label never lined up with the dates, and the
+          width changed per row with the number of action buttons. */}
+      <span className="hidden font-mono text-xs text-muted lg:block">
+        {formatDateTime(job.createdAt)}
+      </span>
+      <div className="flex flex-wrap items-center justify-end gap-3">
         {showsCreditsUsed(job) && <CreditsBadge credits={job.credits_used ?? 0} />}
         <button
           onClick={() => onDelete(job)}
@@ -324,11 +328,12 @@ export function HistoryPage() {
 
       {/* Table */}
       <Card className="overflow-hidden">
-        <div className="hidden grid-cols-[2fr_1fr_1fr_auto] gap-4 border-b border-outline bg-surface-variant/40 px-5 py-3 text-xs font-semibold uppercase tracking-wide text-muted md:grid">
+        <div className={HISTORY_HEADER_GRID}>
           <span>File</span>
           <span>Format</span>
           <span>Status</span>
-          <span className="text-right">Created</span>
+          <span className="hidden lg:block">Created</span>
+          <span className="text-right">Actions</span>
         </div>
 
         {filtered.length === 0 ? (

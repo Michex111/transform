@@ -77,6 +77,9 @@ class TransferService:
             raise UploadVerificationError(f"Upload for session {upload_id} is not complete or failed.")
 
         session.status = "completed"
+        # Persist the completed status so a repeated verify (double click or a
+        # client retry) can tell the session was already finalised.
+        await self._cache.set(upload_id, session.model_dump_json(), ttl=self._ttl)
         return session
 
     async def create_download_url(

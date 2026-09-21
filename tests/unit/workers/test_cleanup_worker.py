@@ -1,11 +1,15 @@
 """Tests for the cleanup worker (guest data retention)."""
 
 import asyncio
+import logging
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
+import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+import workers.cleanup_worker.main as cleanup_main
 from src.domain.conversions.value_object.job_status import JobStatus
 from src.infrastructure.database.models import (
     ConversionJobModel,
@@ -74,6 +78,14 @@ async def _add_user(factory) -> UserModel:
 
 
 async def _add_job(factory, *, job_id: str, user_id: int | None, age_hours: float, input_key: str, output_key: str | None) -> None:
+    """Insert a conversion-job row the way the API producer does.
+
+    IMPORTANT: the producer stores the bare *display* filename in
+    ``input_file`` and the real object-store key in ``object_key`` (see
+    ``conversion_service`` + ``ConversionJobModel``). Writing the key into
+    ``input_file`` here used to hide the bug where the cleanup worker deleted
+    the display name instead of the object, so nothing was ever removed.
+    """
     async with factory() as session:
         session.add(
             ConversionJobModel(
@@ -81,7 +93,8 @@ async def _add_job(factory, *, job_id: str, user_id: int | None, age_hours: floa
                 status=JobStatus.COMPLETED,
                 source_format="pdf",
                 target_format="docx",
-                input_file=input_key,
+                input_file=Path(input_key).name,
+                object_key=input_key,
                 output_file=output_key,
                 user_id=user_id,
                 created_at=datetime.now(UTC) - timedelta(hours=age_hours),
@@ -113,10 +126,11 @@ async def _add_file(factory, *, file_id: str, user_id: int, age_hours: float, ex
 
 
 def _make_worker(storage, factory, **kwargs) -> CleanupWorker:
+    # A short interval by default so tests never sleep; callers may override.
+    kwargs.setdefault("cleanup_interval", 3600)
     return CleanupWorker(
         storage=storage,
         db_session_factory=factory,
-        cleanup_interval=3600,
         **kwargs,
     )
 
@@ -145,8 +159,11 @@ def test_cleanup_guest_jobs_removes_old_ownerless_jobs_and_objects() -> None:
             cleaned = await worker._cleanup_guest_jobs()
 
             assert cleaned == 1
+            # The real object key is deleted, not the display filename that the
+            # producer put in ``input_file``.
             assert "guest/old-in.pdf" in storage.removed
             assert "guest/old-out.docx" in storage.removed
+            assert "old-in.pdf" not in storage.removed
             assert "guest/fresh-in.pdf" not in storage.removed
 
             async with factory() as session:
@@ -274,6 +291,7 @@ def test_archive_old_jobs_removes_history_and_objects() -> None:
 
             assert archived == 1
             assert "user/old-in.pdf" in storage.removed
+            assert "old-in.pdf" not in storage.removed
             assert "user/old-out.pdf" in storage.removed
             async with factory() as session:
                 assert await session.get(ConversionJobModel, "old-job") is None
@@ -346,3 +364,78 @@ def test_cleanup_tolerates_missing_objects() -> None:
                 assert await session.get(ConversionJobModel, "orphan") is None
 
         asyncio.run(_run())
+
+
+def test_cleanup_worker_info_logs_are_visible_under_production_configuration(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """W-10: the cleanup worker's INFO logs must not be discarded.
+
+    Production configures a handler on the *named* ``file_converter_worker``
+    logger only, leaving the root logger at WARNING. The cleanup module logs
+    through ``logging.getLogger(__name__)``, so every INFO line — including the
+    per-cycle counts — was dropped and a worker failing on every cycle looked
+    identical to a healthy one.
+    """
+    # Emulate production: root stays at WARNING. A logger whose effective level
+    # is WARNING never even creates the record.
+    caplog.set_level(logging.WARNING)
+    # ...but do capture INFO records if they are created, so the assertion below
+    # fails on the *level gate* rather than on the capture handler's threshold.
+    caplog.handler.setLevel(logging.INFO)
+
+    cleanup_main.configure_logging()
+
+    logging.getLogger("workers.cleanup_worker.worker").info("cleanup cycle summary")
+
+    assert any(
+        record.levelno == logging.INFO and record.getMessage() == "cleanup cycle summary"
+        for record in caplog.records
+    )
+
+
+def test_cleanup_stop_wakes_the_inter_cycle_sleep() -> None:
+    """W-2: ``stop()`` must not have to wait out a multi-hour interval.
+
+    The loop used to ``await asyncio.sleep(interval)`` with no way to
+    interrupt, so a SIGTERM handler calling ``stop()`` would hang for the whole
+    interval (6 hours by default).
+    """
+    with sqlite_session_factory() as factory:
+
+        async def _run() -> None:
+            storage = FakeCleanupStorage()
+            worker = _make_worker(storage, factory, cleanup_interval=6 * 60 * 60)
+
+            task = asyncio.create_task(worker.run())
+            # Let the first cycle run and the loop reach its wait.
+            await asyncio.sleep(0)
+            worker.stop()
+            await asyncio.wait_for(task, timeout=5)
+
+        asyncio.run(_run())
+
+
+def test_cleanup_startup_endpoint_hides_credentials(monkeypatch) -> None:
+    """W-13 for the cleanup worker: log the endpoint, never the credentials.
+
+    The cleanup worker deletes real user data and has no Redis client, so the
+    equivalent mismatch risk is which *database* it points at.
+    """
+
+    class FakeSecret:
+        @staticmethod
+        def get_secret_value() -> str:
+            return "postgresql+asyncpg://transform:sup3rs3cret@db.example:5432/transform"
+
+    class FakeSettings:
+        DATABASE_URL = FakeSecret()
+
+    monkeypatch.setattr(cleanup_main, "get_settings", lambda: FakeSettings())
+
+    endpoint = cleanup_main._redacted_database_endpoint()
+
+    assert endpoint == "db.example:5432/transform"
+    assert "sup3rs3cret" not in endpoint
+    assert "transform:" not in endpoint
+

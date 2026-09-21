@@ -107,6 +107,42 @@ export function activeJobs<T extends StatusBearing>(jobs: readonly T[]): T[] {
 }
 
 /**
+ * Reduce a *transport* failure on a job's SSE stream (dropped connection, proxy
+ * hiccup, redeploy, offline tab) into the job state to show.
+ *
+ * A broken stream says nothing about the job itself, so the last known status is
+ * kept: marking it `FAILED` was a lie that invited the user to re-run a job that
+ * was still converting (double work, double credits). Only the server's own
+ * terminal event may move a job to a terminal state.
+ *
+ * `resubscribe` is returned rather than applied so the caller can forget the
+ * dead subscription: leaving it registered made the "already subscribed" guard
+ * permanent, so the row never updated again — not even after a `refresh()` had
+ * restored the real server status.
+ */
+export function reduceStreamError<T extends UiJob>(
+  job: T,
+): { job: T; resubscribe: boolean } {
+  return { job, resubscribe: true };
+}
+
+/**
+ * The progress percentage to render for a job, or `null` when there is no real
+ * value to show — in which case the bar renders as indeterminate.
+ *
+ * The worker reports progress in its SSE events only, so a job restored from
+ * cache or listed before its first event has none; the pages used to invent
+ * `45` for such rows, which `aria-valuenow` then announced to assistive tech as
+ * a fact. A completed job is genuinely at 100%, which is not an invention.
+ */
+export function jobProgress(job: { status: string; progress?: number }): number | null {
+  if (typeof job.progress === "number" && Number.isFinite(job.progress)) {
+    return job.progress;
+  }
+  return job.status === "COMPLETED" ? 100 : null;
+}
+
+/**
  * Whether a job should display its token (credit) cost.
  *
  * Tokens are charged only for a *successful* conversion — the worker deducts

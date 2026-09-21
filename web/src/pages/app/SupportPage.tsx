@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import { Envelope, BookOpen, Pulse, CaretDown } from "@phosphor-icons/react";
+import { API_ORIGIN } from "@/api/client";
 import { Button, Card, Field } from "@/components/ui";
 import { Stagger, Item } from "@/lib/motion";
 
@@ -39,14 +40,17 @@ export function SupportPage() {
       icon: BookOpen,
       label: "Documentation",
       detail: "Read the guides",
-      href: "/docs",
+      // The API serves its docs and probes at its *root*, not under `/api`, and
+      // the SPA is a separate static site — so a same-origin `/docs` would load
+      // the SPA itself and render the router's empty catch-all page.
+      href: `${API_ORIGIN}/docs`,
       external: true,
     },
     {
       icon: Pulse,
       label: "Status page",
       detail: "All systems operational",
-      href: "/health",
+      href: `${API_ORIGIN}/health`,
       external: true,
     },
   ];

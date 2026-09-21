@@ -51,6 +51,13 @@ export function Dropdown<T extends string = string>({
     target?.focus();
   }
 
+  // Focus lives on an option while the popup is open, and the popup unmounts on
+  // close — so focus has to go back to the trigger (otherwise it falls to
+  // `<body>` and the next Tab restarts at the top of the document).
+  function focusTrigger() {
+    rootRef.current?.querySelector<HTMLButtonElement>("button[aria-haspopup]")?.focus();
+  }
+
   // On open, move focus to the selected option (or the first option).
   useEffect(() => {
     if (!open) return;
@@ -75,7 +82,7 @@ export function Dropdown<T extends string = string>({
     function onKey(e: KeyboardEvent) {
       if (e.key === "Escape") {
         setOpen(false);
-        rootRef.current?.querySelector<HTMLButtonElement>("button[aria-haspopup]")?.focus();
+        focusTrigger();
       }
     }
     document.addEventListener("keydown", onKey);
@@ -110,6 +117,7 @@ export function Dropdown<T extends string = string>({
           onChange(options[activeIndex].value);
         }
         setOpen(false);
+        focusTrigger();
         break;
       case "Tab":
         // Natural close — let the browser move focus away.
@@ -171,6 +179,9 @@ export function Dropdown<T extends string = string>({
                     onClick={() => {
                       onChange(opt.value);
                       setOpen(false);
+                      // The clicked option unmounts with the popup, so keep the
+                      // keyboard user's place on the trigger.
+                      focusTrigger();
                     }}
                     className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm transition-colors ${
                       isSel

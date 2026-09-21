@@ -178,6 +178,8 @@ def test_retry_conversion_job_resets_failed_job_and_reenqueues(
     service = ConversionService(queue_port=fake_queue_port, db_repository=fake_repository_port)
 
     # Store a FAILED job with an object_key (as a real failed job would have).
+    # The job is owned: retry requires that the caller owns it (a job with
+    # user_id=None is a guest job and cannot be retried through this path).
     failed = ConversionJob(
         job_id=conversion_job.job_id,
         conversion=conversion_job.conversion,
@@ -185,7 +187,7 @@ def test_retry_conversion_job_resets_failed_job_and_reenqueues(
         object_key="uploads/input.pdf",
         status=JobStatus.FAILED,
         error_message="boom",
-        user_id=conversion_job.user_id,
+        user_id=101,
     )
     asyncio.run(fake_repository_port.save_conversion_job(failed))
     fake_queue_port.pending.clear()
@@ -247,6 +249,39 @@ def test_retry_conversion_job_raises_when_job_missing(
 
     with pytest.raises(InvalidConversionJobError, match="Job not found"):
         asyncio.run(service.retry_conversion_job("missing", user_id=None))
+
+
+def test_retry_conversion_job_raises_for_ownerless_guest_job(
+    conversion_job,
+    fake_queue_port,
+    fake_repository_port,
+    converter_registry,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SEC-4/DEDUP-3: a guest job (``user_id=None``) must never be retryable.
+
+    The old ``job.user_id is not None and ...`` guard made the ownership check
+    vacuous for ownerless jobs; this pins the corrected, fail-closed rule.
+    """
+    from src.application.exceptions.conversion_job_exception import InvalidConversionJobError
+    from src.domain.conversions.value_object.job_status import JobStatus
+    from src.domain.conversions.entities.conversion_job import ConversionJob
+
+    monkeypatch.setattr(conversion_service_module, "get_registry", lambda: converter_registry)
+    service = ConversionService(queue_port=fake_queue_port, db_repository=fake_repository_port)
+
+    guest_job = ConversionJob(
+        job_id="guest-job",
+        conversion=conversion_job.conversion,
+        input_file=conversion_job.input_file,
+        object_key="uploads/guest.pdf",
+        status=JobStatus.FAILED,
+        user_id=None,
+    )
+    asyncio.run(fake_repository_port.save_conversion_job(guest_job))
+
+    with pytest.raises(InvalidConversionJobError, match="Job not found"):
+        asyncio.run(service.retry_conversion_job("guest-job", user_id=None))
 
 
 def test_list_history_returns_only_users_jobs_paginated(

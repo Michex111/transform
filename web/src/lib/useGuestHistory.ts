@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { GuestHistoryItem } from "@/api/types";
+import { capGuestHistory } from "@/lib/guestHistory";
+import { isActiveJob } from "@/jobs/jobStore";
 
 const STORAGE_KEY = "transform_guest_jobs";
 
@@ -38,7 +40,11 @@ export interface GuestHistorySubscribe {
  * is provided by the caller (the page wires it to `api.guestSubscribeToJob`).
  */
 export function useGuestHistory(subscribe: GuestHistorySubscribe) {
-  const [items, setItems] = useState<GuestHistoryItem[]>(readHistory);
+  const [items, setItems] = useState<GuestHistoryItem[]>(() =>
+    // Re-apply the cap on read: an older session may have written an unbounded
+    // list, and it must not be adopted as-is.
+    capGuestHistory(readHistory()),
+  );
   const subs = useRef<Map<string, () => void>>(new Map());
 
   // Persist any change back to localStorage.
@@ -53,9 +59,8 @@ export function useGuestHistory(subscribe: GuestHistorySubscribe) {
   // Stable primitive key derived from the *set* of active job ids, so the
   // subscription effect only re-runs when the active set changes — not on
   // every SSE progress tick (which mutates `items` but not the active set).
-  const activeIds = items
-    .filter((i) => i.status === "PROCESSING" || i.status === "PENDING")
-    .map((i) => i.job_id);
+  // `isActiveJob` is the one shared predicate (it counts AWAITING_UPLOAD too).
+  const activeIds = items.filter(isActiveJob).map((i) => i.job_id);
   const activeKey = activeIds.slice().sort().join("\u0001");
 
   // Subscribe to live progress for currently-active jobs and clean up any
@@ -106,7 +111,9 @@ export function useGuestHistory(subscribe: GuestHistorySubscribe) {
   }, [activeKey]);
 
   const addItem = useCallback((item: GuestHistoryItem) => {
-    setItems((prev) => [item, ...prev]);
+    // Bounded so the localStorage quota can never be exhausted by history
+    // alone (which used to stop persistence entirely, silently).
+    setItems((prev) => capGuestHistory([item, ...prev]));
   }, []);
 
   const updateItem = useCallback((jobId: string, patch: Partial<GuestHistoryItem>) => {
