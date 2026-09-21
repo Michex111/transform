@@ -18,6 +18,9 @@ class CreditBalanceResponse(BaseModel):
     tier: str
     monthly_allowance: int | None = None
     monthly_remaining: int | None = None
+    # First instant of the next UTC calendar month, or None when the tier has
+    # no persistent monthly credits (nothing resets for those users).
+    credits_reset_at: datetime | None
 
 
 class CreditTransactionResponse(BaseModel):

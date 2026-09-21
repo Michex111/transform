@@ -7,7 +7,12 @@ from src.application.exceptions.file_transfer_exceptions import (
     UploadVerificationError,
 )
 from src.application.dtos.upload_dto import UploadResponse, UploadSession
-from src.infrastructure.adapters.storage.sanitize import sanitize_filename, sanitize_object_key
+from src.infrastructure.adapters.storage.sanitize import (
+    extension_from_filename,
+    normalize_extension,
+    sanitize_filename,
+    sanitize_object_key,
+)
 from uuid import uuid4
 from datetime import timedelta
 
@@ -38,6 +43,8 @@ class TransferService:
             object_key=object_key,
             status="pending",
             file_name=safe_name,
+            file_extension=normalize_extension(file_extension)
+            or extension_from_filename(safe_name),
             folder_id=folder_id,
             user_id=user_id,
         )
@@ -93,7 +100,7 @@ class TransferService:
 
     def _generate_object_key(self, job_id: str, file_extension: str) -> str:
         """Create a secure, collision-resistant object path."""
-        ext = file_extension.lstrip(".")
+        ext = normalize_extension(file_extension)
         if not ext or len(ext) > 20:
             ext = "file"
         secure_filename = f"{uuid4().hex}.{ext}"

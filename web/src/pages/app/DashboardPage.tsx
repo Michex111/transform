@@ -8,8 +8,9 @@ import { useToast } from "@/auth/ToastContext";
 import { useJobs } from "@/jobs/JobsContext";
 import { Button, Card, FormatMorph, ProgressBar, StatusBadge, StatCardSkeleton, Skeleton } from "@/components/ui";
 import { ErrorButton } from "@/components/ErrorButton";
+import { StorageBreakdownBar } from "@/components/StorageBreakdownBar";
 import { Stagger, Item } from "@/lib/motion";
-import { formatBytes, formatDateTime } from "@/lib/format";
+import { formatBytes, formatDateTime, formatDateOrNull } from "@/lib/format";
 import type { DashboardResponse } from "@/api/types";
 
 export function DashboardPage() {
@@ -63,7 +64,11 @@ export function DashboardPage() {
   const total = stats?.conversion_stats.total_jobs ?? jobs.length;
   const completed = stats?.conversion_stats.successful_jobs ?? jobs.filter((j) => j.status === "COMPLETED").length;
   const successRate = total ? Math.round((completed / total) * 100) : 0;
-  const storagePct = stats?.storage_stats.used_percent ?? 0;
+  const storage = stats?.storage_stats;
+  const storagePct = storage?.used_percent ?? 0;
+  // The API's `breakdown` is additive and may be absent on older backends:
+  // fall back to the plain single-colour bar whenever there is no data.
+  const hasStorageBreakdown = (storage?.breakdown?.length ?? 0) > 0;
 
   return (
     <div className="mx-auto max-w-6xl space-y-6">
@@ -82,33 +87,56 @@ export function DashboardPage() {
         </Link>
       </motion.div>
 
-      {/* Stat cards */}
+      {/* Stat cards — "Credits remaining" is the featured card on the left,
+          with the remaining three grouped to its right. */}
       {loading ? (
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          {Array.from({ length: 4 }).map((_, i) => (
-            <StatCardSkeleton key={i} />
-          ))}
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+          <StatCardSkeleton className="lg:col-span-1" />
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:col-span-2">
+            <StatCardSkeleton />
+            <StatCardSkeleton />
+            <StatCardSkeleton className="sm:col-span-2" />
+          </div>
         </div>
       ) : (
-        <Stagger className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          <Item><StatCard icon={Gauge} label="Total conversions" value={String(total)} /></Item>
-          <Item><StatCard icon={Download} label="Success rate" value={`${successRate}%`} /></Item>
-          <Item>
-            <StatCard
-              icon={Coins}
-              label="Credits remaining"
-              value={String(stats?.credit_balance ?? 0)}
-            />
-          </Item>
-          <Item>
-            <StatCard
-              icon={HardDrives}
-              label="Storage used"
-              value={formatBytes(stats?.storage_stats.used_bytes ?? 0)}
-              footer={<ProgressBar value={storagePct} from="var(--color-primary)" />}
-            />
-          </Item>
-        </Stagger>
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+          <Stagger className="lg:col-span-1">
+            <Item className="h-full">
+              <CreditStatCard
+                value={String(stats?.credit_balance ?? 0)}
+                resetAt={stats?.credits_reset_at}
+              />
+            </Item>
+          </Stagger>
+
+          <Stagger className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:col-span-2">
+            <Item className="h-full">
+              <StatCard icon={Gauge} label="Total conversions" value={String(total)} />
+            </Item>
+            <Item className="h-full">
+              <StatCard icon={Download} label="Success rate" value={`${successRate}%`} />
+            </Item>
+            <Item className="h-full sm:col-span-2">
+              <StatCard
+                icon={HardDrives}
+                label="Storage used"
+                value={formatBytes(storage?.used_bytes ?? 0)}
+                footer={
+                  hasStorageBreakdown && storage ? (
+                    <StorageBreakdownBar
+                      usedBytes={storage.used_bytes}
+                      limitBytes={storage.limit_bytes}
+                      usedPercent={storage.used_percent}
+                      breakdown={storage.breakdown}
+                    />
+                  ) : (
+                    <ProgressBar value={storagePct} from="var(--color-primary)" />
+                  )
+                }
+              />
+            </Item>
+          </Stagger>
+        </div>
       )}
 
       {/* Recent conversions */}
@@ -194,6 +222,46 @@ function StatCard({
       </div>
       <p className="font-display text-3xl font-semibold">{value}</p>
       {footer && <div className="mt-3">{footer}</div>}
+    </Card>
+  );
+}
+
+/** The featured stat: credits get a larger card on the left of the dashboard
+ *  grid, with a bigger figure, the date the allowance refreshes, and a direct
+ *  route to top up. */
+function CreditStatCard({ value, resetAt }: { value: string; resetAt?: string | null }) {
+  // Absent on an older API and `null` for tiers without persistent credits —
+  // both cases simply omit the line rather than showing a placeholder date.
+  const resetLabel = formatDateOrNull(resetAt);
+  return (
+    <Card hover className="relative flex h-full flex-col overflow-hidden p-6">
+      <span
+        aria-hidden
+        className="pointer-events-none absolute inset-0 bg-gradient-to-br from-primary/10 via-transparent to-transparent"
+      />
+      <div className="relative mb-2 flex items-center gap-2 text-muted">
+        <Coins size={18} />
+        <span className="text-sm">Credits remaining</span>
+      </div>
+      <p className="relative font-display text-5xl font-semibold leading-none tracking-tight tabular-nums sm:text-6xl lg:text-5xl xl:text-6xl">
+        {value}
+      </p>
+      {resetLabel && (
+        <p
+          className="relative mt-2 text-xs text-muted"
+          title={resetAt ? `Resets ${formatDateTime(resetAt)}` : undefined}
+        >
+          Resets <span className="font-medium text-on-background">{resetLabel}</span>
+        </p>
+      )}
+      <div className="relative mt-auto pt-6">
+        <Link
+          to="/app/billing"
+          className="inline-flex items-center gap-1 text-sm font-medium text-primary hover:underline"
+        >
+          Add credits <ArrowRight size={15} />
+        </Link>
+      </div>
     </Card>
   );
 }

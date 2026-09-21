@@ -1,19 +1,27 @@
 """User dashboard API endpoints."""
 
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, cast
 
 import asyncio
 
 from fastapi import APIRouter, Depends
 
-from src.domain.security.enitities.api_key import APIKeyStatus
+from src.domain.security.enitities.api_key import APIKey, APIKeyStatus
+from src.domain.subscriptions.entities.credit import Credit
 from src.domain.subscriptions.policies.tier_policy import TierPolicy
+from src.domain.subscriptions.value_object.credit_period import (
+    current_period_key,
+    next_period_start,
+)
 from src.infrastructure.adapters.repository.sql_api_key_repo import SQLAPIKeyRepository
 from src.infrastructure.adapters.repository.sql_conversion_job_repo import SQLConversionJobRepository
 from src.infrastructure.adapters.repository.sql_credit_repo import SQLCreditRepository
 from src.infrastructure.adapters.repository.sql_subscription_repo import SQLSubscriptionRepository
-from src.infrastructure.adapters.repository.sql_user_file_repo import SQLUserFileRepository
+from src.infrastructure.adapters.repository.sql_user_file_repo import (
+    SQLUserFileRepository,
+    StorageBreakdownRow,
+)
 from src.presentation.api.dependencies.auth_dependencies import CurrentUser
 from src.presentation.api.dependencies.service_dependencies import (
     get_api_key_repository,
@@ -25,6 +33,7 @@ from src.presentation.api.dependencies.service_dependencies import (
 from src.presentation.schemas.dashboard import (
     ConversionStats,
     DashboardResponse,
+    StorageBreakdownEntry,
     StorageStats,
 )
 from src.presentation.schemas.subscription import domain_tier_to_api
@@ -46,19 +55,39 @@ async def get_dashboard(
     tier = await subscription_repo.get_tier_for_user(current_user.id)
     policy = TierPolicy.for_tier(tier)
 
+    # One instant per request so the period key and the reset date can never
+    # straddle a month boundary.
+    now = datetime.now(UTC)
+    allowance = policy.monthly_conversion_credits
+    credits_reset_at = next_period_start(now) if allowance is not None else None
+
     # These queries are independent of one another, so run them concurrently
     # instead of serially (previously 6 sequential DB round-trips per request).
-    period_key = datetime.now(UTC).strftime("%Y-%m")
-    counts, credits_used, used_bytes, file_count, credit, api_keys = await asyncio.gather(
-        job_repo.count_by_status(current_user.id),
-        job_repo.sum_credits_used(current_user.id),
-        file_repo.get_user_storage_used(current_user.id),
-        file_repo.count_user_files(current_user.id),
-        credit_repo.get_credit(str(current_user.id), period_key),
-        api_key_repo.find_by_user(current_user.id),
+    # ``asyncio.gather`` only ships precise overloads for up to six awaitables,
+    # so the seven-way result shape is spelled out for the type checker.
+    period_key = current_period_key(now)
+    counts, credits_used, used_bytes, file_count, breakdown, credit, api_keys = cast(
+        tuple[
+            dict[str, int],
+            int,
+            int,
+            int,
+            list[StorageBreakdownRow],
+            Credit | None,
+            list[APIKey],
+        ],
+        await asyncio.gather(
+            job_repo.count_by_status(current_user.id),
+            job_repo.sum_credits_used(current_user.id),
+            file_repo.get_user_storage_used(current_user.id),
+            file_repo.count_user_files(current_user.id),
+            file_repo.get_storage_breakdown_by_extension(current_user.id),
+            credit_repo.get_credit(str(current_user.id), period_key),
+            api_key_repo.find_by_user(current_user.id),
+        ),
     )
 
-    balance = credit.remaining if credit is not None else (policy.monthly_conversion_credits or 0)
+    balance = credit.remaining if credit is not None else (allowance or 0)
     active_api_keys = sum(1 for k in api_keys if k.status == APIKeyStatus.ACTIVE)
 
     limit_bytes = policy.storage_quota_bytes
@@ -76,11 +105,20 @@ async def get_dashboard(
             limit_bytes=limit_bytes,
             used_percent=used_percent,
             file_count=file_count,
+            breakdown=[
+                StorageBreakdownEntry(
+                    extension=row.extension,
+                    bytes=row.bytes,
+                    file_count=row.file_count,
+                )
+                for row in breakdown
+            ],
         ),
         credit_balance=balance,
         tier=domain_tier_to_api(tier).value,
         recent_jobs_count=counts["TOTAL"],
         active_api_keys=active_api_keys,
+        credits_reset_at=credits_reset_at,
     )
 
 

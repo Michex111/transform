@@ -13,6 +13,52 @@ from pathlib import PurePosixPath
 _FORBIDDEN = re.compile(r"(^|/)\.\.(/|$)|(^/)|[\\]|(\x00)")
 _MAX_KEY_LENGTH = 1024
 
+# ``user_files.file_extension`` is VARCHAR(20); clamp to fit without erroring.
+_MAX_EXTENSION_LENGTH = 20
+
+# Compound archive extensions the product recognises. This is extension
+# *parsing*, not a format/category taxonomy: the frontend owns the
+# extension -> category mapping and knows these keys (see
+# ``web/src/lib/formatVisual.ts``).
+_COMPOUND_EXTENSIONS = frozenset({"tar.gz", "tar.bz2", "tar.xz"})
+
+
+def normalize_extension(extension: str | None) -> str:
+    """Normalise a client-supplied extension to lowercase, dot-free form.
+
+    ``".PDF"`` -> ``"pdf"``; ``None`` / ``""`` -> ``""``. The result is
+    clamped to the ``user_files.file_extension`` column width.
+    """
+    return (extension or "").strip().lstrip(".").lower()[:_MAX_EXTENSION_LENGTH]
+
+
+def extension_from_filename(file_name: str | None) -> str:
+    """Derive a normalised extension from a file name.
+
+    Fallback for when the upload session does not carry an explicit
+    extension (e.g. legacy Redis sessions). Rules:
+
+    * empty name / no dot (``"README"``) -> ``""``
+    * trailing dot (``"report."``) -> ``""``
+    * leading-dot dotfile (``".gitignore"``) -> ``""``
+    * plain extension (``"report.pdf"``) -> ``"pdf"``
+    * known compound archive (``"archive.tar.bz2"``) -> ``"tar.bz2"``
+
+    The value is lowercased, keeps no leading dot, and is clamped to the
+    ``user_files.file_extension`` column width.
+    """
+    name = PurePosixPath((file_name or "").replace("\\", "/")).name
+    if not name or name.startswith("."):
+        return ""
+    _, dot, tail = name.rpartition(".")
+    if not dot or not tail:
+        return ""
+    ext = tail.lower()
+    for compound in _COMPOUND_EXTENSIONS:
+        if name.lower().endswith("." + compound):
+            return compound
+    return ext[:_MAX_EXTENSION_LENGTH]
+
 
 class UnsafeObjectKeyError(ValueError):
     """Raised when a candidate object key is unsafe for object storage."""

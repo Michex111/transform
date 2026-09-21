@@ -2,7 +2,6 @@
 
 import logging
 import uuid
-from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -11,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.domain.subscriptions.entities.credit import Credit
 from src.domain.subscriptions.policies.tier_policy import TierPolicy
+from src.domain.subscriptions.value_object.credit_period import current_period_key
 from src.domain.subscriptions.value_object.tier import SubscriptionTier
 from src.infrastructure.adapters.repository.sql_credit_repo import SQLCreditRepository
 from src.infrastructure.adapters.repository.sql_subscription_repo import SQLSubscriptionRepository
@@ -62,7 +62,7 @@ async def _activate_subscription(
     policy = TierPolicy.for_tier(tier)
     allowance = policy.monthly_conversion_credits
     if allowance:
-        period_key = datetime.now(UTC).strftime("%Y-%m")
+        period_key = current_period_key()
         credit_repo = SQLCreditRepository(db)
         existing = await credit_repo.get_credit(user_id, period_key)
         if existing is not None:
@@ -121,7 +121,7 @@ async def _grant_purchased_credits(
         return
 
     credit_repo = SQLCreditRepository(db)
-    period_key = datetime.now(UTC).strftime("%Y-%m")
+    period_key = current_period_key()
 
     # Quick pre-check (non-authoritative) to avoid the write path for the common
     # duplicate case. The unique constraint is the authoritative guard.

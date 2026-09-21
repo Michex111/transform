@@ -27,12 +27,13 @@ class FakeFileRepo:
         self._seq = 0
 
     async def save(self, *, user_id, file_key, file_name, file_size_bytes,
-                   mime_type, folder_id=None, expires_at=None) -> str:
+                   mime_type, file_extension="", folder_id=None, expires_at=None) -> str:
         self._seq += 1
         file_id = f"f{self._seq}"
         self.files[file_id] = UserFileModel(
             id=file_id, user_id=user_id, folder_id=folder_id, file_key=file_key,
-            file_name=file_name, file_size_bytes=file_size_bytes, mime_type=mime_type,
+            file_name=file_name, file_extension=file_extension,
+            file_size_bytes=file_size_bytes, mime_type=mime_type,
         )
         return file_id
 
@@ -348,9 +349,10 @@ def test_list_files_requires_folder_ownership(service) -> None:
 # Upload completion
 # ---------------------------------------------------------------------------
 
-def _session(key: str = "uploads/abc.pdf", name: str | None = None, folder_id: str | None = None) -> UploadSession:
+def _session(key: str = "uploads/abc.pdf", name: str | None = None, folder_id: str | None = None,
+             file_extension: str | None = None) -> UploadSession:
     return UploadSession(upload_id="u1", object_key=key, status="completed",
-                         file_name=name, folder_id=folder_id)
+                         file_name=name, file_extension=file_extension, folder_id=folder_id)
 
 
 def test_complete_upload_saves_record(service, file_repo, storage) -> None:
@@ -360,7 +362,17 @@ def test_complete_upload_saves_record(service, file_repo, storage) -> None:
     row = file_repo.files[file_id]
     assert row.file_size_bytes == 1234
     assert row.file_name == "abc.pdf"  # fallback to object key basename
+    assert row.file_extension == "pdf"  # derived from the object key
     assert row.folder_id is None
+
+
+def test_complete_upload_prefers_session_extension(service, file_repo, storage) -> None:
+    storage.sizes["uploads/abc.pdf"] = 1234
+    file_id = _run(
+        service.complete_upload(1, _session(name="archive.tar.bz2", file_extension=".TAR.BZ2"))
+    )
+    row = file_repo.files[file_id]
+    assert row.file_extension == "tar.bz2"  # normalised from the session value
 
 
 def test_complete_upload_uses_session_file_name_and_folder(service, file_repo) -> None:
@@ -370,6 +382,7 @@ def test_complete_upload_uses_session_file_name_and_folder(service, file_repo) -
     file_id = _run(service.complete_upload(1, _session(name="report.pdf", folder_id=folder.id)))
     row = file_repo.files[file_id]
     assert row.file_name == "report.pdf"
+    assert row.file_extension == "pdf"
     assert row.folder_id == folder.id
 
 
