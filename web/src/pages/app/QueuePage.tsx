@@ -1,14 +1,10 @@
-import { memo, useCallback, useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { memo, useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import { LayoutGroup, motion } from "motion/react";
-import { Download, ArrowCounterClockwise } from "@phosphor-icons/react";
 import { useJobs, type UiJob } from "@/jobs/JobsContext";
-import { useAuth } from "@/auth/AuthContext";
-import { useToast } from "@/auth/ToastContext";
-import { getCachedFile, dropCachedFile } from "@/lib/fileCache";
+import { activeJobs } from "@/jobs/jobStore";
 import { Dropdown } from "@/components/Dropdown";
-import { ErrorButton } from "@/components/ErrorButton";
-import { Card, CreditsBadge, FormatChip, ProgressBar, StatusBadge } from "@/components/ui";
+import { Card, FormatChip, ProgressBar, StatusBadge } from "@/components/ui";
 import { formatDateTime } from "@/lib/format";
 
 type SortKey = "newest" | "oldest" | "status" | "format" | "filename";
@@ -21,25 +17,25 @@ const SORTS: { key: SortKey; label: string }[] = [
   { key: "filename", label: "By name" },
 ];
 
+/** Sort order for "By status". Only in-progress statuses reach the queue. */
 const STATUS_ORDER: Record<string, number> = {
   PROCESSING: 0,
   PENDING: 1,
   AWAITING_UPLOAD: 2,
-  COMPLETED: 3,
-  FAILED: 4,
 };
 
 interface QueueRowProps {
   job: UiJob;
-  onDownload: (jobId: string) => void;
-  onRetry: (job: UiJob) => void;
 }
 
 /**
  * Memoized queue row. Keyed by stable props (job id + callback identities) so a
  * single SSE progress tick on one job does not re-render every other row.
+ *
+ * Only in-progress jobs are rendered here, so there are no download/retry
+ * actions: finished conversions are reported by History, which owns those.
  */
-const QueueRow = memo(function QueueRow({ job, onDownload, onRetry }: QueueRowProps) {
+const QueueRow = memo(function QueueRow({ job }: QueueRowProps) {
   return (
     <motion.li
       layout
@@ -59,128 +55,33 @@ const QueueRow = memo(function QueueRow({ job, onDownload, onRetry }: QueueRowPr
       <StatusBadge status={job.status} />
       <div className="hidden sm:block">
         <ProgressBar
-          value={
-            job.progress ??
-            (job.status === "COMPLETED"
-              ? 100
-              : job.status === "PROCESSING"
-                ? 45
-                : job.status === "FAILED"
-                  ? 100
-                  : 0)
-          }
+          value={job.progress ?? (job.status === "PROCESSING" ? 45 : 0)}
           from="var(--color-primary)"
-          to={job.status === "FAILED" ? "var(--color-error)" : undefined}
         />
       </div>
-      <div className="flex items-center justify-end gap-3">
-        <span className="hidden font-mono text-xs text-muted lg:block">
-          {formatDateTime(job.createdAt)}
-        </span>
-        {job.status === "COMPLETED" && !!job.credits_used && (
-          <CreditsBadge credits={job.credits_used} />
-        )}
-        {job.status === "COMPLETED" && (
-          <button
-            onClick={() => onDownload(job.job_id)}
-            className="text-muted transition-transform hover:scale-110 hover:text-primary"
-            aria-label="Download"
-            title="Download"
-          >
-            <Download size={18} />
-          </button>
-        )}
-        {job.status === "FAILED" && (
-          <>
-            <ErrorButton message={job.errorMessage} />
-            <motion.button
-              onClick={() => onRetry(job)}
-              whileHover={{ rotate: -180 }}
-              transition={{ type: "spring", stiffness: 200, damping: 15 }}
-              className="text-muted hover:text-primary"
-              aria-label="Retry"
-              title="Retry"
-            >
-              <ArrowCounterClockwise size={18} />
-            </motion.button>
-          </>
-        )}
-      </div>
+      <span className="hidden justify-self-end font-mono text-xs text-muted lg:block">
+        {formatDateTime(job.createdAt)}
+      </span>
     </motion.li>
   );
 });
 
 export function QueuePage() {
-  const { jobs, updateJob, refresh } = useJobs();
-  const { api: client } = useAuth();
-  const { success, error } = useToast();
-  const navigate = useNavigate();
+  const { jobs, refresh } = useJobs();
   const [sort, setSort] = useState<SortKey>("newest");
 
-  // Load server history on mount so the queue isn't empty on a fresh session.
+  // Load the current user's jobs on mount, so the queue also reflects work
+  // started elsewhere (or before a reload) rather than only this tab's.
   useEffect(() => {
     refresh();
   }, [refresh]);
 
-  const handleDownload = useCallback(
-    async (jobId: string) => {
-      try {
-        await client.downloadConvertedFile(jobId);
-      } catch (err) {
-        error(err instanceof Error ? err.message : "Could not download file");
-      }
-    },
-    [client, error],
-  );
-
-  const handleRetry = useCallback(
-    async (job: UiJob) => {
-      // 1. If the input object is gone from storage, fall back to a full
-      //    re-upload via the normal conversion route.
-      const exists = await client.objectExists(job.object_key || job.input_file);
-      if (!exists) {
-        const cached = getCachedFile(job.job_id);
-        if (cached) {
-          try {
-            const newJob = await client.convertWithFile(cached.source, cached.target, cached.file);
-            updateJob(job.job_id, {
-              ...newJob,
-              fileName: cached.file.name,
-              status: "PENDING",
-              progress: 0,
-              createdAt: new Date().toISOString(),
-            });
-            dropCachedFile(job.job_id);
-            success("Input file was missing — re-uploaded and re-queued.");
-          } catch (err) {
-            error(err instanceof Error ? err.message : "Could not re-upload file");
-          }
-          return;
-        }
-        // No cached file — send the user to Convert pre-filled.
-        navigate("/app/convert", {
-          state: { source: job.source_format, target: job.target_format },
-        });
-        error("The input file is no longer in storage. Re-select it to convert.");
-        return;
-      }
-
-      // 2. Input still exists — re-enqueue server-side without re-uploading.
-      try {
-        const updated = await client.retryJob(job.job_id);
-        updateJob(job.job_id, { status: "PENDING", progress: 0, output_file: updated.output_file, download_url: updated.download_url });
-        success("Conversion re-queued — tracking it now.");
-      } catch (err) {
-        error(err instanceof Error ? err.message : "Could not retry conversion");
-      }
-    },
-    [client, navigate, updateJob, success, error],
-  );
-
-  const active = jobs.filter((j) => j.status === "PROCESSING" || j.status === "PENDING").length;
+  // The queue is a live view: only work still in flight belongs here. A
+  // finished conversion moves to History, which reports its outcome and cost.
+  const active = useMemo(() => activeJobs(jobs), [jobs]);
 
   const sorted = useMemo(() => {
-    const arr = [...jobs];
+    const arr = [...active];
     switch (sort) {
       case "newest":
         return arr.sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? ""));
@@ -197,13 +98,13 @@ export function QueuePage() {
           (a.fileName ?? a.input_file).localeCompare(b.fileName ?? b.input_file),
         );
     }
-  }, [jobs, sort]);
+  }, [active, sort]);
 
   return (
     <div className="mx-auto max-w-5xl space-y-6">
       <div>
         <h1 className="font-display text-2xl font-semibold">Queue</h1>
-        <p className="text-sm text-muted">Every conversion, in order.</p>
+        <p className="text-sm text-muted">Conversions running right now.</p>
       </div>
 
       {/* Toolbar */}
@@ -218,7 +119,7 @@ export function QueuePage() {
             align="left"
           />
         </div>
-        <span className="font-mono text-xs text-muted">{active} active</span>
+        <span className="font-mono text-xs text-muted">{active.length} active</span>
       </div>
 
       {/* Table */}
@@ -233,18 +134,17 @@ export function QueuePage() {
 
         {sorted.length === 0 ? (
           <p className="px-5 py-16 text-center text-muted">
-            No conversions yet. Start one from the Convert screen.
+            Nothing is running right now. Finished conversions appear in{" "}
+            <Link to="/app/history" className="font-medium text-primary hover:underline">
+              History
+            </Link>
+            .
           </p>
         ) : (
           <ul className="divide-y divide-outline">
             <LayoutGroup>
               {sorted.map((job) => (
-                <QueueRow
-                  key={job.job_id}
-                  job={job}
-                  onDownload={handleDownload}
-                  onRetry={handleRetry}
-                />
+                <QueueRow key={job.job_id} job={job} />
               ))}
             </LayoutGroup>
           </ul>

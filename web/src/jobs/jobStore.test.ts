@@ -15,9 +15,12 @@ import {
   IN_FLIGHT_STATUSES,
   JOBS_STORAGE_KEY,
   LEGACY_JOBS_STORAGE_KEY,
+  activeJobs,
+  isActiveJob,
   readStoredJobs,
   reconcileJobs,
   removeStoredJobs,
+  showsCreditsUsed,
   storageKeyFor,
   type KeyValueStore,
   type UiJob,
@@ -255,5 +258,98 @@ describe("cross-account journey (the reported bug)", () => {
 
     expect(store.getItem(LEGACY_JOBS_STORAGE_KEY)).toBeNull();
     expect(readStoredJobs(1, store)).toEqual([]);
+  });
+});
+
+describe("isActiveJob / activeJobs", () => {
+  it("treats in-progress statuses as active", () => {
+    for (const status of ["PENDING", "PROCESSING", "AWAITING_UPLOAD"]) {
+      expect(isActiveJob({ status })).toBe(true);
+    }
+  });
+
+  it("treats finished and unknown statuses as inactive", () => {
+    for (const status of ["COMPLETED", "FAILED", "RETRYING", ""]) {
+      expect(isActiveJob({ status })).toBe(false);
+    }
+  });
+
+  it("keeps only the in-progress jobs, in order", () => {
+    const list = [
+      job({ job_id: "done", status: "COMPLETED" }),
+      job({ job_id: "running", status: "PROCESSING" }),
+      job({ job_id: "broke", status: "FAILED" }),
+      job({ job_id: "queued", status: "PENDING" }),
+      job({ job_id: "uploading", status: "AWAITING_UPLOAD" }),
+    ];
+
+    expect(activeJobs(list).map((j) => j.job_id)).toEqual(["running", "queued", "uploading"]);
+  });
+
+  it("empties the queue once every conversion has finished", () => {
+    const list = [
+      job({ job_id: "a", status: "COMPLETED" }),
+      job({ job_id: "b", status: "FAILED" }),
+    ];
+
+    expect(activeJobs(list)).toEqual([]);
+  });
+
+  it("does not mutate the list it filters", () => {
+    const list = [
+      job({ job_id: "a", status: "COMPLETED" }),
+      job({ job_id: "b", status: "PENDING" }),
+    ];
+
+    activeJobs(list);
+
+    expect(list).toHaveLength(2);
+  });
+});
+
+describe("showsCreditsUsed", () => {
+  it("reports tokens for a completed conversion that consumed them", () => {
+    expect(showsCreditsUsed(job({ status: "COMPLETED", credits_used: 5 }))).toBe(true);
+  });
+
+  it("hides tokens for a completed conversion that used none", () => {
+    expect(showsCreditsUsed(job({ status: "COMPLETED", credits_used: 0 }))).toBe(false);
+    expect(showsCreditsUsed(job({ status: "COMPLETED" }))).toBe(false);
+    // Tolerates an explicit null from the API.
+    expect(showsCreditsUsed({ status: "COMPLETED", credits_used: null })).toBe(false);
+  });
+
+  it("hides tokens for a failed conversion, which is never charged", () => {
+    // The worker deducts credits only after the output is uploaded, so a failed
+    // job must not report a cost even if a stale value is present.
+    expect(showsCreditsUsed(job({ status: "FAILED", credits_used: 7 }))).toBe(false);
+  });
+
+  it("hides tokens while a conversion is still running", () => {
+    for (const status of ["PENDING", "PROCESSING", "AWAITING_UPLOAD"]) {
+      expect(showsCreditsUsed(job({ status, credits_used: 3 }))).toBe(false);
+    }
+  });
+});
+
+describe("queue vs history split", () => {
+  // One mixed list, as the history endpoint returns it, viewed through both
+  // pages' rules: the queue keeps only live work, history reports token cost.
+  const mixed = [
+    job({ job_id: "done", status: "COMPLETED", credits_used: 4 }),
+    job({ job_id: "running", status: "PROCESSING", progress: 50 }),
+    job({ job_id: "queued", status: "PENDING" }),
+    job({ job_id: "broke", status: "FAILED" }),
+  ];
+
+  it("queue shows only the active conversions", () => {
+    expect(activeJobs(mixed).map((j) => j.job_id)).toEqual(["running", "queued"]);
+  });
+
+  it("history reports tokens for the completed conversion", () => {
+    const billed = mixed.filter(showsCreditsUsed);
+
+    expect(billed.map((j) => j.job_id)).toEqual(["done"]);
+    expect(billed[0].credits_used).toBe(4);
   });
 });
