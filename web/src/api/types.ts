@@ -29,6 +29,13 @@ export interface DashboardResponse {
   conversion_stats: ConversionStats
   storage_stats: StorageStats
   credit_balance: number
+  /**
+   * UTC instant the monthly credit allowance is replaced by the next period's,
+   * ISO-8601. `null` when the tier has no persistent credits (nothing resets).
+   * Optional because the API and the SPA deploy independently, so a new bundle
+   * can briefly talk to an older API that does not send it yet.
+   */
+  credits_reset_at?: string | null
   tier: string
   recent_jobs_count: number
   active_api_keys: number
@@ -41,11 +48,25 @@ export interface ConversionStats {
   total_credits_used: number
 }
 
+/** One bucket of the user's storage usage, keyed by file extension. */
+export interface StorageBreakdownEntry {
+  /** Lowercase, no leading dot. `""` means the file has no extension. */
+  extension: string
+  bytes: number
+  file_count: number
+}
+
 export interface StorageStats {
   used_bytes: number
   limit_bytes: number
   used_percent: number
   file_count: number
+  /**
+   * Per-extension usage, sorted by `bytes` DESC with only `bytes > 0` entries.
+   * Additive/optional: older backends omit it entirely, so a missing field must
+   * always be treated as "no breakdown data" rather than an error.
+   */
+  breakdown?: StorageBreakdownEntry[]
 }
 
 // ---- Upload ----
@@ -232,6 +253,8 @@ export interface CreditBalanceResponse {
   tier: string
   monthly_allowance: number | null
   monthly_remaining: number | null
+  /** See `DashboardResponse.credits_reset_at`. */
+  credits_reset_at?: string | null
 }
 
 export interface CreditTransactionResponse {

@@ -91,3 +91,22 @@ export function formatDateTime(iso: string | null | undefined): string {
     minute: "2-digit",
   });
 }
+
+/**
+ * Local calendar date for an instant, or `null` when it is absent or
+ * unparseable.
+ *
+ * Unlike `formatDate`, which renders an em dash placeholder, this lets a caller
+ * omit a row entirely rather than print a placeholder for missing data.
+ *
+ * Formats in the **viewer's** timezone deliberately: a credit reset happens at
+ * midnight UTC, which is the previous evening for anyone west of UTC, so the
+ * correct local day only falls out of formatting the instant — not the UTC
+ * date.
+ */
+export function formatDateOrNull(iso: string | null | undefined): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+}

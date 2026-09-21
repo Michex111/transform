@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import { motion, useReducedMotion } from "motion/react";
 import { ArrowRight, DownloadSimple, Swap, Trash, UploadSimple } from "@phosphor-icons/react";
 import { useAuth } from "@/auth/AuthContext";
@@ -7,11 +7,19 @@ import { useToast } from "@/auth/ToastContext";
 import { FormatPicker } from "@/components/FormatPicker";
 import { Button, Card, FormatMorph, FormatChip, ProgressBar, StatusBadge } from "@/components/ui";
 import { formatDateTime, formatMeta } from "@/lib/format";
+import { normalizeExt } from "@/lib/formatVisual";
 import { friendlyErrorMessage } from "@/lib/errorMessages";
 import { useGuestHistory } from "@/lib/useGuestHistory";
 import type { GuestHistoryItem } from "@/api/types";
 
 const MAX_BYTES = 100 * 1024 * 1024; // 100 MB
+
+/**
+ * Degrade an unusable deep link to a familiar pair instead of whichever key the
+ * server happens to return first (which would surface something obscure).
+ */
+const FALLBACK_SOURCE = "pdf";
+const FALLBACK_TARGETS = ["docx", "pdf", "jpg", "png"];
 
 export function GuestConvertPage() {
   const { api: client, isAuthenticated } = useAuth();
@@ -43,8 +51,16 @@ export function GuestConvertPage() {
   const fileInput = useRef<HTMLInputElement>(null);
   const reduce = useReducedMotion();
 
-  const [from, setFrom] = useState("pdf");
-  const [to, setTo] = useState("docx");
+  // Deep links from the format catalog / hub pages arrive here with the pair
+  // already chosen. The defaults below are only a starting point — the
+  // validity effects further down snap both ends onto the real conversion map
+  // once it loads, so a stale or unsupported prefill can't open the guest
+  // converter in an invalid state.
+  const location = useLocation();
+  const prefill = (location.state as { source?: string; target?: string } | null) ?? {};
+
+  const [from, setFrom] = useState(normalizeExt(prefill.source ?? "pdf") || "pdf");
+  const [to, setTo] = useState(normalizeExt(prefill.target ?? "docx") || "docx");
   const [file, setFile] = useState<File | null>(null);
   const [busy, setBusy] = useState(false);
   const [dragOver, setDragOver] = useState(false);
@@ -71,13 +87,15 @@ export function GuestConvertPage() {
   // Keep `to` valid for the selected source, and `from` a valid source.
   useEffect(() => {
     if (allowedSources.length && !allowedSources.includes(from)) {
-      setFrom(allowedSources[0]);
+      setFrom(
+        allowedSources.includes(FALLBACK_SOURCE) ? FALLBACK_SOURCE : allowedSources[0],
+      );
     }
   }, [allowedSources, from]);
 
   useEffect(() => {
     if (allowedTargets.length && !allowedTargets.includes(to)) {
-      setTo(allowedTargets[0]);
+      setTo(allowedTargets.find((t) => FALLBACK_TARGETS.includes(t)) ?? allowedTargets[0]);
     }
   }, [allowedTargets, to]);
 
@@ -335,9 +353,9 @@ export function GuestConvertPage() {
                   <div className="min-w-0">
                     <p className="truncate text-sm text-on-background">{job.fileName}</p>
                     <div className="mt-1 flex items-center gap-2">
-                      <FormatChip format={job.source_format} />
+                      <FormatChip format={job.source_format} size="xs" />
                       <ArrowRight size={12} className="text-muted" />
-                      <FormatChip format={job.target_format} />
+                      <FormatChip format={job.target_format} size="xs" />
                       <span className="font-mono text-[10px] text-muted">{formatDateTime(job.createdAt)}</span>
                     </div>
                     {job.errorMessage && (
