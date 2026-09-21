@@ -12,6 +12,7 @@ from tests.fakes.fake_credit_port import FakeCreditPort
 from tests.fakes.fake_logger import FakeLogger
 from workers.converter_workers.context.worker_context import WorkerContext
 from workers.converter_workers.processor import _convert_file, process_job, resolve_path
+from workers.converter_workers.processor import resolve_input_path, resolve_output_path
 
 
 def test_resolve_path_builds_download_and_upload_paths() -> None:
@@ -42,6 +43,97 @@ def test_resolve_path_truncates_very_long_filenames() -> None:
     # Extension must be preserved so the converter infers the right source.
     assert input_file.name.endswith(".pdf")
     assert output_file.name.endswith(".docx")
+
+
+def test_resolve_input_path_builds_the_download_path() -> None:
+    input_file = resolve_input_path("s3-file_store/manual.txt", Path("/tmp/work"))
+
+    assert input_file.name == "manual.txt"
+    assert input_file.parent.name == "downloads"
+
+
+def test_resolve_output_path_defaults_to_the_target_format() -> None:
+    output_file = resolve_output_path(
+        "s3-file_store/manual.txt",
+        ConversionType(source_format="txt", target_format="md"),
+        Path("/tmp/work"),
+    )
+
+    assert output_file.name == "manual.md"
+    assert output_file.parent.name == "uploads"
+
+
+def test_resolve_output_path_uses_a_declared_container_extension() -> None:
+    """A converter may declare that it writes a container instead of the
+    target format (e.g. pdf -> png bundles pages into a .zip)."""
+
+    def converter(input_path: str, output_path: str) -> None:
+        path = Path(output_path)
+        path.write_bytes(b"PK\x03\x04")
+
+    converter.output_extension = "zip"  # type: ignore[attr-defined]
+
+    output_file = resolve_output_path(
+        "s3-file_store/manual.pdf",
+        ConversionType(source_format="pdf", target_format="png"),
+        Path("/tmp/work"),
+        converter=converter,
+        input_path="/tmp/work/downloads/manual.pdf",
+    )
+
+    assert output_file.name == "manual.zip"
+
+
+def test_resolve_output_path_uses_a_callable_extension_hook() -> None:
+    """The hook may derive the extension from the downloaded input."""
+
+    def converter(input_path: str, output_path: str) -> None:
+        path = Path(output_path)
+        path.write_bytes(b"PK\x03\x04")
+
+    def hook(input_path: str) -> str | None:
+        return "zip" if Path(input_path).name == "multi.pdf" else None
+
+    converter.output_extension = hook  # type: ignore[attr-defined]
+    conversion = ConversionType(source_format="pdf", target_format="png")
+
+    multi = resolve_output_path(
+        "s3-file_store/multi.pdf",
+        conversion,
+        Path("/tmp/work"),
+        converter=converter,
+        input_path="/tmp/work/downloads/multi.pdf",
+    )
+    single = resolve_output_path(
+        "s3-file_store/single.pdf",
+        conversion,
+        Path("/tmp/work"),
+        converter=converter,
+        input_path="/tmp/work/downloads/single.pdf",
+    )
+
+    assert multi.name == "multi.zip"
+    # A hook that declines keeps the target format's extension.
+    assert single.name == "single.png"
+
+
+def test_resolve_output_path_without_a_hook_argument_keeps_the_target() -> None:
+    """A callable hook that needs the input falls back when it has none."""
+
+    def converter(input_path: str, output_path: str) -> None:
+        path = Path(output_path)
+        path.write_bytes(b"PK\x03\x04")
+
+    converter.output_extension = lambda input_path: "zip"  # type: ignore[attr-defined]
+
+    output_file = resolve_output_path(
+        "s3-file_store/manual.pdf",
+        ConversionType(source_format="pdf", target_format="png"),
+        Path("/tmp/work"),
+        converter=converter,
+    )
+
+    assert output_file.name == "manual.png"
 
 
 def test_convert_file_times_out_a_hung_converter(
@@ -108,6 +200,47 @@ def test_process_job_downloads_converts_and_uploads_successfully(
     assert fake_storage_port.objects["output/user/guest/job/job-1/input.md"] == b"HELLO WORLD"
     assert len(fake_storage_port.download_calls) == 1
     assert len(fake_storage_port.upload_calls) == 1
+
+
+def test_process_job_uploads_a_container_under_its_declared_extension(
+    conversion_job,
+    fake_storage_port,
+    fake_queue_port,
+    fake_event_publisher,
+    fake_converter_registry,
+) -> None:
+    """A converter that bundles several files (pdf -> png pages) declares the
+    container extension, so the stored object is a .zip rather than an image."""
+    seen_input_paths: list[str] = []
+
+    def hook(input_path: str) -> str | None:
+        seen_input_paths.append(input_path)
+        return "zip"
+
+    @fake_converter_registry.register(conversion_job.conversion)
+    def converter(input_path: str, output_path: str) -> None:
+        Path(output_path).write_bytes(b"PK\x03\x04zip of pages")
+
+    converter.output_extension = hook  # type: ignore[attr-defined]
+
+    context = WorkerContext(
+        storage_port=fake_storage_port,
+        queue_port=fake_queue_port,
+        event_port=fake_event_publisher,
+        converter_registry=fake_converter_registry,
+        worker_name="processor-test",
+    )
+
+    conversion_job.pending_processing()
+    asyncio.run(process_job(context, conversion_job))
+
+    expected_key = "output/user/guest/job/job-1/input.zip"
+    assert conversion_job.status == JobStatus.COMPLETED
+    assert conversion_job.output_file == expected_key
+    assert fake_storage_port.objects[expected_key] == b"PK\x03\x04zip of pages"
+    # The hook receives the downloaded plaintext input, not the object key.
+    assert len(seen_input_paths) == 1
+    assert Path(seen_input_paths[0]).name == "input.txt"
 
 
 def test_process_job_raises_and_marks_failed_when_converter_missing(

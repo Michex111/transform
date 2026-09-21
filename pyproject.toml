@@ -22,6 +22,10 @@ dependencies = [
     "pwdlib>=0.3.0",
     "pydantic-settings>=2.14.1",
     "pyjwt>=2.13.0",
+    # PDF rasterisation for pdf -> image conversions. Bundles Google's PDFium
+    # in a manylinux wheel (Apache-2.0/BSD-3-Clause), so no system package such
+    # as poppler-utils is needed in the worker image.
+    "pypdfium2>=5.13.0",
     "redis[hiredis]>=8.0.0",
     "sqlalchemy>=2.0.51",
     "stripe>=11.0.0",

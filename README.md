@@ -60,6 +60,9 @@ setup is needed for development.
 - **Audio**: MP3 ↔ WAV, WAV ↔ FLAC, MP3 ↔ OGG, MP3 ↔ M4A
 - **Video**: MP4 ↔ AVI, MP4 ↔ MOV, AVI ↔ MKV, Video → GIF
 - **Images**: JPEG ↔ PNG, PNG ↔ WEBP, SVG → PNG
+- **PDF to image**: PDF → PNG, JPG, JPEG, WEBP, BMP (one image per page; a
+  multi-page PDF is bundled into a ZIP), PDF → TIFF and PDF → GIF (all pages in
+  the single multi-page file)
 - **Ebooks**: EPUB ↔ PDF, EPUB ↔ MOBI, EPUB → TXT
 - **Archives**: ZIP ↔ TAR
 

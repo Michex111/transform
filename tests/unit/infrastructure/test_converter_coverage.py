@@ -72,6 +72,16 @@ class TestConverterRegistryCoverage:
         ("gif", "png"),
     ]
 
+    PDF_IMAGE_CONVERSIONS = [
+        ("pdf", "png"),
+        ("pdf", "jpg"),
+        ("pdf", "jpeg"),
+        ("pdf", "webp"),
+        ("pdf", "bmp"),
+        ("pdf", "tiff"),
+        ("pdf", "gif"),
+    ]
+
     EBOOK_CONVERSIONS = [
         ("epub", "pdf"),
         ("pdf", "epub"),
@@ -145,6 +155,13 @@ class TestConverterRegistryCoverage:
             converter = registry.get_converter(ct)
             assert converter is not None, f"Missing converter: {source} -> {target}"
 
+    def test_all_pdf_image_converters_registered(self):
+        registry = get_registry()
+        for source, target in self.PDF_IMAGE_CONVERSIONS:
+            ct = ConversionType(source, target)
+            converter = registry.get_converter(ct)
+            assert converter is not None, f"Missing converter: {source} -> {target}"
+
     def test_all_ebook_converters_registered(self):
         registry = get_registry()
         for source, target in self.EBOOK_CONVERSIONS:
@@ -182,6 +199,7 @@ class TestConverterRegistryCoverage:
             + len(self.AUDIO_CONVERSIONS)
             + len(self.VIDEO_CONVERSIONS)
             + len(self.IMAGE_CONVERSIONS)
+            + len(self.PDF_IMAGE_CONVERSIONS)
             + len(self.EBOOK_CONVERSIONS)
             + len(self.ARCHIVE_CONVERSIONS)
             + len(self.FONT_CONVERSIONS)
@@ -230,6 +248,9 @@ class TestConverterRegistryCoverage:
         assert "pdf" in mapping
         assert "docx" in mapping["pdf"]
         assert "epub" in mapping["pdf"]
+        # pdf rasterises to images as well (pypdfium2).
+        for image_target in ["png", "jpg", "webp", "bmp", "tiff", "gif"]:
+            assert image_target in mapping["pdf"], f"pdf -> {image_target} missing"
         assert "xlsx" in mapping
         assert "csv" in mapping["xlsx"]
         assert "ods" in mapping["xlsx"]
