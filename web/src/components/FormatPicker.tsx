@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { AnimatePresence, motion } from "motion/react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
+import { motion } from "motion/react";
 import { MagnifyingGlass, CaretDown, CaretRight, Check } from "@phosphor-icons/react";
 import { FORMAT_CATEGORIES } from "@/lib/formatCatalog";
 import { formatTint, formatVisual } from "@/lib/formatVisual";
@@ -25,6 +26,23 @@ function useCompactViewport(): boolean {
   }, []);
 
   return compact;
+}
+
+/**
+ * Renders its children into `document.body` when `enabled`.
+ *
+ * A non-`none` CSS `transform` on ANY ancestor makes that ancestor the
+ * containing block for `position: fixed` descendants, so an overlay inside a
+ * page-level motion wrapper is centred within that wrapper instead of the
+ * viewport — verified in production, where the wrapper resolved to
+ * [16, 34, 343x855] rather than the 390x844 viewport and the panel sat ~47px
+ * below centre. Portalling to the body removes the dependency entirely.
+ *
+ * Falls back to rendering inline when there is no DOM (server rendering).
+ */
+function PopoverPortal({ enabled, children }: { enabled: boolean; children: ReactNode }) {
+  if (!enabled || typeof document === "undefined") return <>{children}</>;
+  return createPortal(children, document.body);
 }
 
 interface FormatPickerProps {
@@ -65,6 +83,10 @@ export function FormatPicker({
   const [query, setQuery] = useState("");
   const [activeCat, setActiveCat] = useState(categories[0]?.id ?? "");
   const rootRef = useRef<HTMLDivElement>(null);
+  // Also covers the portalled overlay, which is NOT inside `rootRef` — without
+  // this, clicking inside the panel on a phone would count as an outside click
+  // and close the picker.
+  const overlayRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
 
   // Restrict visible categories to those containing an allowed format. An
@@ -83,7 +105,10 @@ export function FormatPicker({
   useEffect(() => {
     if (!open) return;
     function onDocClick(e: MouseEvent) {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
+      const target = e.target as Node;
+      if (rootRef.current?.contains(target)) return;
+      if (overlayRef.current?.contains(target)) return;
+      setOpen(false);
     }
     function onKey(e: KeyboardEvent) {
       if (e.key === "Escape") setOpen(false);
@@ -158,8 +183,13 @@ export function FormatPicker({
         <CaretDown size={14} className="text-muted" />
       </button>
 
-      <AnimatePresence>
-        {open && (
+      {/* NOTE: deliberately NOT wrapped in `AnimatePresence`. Its direct child
+          here is `PopoverPortal`, and AnimatePresence can only track motion
+          children — it kept the portal mounted forever, so picking a format,
+          clicking the backdrop and pressing Escape all left the panel open.
+          Gating on `open` keeps every close path working; the panel keeps its
+          enter animation and loses only the 160ms fade on close. */}
+      {open && (
           /* An anchored popover cannot be relied on for a phone: the panel is
              520px wide and the trigger sits near the screen edge, so at 390px it
              used to hang off the viewport (measured: left = -10px), and on a
@@ -169,8 +199,12 @@ export function FormatPicker({
 
              The wrapper is `display: contents` in the anchored case, so its box
              disappears and the panel positions against the trigger's wrapper
-             exactly as it always did — the desktop popover is unchanged. */
+             exactly as it always did — the desktop popover is unchanged. The
+             overlay is portalled to the body so no transformed ancestor can
+             contain it (see `PopoverPortal`). */
+          <PopoverPortal enabled={compact}>
           <div
+            ref={overlayRef}
             className={
               compact
                 ? "fixed inset-0 z-50 flex items-center justify-center p-3"
@@ -283,8 +317,8 @@ export function FormatPicker({
             )}
             </motion.div>
           </div>
-        )}
-      </AnimatePresence>
+          </PopoverPortal>
+      )}
     </div>
   );
 }
