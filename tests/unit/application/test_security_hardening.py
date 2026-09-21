@@ -59,6 +59,47 @@ def test_validate_upload_signature_accepts_webp_images() -> None:
     assert validate_upload_signature(b"RIFF\x24\x00\x00\x00WEBPVP8 ", "wav") is False
 
 
+def test_detect_type_recognizes_iso_bmff_brands() -> None:
+    # mp4/mov/avif/heic share the ftyp header; only the brand separates them.
+    assert detect_type(b"\x00\x00\x00 ftypavif") == "avif"
+    assert detect_type(b"\x00\x00\x00 ftypisom") == "mp4"
+    assert detect_type(b"\x00\x00\x00\x14ftypheic") == "heic"
+
+
+def test_validate_upload_signature_accepts_avif_images() -> None:
+    # Regression: AVIF is ISO BMFF, so it was reported as mp4 and rejected,
+    # which blocked every AVIF conversion (including AVIF → PDF).
+    assert validate_upload_signature(b"\x00\x00\x00 ftypavif", "avif") is True
+    assert validate_upload_signature(b"\x00\x00\x00 ftypisom", "avif") is False
+
+
+def test_validate_upload_signature_accepts_svg() -> None:
+    # Regression: SVG is XML, and the generic xml heuristic rejected it.
+    assert validate_upload_signature(b'<svg xmlns="http://www.w3.org/2000/svg"', "svg") is True
+
+
+def test_validate_upload_signature_accepts_every_image_source() -> None:
+    """Every image format the converter registry accepts must survive upload.
+
+    A rejection here happens *before* the worker runs, so it silently makes a
+    registered, advertised conversion impossible.
+    """
+    heads = {
+        "jpg": b"\xff\xd8\xff\xe0\x00\x10JFIF",
+        "jpeg": b"\xff\xd8\xff\xe0\x00\x10JFIF",
+        "png": b"\x89PNG\r\n\x1a\n\x00\x00\x00\r",
+        "webp": b"RIFFN\x00\x00\x00WEBP",
+        "gif": b"GIF87a<\x00(\x00",
+        "bmp": b"BMV\x1c\x00\x00\x00",
+        "tiff": b"II*\x00\x08\x00\x00\x00",
+        "ico": b"\x00\x00\x01\x00\x05\x00",
+        "avif": b"\x00\x00\x00 ftypavif",
+        "svg": b'<svg xmlns="http://www.w3.org/2000/svg"',
+    }
+    for extension, head in heads.items():
+        assert validate_upload_signature(head, extension) is True, extension
+
+
 # ---------------------------------------------------------------------------
 # Archive decompression-bomb guard (F3)
 # ---------------------------------------------------------------------------
