@@ -1,18 +1,28 @@
 // useConversionMap — reads the real source → target conversion graph from the
 // API and exposes it in the shapes the public format pages need.
 //
-// The graph is tiny (a few hundred edges) and every public page wants the same
-// payload, so the in-flight/resolved promise is cached at module scope and
-// shared: the landing page, the catalogue and every format hub resolve from a
-// single request per audience. Guest and authed caches are kept separate
-// because they hit different endpoints.
+// The graph is served from `conversionMapStore`, which keeps it in memory and in
+// localStorage. Consequences worth knowing:
 //
-// The hook never throws. A network failure resolves to an empty map plus an
-// `error` string so callers render an honest empty state instead of a grid of
-// links to pages that cannot convert anything.
+//   * The map is populated on the *first* render for a returning visitor, so
+//     the format pickers are already restricted to real conversions and no page
+//     has to flash a loading state on every visit.
+//   * `loading` is true only when there is genuinely nothing to render yet. A
+//     refresh of an existing map never blanks the UI.
+//   * `error` is only reported when no usable map is available. A failed
+//     refresh of a cached map stays silent — the cache is still correct.
+//
+// The hook never throws and never takes the caller's UI away on failure: callers
+// render an honest empty state when `error` is set.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { api } from "@/api/client";
+import { useCallback, useEffect, useMemo, useSyncExternalStore } from "react";
+import {
+  getConversionMapSnapshot,
+  getServerConversionMapSnapshot,
+  loadConversionMap,
+  subscribeConversionMap,
+  type ConversionMapAudience,
+} from "@/lib/conversionMapStore";
 import { normalizeExt } from "@/lib/formatVisual";
 
 export interface ConversionMapResult {
@@ -31,38 +41,8 @@ export interface ConversionMapResult {
   loading: boolean;
   /** Human-readable failure message, or null while loading/succeeded. */
   error: string | null;
-}
-
-/* ------------------------------------------------------------------ */
-/* Module-level promise cache (one in-flight request per audience)      */
-/* ------------------------------------------------------------------ */
-
-let guestCache: Promise<Record<string, string[]>> | null = null;
-let authedCache: Promise<Record<string, string[]>> | null = null;
-
-function fetchConversionMap(guest: boolean): Promise<Record<string, string[]>> {
-  const cached = guest ? guestCache : authedCache;
-  if (cached) return cached;
-
-  const request = (guest ? api.guestConversionMap() : api.conversionMap())
-    .then((res) => res.conversions ?? {})
-    .catch((err: unknown) => {
-      // Drop the failed entry so a later mount can retry rather than being
-      // pinned to an empty map for the lifetime of the tab.
-      if (guest) guestCache = null;
-      else authedCache = null;
-      throw err instanceof Error ? err : new Error("Could not load the conversion map");
-    });
-
-  if (guest) guestCache = request;
-  else authedCache = request;
-  return request;
-}
-
-/** Test/seam helper: forget both cached maps (useful after signing in/out). */
-export function resetConversionMapCache(): void {
-  guestCache = null;
-  authedCache = null;
+  /** True when the map was served from the local cache and is being revalidated. */
+  stale: boolean;
 }
 
 /* ------------------------------------------------------------------ */
@@ -72,34 +52,32 @@ export function resetConversionMapCache(): void {
 /**
  * @param guest Use the public (no-account) conversion map. Pass `true` on
  *   public marketing/format pages; leave `false` inside the authed app.
+ * @param enabled Set to false to skip fetching (e.g. a modal that is closed).
+ *   A cached map is still returned, so pickers inside it are correct on open.
  */
-export function useConversionMap({ guest = false }: { guest?: boolean } = {}): ConversionMapResult {
-  const [map, setMap] = useState<Record<string, string[]>>({});
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const mounted = useRef(true);
+export function useConversionMap({
+  guest = false,
+  enabled = true,
+}: { guest?: boolean; enabled?: boolean } = {}): ConversionMapResult {
+  const audience: ConversionMapAudience = guest ? "guest" : "authed";
+
+  const subscribe = useCallback(
+    (listener: () => void) => subscribeConversionMap(audience, listener),
+    [audience],
+  );
+  const getSnapshot = useCallback(() => getConversionMapSnapshot(audience), [audience]);
+
+  // `getServerSnapshot` ignores storage, so server rendering stays deterministic.
+  const snapshot = useSyncExternalStore(subscribe, getSnapshot, getServerConversionMapSnapshot);
 
   useEffect(() => {
-    mounted.current = true;
-    fetchConversionMap(guest)
-      .then((conversions) => {
-        if (!mounted.current) return;
-        setMap(conversions);
-        setError(null);
-      })
-      .catch((err: unknown) => {
-        if (!mounted.current) return;
-        setMap({});
-        setError(err instanceof Error ? err.message : "Could not load the conversion map");
-      })
-      .finally(() => {
-        if (mounted.current) setLoading(false);
-      });
-    return () => {
-      mounted.current = false;
-    };
-  }, [guest]);
+    if (!enabled) return;
+    // Resolves immediately (and re-renders nobody) when this session already
+    // has the graph; otherwise it warms the cache for every other consumer.
+    void loadConversionMap(audience);
+  }, [audience, enabled]);
 
+  const map = snapshot.map;
   const sources = useMemo(() => Object.keys(map), [map]);
 
   const targets = useMemo(() => {
@@ -128,7 +106,29 @@ export function useConversionMap({ guest = false }: { guest?: boolean } = {}): C
   const sourcesFor = useCallback((ext: string) => reverse[normalizeExt(ext)] ?? [], [reverse]);
 
   return useMemo(
-    () => ({ map, sources, targets, supported, targetsFor, sourcesFor, loading, error }),
-    [map, sources, targets, supported, targetsFor, sourcesFor, loading, error],
+    () => ({
+      map,
+      sources,
+      targets,
+      supported,
+      targetsFor,
+      sourcesFor,
+      loading: snapshot.loading,
+      error: snapshot.error,
+      stale: snapshot.stale,
+    }),
+    [
+      map,
+      sources,
+      targets,
+      supported,
+      targetsFor,
+      sourcesFor,
+      snapshot.loading,
+      snapshot.error,
+      snapshot.stale,
+    ],
   );
 }
+
+export { resetConversionMapCache } from "@/lib/conversionMapStore";
