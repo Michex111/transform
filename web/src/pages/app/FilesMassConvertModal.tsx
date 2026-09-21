@@ -127,7 +127,7 @@ export function FilesMassConvertModal({
             <div className="flex items-center gap-2">
               <span className="text-sm text-muted">Convert to</span>
             </div>
-            <div className="grid grid-cols-3 gap-2">
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
               {allowedTargets.map((t) => {
                 const selected = t === target;
                 const meta = formatMeta(t);

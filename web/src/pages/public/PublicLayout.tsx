@@ -7,7 +7,7 @@ import { Logo } from "@/components/ui";
 export function PublicLayout() {
   const location = useLocation();
   return (
-    <div className="min-h-screen bg-background text-on-background">
+    <div className="min-h-dvh bg-background text-on-background">
       <PublicHeader />
       {/* Only the page content animates; header + footer stay mounted.
           Mounting-only animation (no AnimatePresence mode="wait") so pages

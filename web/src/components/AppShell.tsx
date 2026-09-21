@@ -60,11 +60,11 @@ export function AppShell() {
   };
 
   return (
-    <div className="flex min-h-screen bg-background">
+    <div className="flex min-h-dvh bg-background">
       {/* Desktop sidebar — stays fixed to the viewport while content scrolls.
-          `sticky top-0 self-start h-screen` pins it and prevents it from
+          `sticky top-0 self-start h-dvh` pins it and prevents it from
           stretching to the height of the (taller) content. */}
-      <aside className="sticky top-0 hidden h-screen w-64 shrink-0 flex-col self-start border-r border-outline bg-surface lg:flex">
+      <aside className="sticky top-0 hidden h-dvh w-64 shrink-0 flex-col self-start border-r border-outline bg-surface lg:flex">
         <div className="flex h-16 shrink-0 items-center border-b border-outline px-5">
           <Logo />
         </div>
@@ -139,8 +139,13 @@ export function AppShell() {
         </main>
 
         {/* Mobile bottom nav — primary 4 always visible; the rest live in a
-            "More" popover so every destination stays reachable on small screens. */}
-        <div ref={moreRef} className="sticky bottom-0 lg:hidden">
+            "More" popover so every destination stays reachable on small screens.
+            `pb-[env(safe-area-inset-bottom)]` keeps the last row clear of the
+            iOS home indicator (a no-op where the inset is 0). */}
+        <div
+          ref={moreRef}
+          className="sticky bottom-0 pb-[env(safe-area-inset-bottom)] lg:hidden"
+        >
           {moreOpen && (
             <div className="absolute bottom-full right-0 left-0 border-t border-outline bg-surface shadow-lg">
               <nav className="grid grid-cols-2 gap-1 p-3" aria-label="More">
@@ -164,8 +169,10 @@ export function AppShell() {
               </nav>
             </div>
           )}
+          {/* 5 cells for 5 items (4 primary + More). A 4-column track pushed
+              "More" onto a second row, doubling the bar's height. */}
           <nav
-            className="grid grid-cols-4 border-t border-outline bg-surface"
+            className="grid grid-cols-5 border-t border-outline bg-surface"
             aria-label="Mobile"
           >
             {PRIMARY.map(({ to, label, icon: Icon }) => (
@@ -173,13 +180,15 @@ export function AppShell() {
                 key={to}
                 to={to}
                 className={({ isActive }) =>
-                  `flex flex-col items-center gap-1 py-3 text-[11px] font-medium ${
+                  `flex flex-col items-center gap-1 py-2.5 text-[11px] font-medium ${
                     isActive ? "text-primary" : "text-muted"
                   }`
                 }
               >
                 <Icon size={22} />
-                {label}
+                {/* Truncate rather than wrap: at 320px a 5-up cell is ~64px,
+                    narrower than "Dashboard" at this size. */}
+                <span className="w-full truncate text-center">{label}</span>
               </NavLink>
             ))}
             <button
@@ -187,10 +196,10 @@ export function AppShell() {
               onClick={() => setMoreOpen((v) => !v)}
               aria-expanded={moreOpen}
               aria-haspopup="menu"
-              className="flex flex-col items-center gap-1 py-3 text-[11px] font-medium text-muted"
+              className="flex flex-col items-center gap-1 py-2.5 text-[11px] font-medium text-muted"
             >
               <DotsThree size={22} />
-              More
+              <span className="w-full truncate text-center">More</span>
             </button>
           </nav>
         </div>
