@@ -63,6 +63,11 @@ setup is needed for development.
 - **PDF to image**: PDF → PNG, JPG, JPEG, WEBP, BMP (one image per page; a
   multi-page PDF is bundled into a ZIP), PDF → TIFF and PDF → GIF (all pages in
   the single multi-page file)
+- **Image to PDF**: JPG, JPEG, PNG, WEBP, GIF, BMP, TIFF, ICO and AVIF → PDF,
+  plus SVG → PDF (rendered as vectors, not rasterised). Each page keeps the
+  image's pixel size, scaled by the file's own DPI when it has one (otherwise
+  1 pixel = 1 point); an animated GIF or multi-page TIFF becomes one PDF page
+  per frame.
 - **Ebooks**: EPUB ↔ PDF, EPUB ↔ MOBI, EPUB → TXT
 - **Archives**: ZIP ↔ TAR
 
