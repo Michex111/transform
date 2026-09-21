@@ -474,11 +474,18 @@ export function FilesPage() {
         <div className="min-w-0">
           <h1 className="font-display text-2xl font-semibold">My Drive</h1>
           <p className="text-sm text-muted">Your files, in folders.</p>
+          {/* Dragging is an HTML5 DnD affordance and does not exist on touch,
+              so each hint is shown only where it is actionable. Keyed on
+              pointer capability, not width: a landscape phone is wide but has
+              no pointer. */}
           <p
-            className="mt-0.5 text-xs text-muted"
+            className="mt-0.5 hidden text-xs text-muted pointer-fine:block"
             title="Drag a file or folder onto a folder to move it"
           >
             Drag a file or folder onto a folder or breadcrumb to move it
+          </p>
+          <p className="mt-0.5 text-xs text-muted pointer-fine:hidden">
+            Open a file's ⋮ menu to move, rename, or convert it
           </p>
         </div>
         {/* Toolbar — wraps on small screens so buttons never overflow 375px. */}
@@ -634,7 +641,7 @@ export function FilesPage() {
         {loading ? (
           <motion.div
             key="skeleton"
-            className="grid grid-cols-[repeat(auto-fill,12.5rem)] gap-4"
+            className="grid grid-cols-2 gap-3 sm:grid-cols-[repeat(auto-fill,12.5rem)] sm:gap-4"
             initial={reduce ? false : { opacity: 0 }}
             animate={reduce ? undefined : { opacity: 1 }}
             exit={reduce ? undefined : { opacity: 0 }}
@@ -658,10 +665,12 @@ export function FilesPage() {
             exit={reduce ? undefined : { opacity: 0 }}
             transition={{ duration: 0.18 }}
           >
-            {/* Folders section — horizontal rows stacked in a grid, always on top. */}
+            {/* Folders section — horizontal rows stacked in a grid, always on top.
+                One per row on phones (full-width, readable names), widening to
+                2 then 3 columns as space allows. */}
             {(folders.length > 0 || newFolder) && (
               <motion.div
-                className="grid grid-cols-3 gap-4"
+                className="grid grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4 lg:grid-cols-3"
                 variants={reduce ? undefined : staggerContainer}
                 initial={reduce ? false : "hidden"}
                 animate={reduce ? undefined : "visible"}
@@ -732,10 +741,11 @@ export function FilesPage() {
               </motion.div>
             )}
 
-            {/* Files section — smaller card grid below the folders. */}
+            {/* Files section — smaller card grid below the folders. Two up on
+                phones; fixed-width cards once there is room for more. */}
             {files.length > 0 && (
               <motion.div
-                className="grid grid-cols-[repeat(auto-fill,12.5rem)] gap-4"
+                className="grid grid-cols-2 gap-3 sm:grid-cols-[repeat(auto-fill,12.5rem)] sm:gap-4"
                 variants={reduce ? undefined : staggerContainer}
                 initial={reduce ? false : "hidden"}
                 animate={reduce ? undefined : "visible"}
@@ -1244,7 +1254,7 @@ function FileCard({
                   aria-label={isFavorite ? "Remove from favorites" : "Add to favorites"}
                   aria-pressed={isFavorite}
                   title={isFavorite ? "Remove from favorites" : "Add to favorites"}
-                  className="shrink-0 rounded p-1 text-muted transition-colors hover:bg-surface-variant hover:text-primary"
+                  className="-m-2.5 shrink-0 rounded p-3.5 text-muted transition-colors hover:bg-surface-variant hover:text-primary pointer-fine:m-0 pointer-fine:p-1"
                 >
                   <Star size={16} weight={isFavorite ? "fill" : "regular"} className={isFavorite ? "text-warning" : ""} />
                 </button>
@@ -1354,7 +1364,7 @@ function CardMenu({
         aria-label="More options"
         aria-haspopup="menu"
         aria-expanded={open}
-        className="rounded p-1 text-muted transition-colors hover:bg-surface-variant hover:text-on-background"
+        className="-m-2 rounded p-3 text-muted transition-colors hover:bg-surface-variant hover:text-on-background pointer-fine:m-0 pointer-fine:p-1"
       >
         <DotsThreeVertical size={18} />
       </button>
