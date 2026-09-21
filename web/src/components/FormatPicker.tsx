@@ -1,8 +1,31 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import { MagnifyingGlass, CaretDown, CaretRight, Check } from "@phosphor-icons/react";
-import { FORMAT_CATEGORIES, type FormatDef } from "@/lib/formatCatalog";
+import { FORMAT_CATEGORIES } from "@/lib/formatCatalog";
+import { formatTint, formatVisual } from "@/lib/formatVisual";
 import { isPickableFormat, restrictFormatCategories } from "@/lib/formatPickerOptions";
+
+/**
+ * True when the viewport is too small for the anchored popover: phone width, or
+ * too short for the panel to hang below the trigger (a landscape phone measures
+ * 740x360). Subscribes to changes so rotating the device re-lays it out.
+ */
+function useCompactViewport(): boolean {
+  const query = "(max-width: 639px), (max-height: 32rem)";
+  const [compact, setCompact] = useState(
+    () => typeof window !== "undefined" && window.matchMedia(query).matches,
+  );
+
+  useEffect(() => {
+    const mql = window.matchMedia(query);
+    const onChange = () => setCompact(mql.matches);
+    onChange();
+    mql.addEventListener("change", onChange);
+    return () => mql.removeEventListener("change", onChange);
+  }, []);
+
+  return compact;
+}
 
 interface FormatPickerProps {
   /** Currently selected format extension, e.g. "pdf". */
@@ -55,14 +78,22 @@ export function FormatPicker({
   // Whether the picker has anything it could legitimately offer.
   const hasOptions = restrictedCategories.length > 0;
 
-  // Close when clicking outside.
+  // Close when clicking outside, or on Escape (it is a dismissible overlay on
+  // phones, so the keyboard path has to work as well as the pointer one).
   useEffect(() => {
     if (!open) return;
     function onDocClick(e: MouseEvent) {
       if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false);
     }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setOpen(false);
+    }
     document.addEventListener("mousedown", onDocClick);
-    return () => document.removeEventListener("mousedown", onDocClick);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDocClick);
+      document.removeEventListener("keydown", onKey);
+    };
   }, [open]);
 
   // Focus the search box when opening.
@@ -89,6 +120,13 @@ export function FormatPicker({
   // If the currently selected value is no longer allowed, disable the trigger.
   const isAllowed = isPickableFormat(allowed, value);
 
+  // A phone-width viewport cannot fit the anchored popover, and neither can a
+  // SHORT one — a landscape phone is wide (>=640px), so a width-only breakpoint
+  // would hand it the anchored panel and run it off the bottom of the screen.
+  // Width OR height is used rather than `pointer: coarse`, which cannot express
+  // "this window is too small for a 520px panel".
+  const compact = useCompactViewport();
+
   function pick(ext: string) {
     onChange(ext);
     setOpen(false);
@@ -101,7 +139,6 @@ export function FormatPicker({
         type="button"
         onClick={() => setOpen((v) => !v)}
         aria-label={ariaLabel}
-        aria-haspopup="listbox"
         aria-expanded={open}
         aria-disabled={!isAllowed}
         aria-busy={pending}
@@ -123,15 +160,45 @@ export function FormatPicker({
 
       <AnimatePresence>
         {open && (
-          <motion.div
-            initial={{ opacity: 0, y: 6, scale: 0.98 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: 6, scale: 0.98 }}
-            transition={{ duration: 0.16, ease: [0.22, 1, 0.36, 1] }}
-            className={`absolute z-50 mt-2 flex w-[520px] max-w-[90vw] overflow-hidden rounded-xl border border-outline bg-surface shadow-xl ${
-              align === "right" ? "right-0" : "left-0"
-            }`}
+          /* An anchored popover cannot be relied on for a phone: the panel is
+             520px wide and the trigger sits near the screen edge, so at 390px it
+             used to hang off the viewport (measured: left = -10px), and on a
+             LANDSCAPE phone (740x360) it ran off the bottom of the screen. When
+             the viewport is phone-width OR too short for the panel, it becomes a
+             vertically-centred overlay with a backdrop instead.
+
+             The wrapper is `display: contents` in the anchored case, so its box
+             disappears and the panel positions against the trigger's wrapper
+             exactly as it always did — the desktop popover is unchanged. */
+          <div
+            className={
+              compact
+                ? "fixed inset-0 z-50 flex items-center justify-center p-3"
+                : "contents"
+            }
           >
+            {/* Dismiss target outside the panel (overlay only). */}
+            <div
+              className={compact ? "absolute inset-0 bg-black/60" : "hidden"}
+              onClick={() => setOpen(false)}
+              aria-hidden
+            />
+            <motion.div
+              initial={{ opacity: 0, y: 6, scale: 0.98 }}
+              animate={{ opacity: 1, y: 0, scale: 1 }}
+              exit={{ opacity: 0, y: 6, scale: 0.98 }}
+              transition={{ duration: 0.16, ease: [0.22, 1, 0.36, 1] }}
+              // In the overlay case `relative` keeps the panel above the
+              // backdrop and the bounded height keeps it fully on screen (its
+              // body scrolls); otherwise it stays anchored under the trigger.
+              className={`flex overflow-hidden rounded-xl border border-outline bg-surface shadow-xl ${
+                compact
+                  ? "relative max-h-[calc(100dvh-1.5rem)] w-full max-w-[520px]"
+                  : `absolute z-50 mt-2 max-h-[75vh] w-[520px] max-w-[90vw] ${
+                      align === "right" ? "right-0" : "left-0"
+                    }`
+              }`}
+            >
             {!hasOptions ? (
               // Nothing may legitimately be picked (the conversion graph has not
               // arrived, or this format converts to nothing). Showing the full
@@ -143,7 +210,7 @@ export function FormatPicker({
             ) : (
               <>
                 {/* Category sidebar */}
-                <div className="flex w-40 shrink-0 flex-col border-r border-outline">
+                <div className="flex min-h-0 w-40 shrink-0 flex-col border-r border-outline">
                   <div className="border-b border-outline p-2">
                     <div className="flex items-center gap-2 rounded-lg bg-surface-variant px-2 py-1.5">
                       <MagnifyingGlass size={14} className="text-muted" />
@@ -178,8 +245,12 @@ export function FormatPicker({
                   </nav>
                 </div>
 
-                {/* Format grid */}
-                <div className="flex-1 overflow-y-auto p-3">
+                {/* Format grid. These are toggle buttons, not a listbox: the
+                    popover is a 3-column visual grid (with a category sidebar
+                    and a search box) rather than a linear list, so the buttons
+                    expose their state with `aria-pressed` and the trigger
+                    makes no `aria-haspopup` claim. */}
+                <div className="min-h-0 flex-1 overflow-y-auto p-3">
                   <div className="grid grid-cols-3 gap-1.5">
                     {visibleFormats.map((f) => {
                       const isSel = f.ext === value;
@@ -187,7 +258,7 @@ export function FormatPicker({
                         <button
                           key={f.ext}
                           onClick={() => pick(f.ext)}
-                          aria-selected={isSel}
+                          aria-pressed={isSel}
                           className={`relative flex h-9 items-center justify-center rounded border font-mono text-xs font-semibold transition-colors ${
                             isSel
                               ? "border-primary bg-primary-container text-on-primary-container"
@@ -210,7 +281,8 @@ export function FormatPicker({
                 </div>
               </>
             )}
-          </motion.div>
+            </motion.div>
+          </div>
         )}
       </AnimatePresence>
     </div>
@@ -219,12 +291,18 @@ export function FormatPicker({
 
 /** A small colored tile icon representing a format (like the reference cards). */
 export function FormatIcon({ ext }: { ext: string }) {
-  const def = getFormatDefForIcon(ext);
-  const color = def?.color ?? "var(--color-fmt-text)";
+  const { color } = formatVisual(ext);
   return (
     <span
       className="flex h-10 w-10 items-center justify-center rounded-lg"
-      style={{ backgroundColor: `${color}1a`, color, border: `1px solid ${color}40` }}
+      // `formatTint` (color-mix): appending an alpha hex suffix to a
+      // `var(--token)` colour (`${color}1a`) is invalid CSS and is dropped, so
+      // the tile lost its tinted fill and border.
+      style={{
+        backgroundColor: formatTint(color, 10),
+        color,
+        border: `1px solid ${formatTint(color, 25)}`,
+      }}
       aria-hidden
     >
       <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
@@ -235,11 +313,8 @@ export function FormatIcon({ ext }: { ext: string }) {
   );
 }
 
-function getFormatDefForIcon(ext: string): FormatDef | undefined {
-  // Avoid importing the catalog twice — find by walking the same data.
-  return FORMAT_CATEGORIES.flatMap((c) => c.formats).find((f) => f.ext === ext);
-}
-
 function getSelectedLabel(ext: string): string {
-  return getFormatDefForIcon(ext)?.label ?? ext.toUpperCase();
+  // The canonical, case-insensitive format lookup — one source of truth for a
+  // format's label and colour.
+  return formatVisual(ext).label;
 }

@@ -2,10 +2,11 @@ import { memo, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { LayoutGroup, motion } from "motion/react";
 import { useJobs, type UiJob } from "@/jobs/JobsContext";
-import { activeJobs } from "@/jobs/jobStore";
+import { activeJobs, jobProgress } from "@/jobs/jobStore";
 import { Dropdown } from "@/components/Dropdown";
 import { Card, FormatChip, ProgressBar, StatusBadge } from "@/components/ui";
 import { formatDateTime } from "@/lib/format";
+import { QUEUE_HEADER_GRID, QUEUE_ROW_GRID } from "@/lib/tableColumns";
 
 type SortKey = "newest" | "oldest" | "status" | "format" | "filename";
 
@@ -43,7 +44,7 @@ const QueueRow = memo(function QueueRow({ job }: QueueRowProps) {
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0 }}
       transition={{ type: "spring", stiffness: 260, damping: 28 }}
-      className="grid grid-cols-[2fr_1fr_auto] items-center gap-4 px-5 py-3 transition-colors hover:bg-surface-variant/50 sm:grid-cols-[2fr_1fr_1fr_140px_auto]"
+      className={QUEUE_ROW_GRID}
     >
       <span className="min-w-0 truncate text-sm text-on-background">
         {job.fileName ?? job.input_file}
@@ -55,7 +56,7 @@ const QueueRow = memo(function QueueRow({ job }: QueueRowProps) {
       <StatusBadge status={job.status} />
       <div className="hidden sm:block">
         <ProgressBar
-          value={job.progress ?? (job.status === "PROCESSING" ? 45 : 0)}
+          value={jobProgress(job)}
           from="var(--color-primary)"
         />
       </div>
@@ -124,12 +125,12 @@ export function QueuePage() {
 
       {/* Table */}
       <Card className="overflow-hidden">
-        <div className="hidden grid-cols-[2fr_1fr_1fr_140px_auto] gap-4 border-b border-outline bg-surface-variant/40 px-5 py-3 text-xs font-semibold uppercase tracking-wide text-muted sm:grid">
+        <div className={QUEUE_HEADER_GRID}>
           <span>File</span>
           <span>Format</span>
           <span>Status</span>
           <span>Progress</span>
-          <span className="text-right">Created</span>
+          <span className="hidden text-right lg:block">Created</span>
         </div>
 
         {sorted.length === 0 ? (

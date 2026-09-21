@@ -11,6 +11,7 @@ import { ErrorButton } from "@/components/ErrorButton";
 import { StorageBreakdownBar } from "@/components/StorageBreakdownBar";
 import { Stagger, Item } from "@/lib/motion";
 import { formatBytes, formatDateTime, formatDateOrNull } from "@/lib/format";
+import { DASHBOARD_ROW_GRID } from "@/lib/tableColumns";
 import type { DashboardResponse } from "@/api/types";
 
 export function DashboardPage() {
@@ -171,29 +172,31 @@ export function DashboardPage() {
             {recent.map((job, i) => (
               <motion.li
                 key={job.job_id}
-                className="flex items-center gap-4 px-5 py-3 transition-colors hover:bg-surface-variant/50"
+                className={DASHBOARD_ROW_GRID}
                 initial={{ opacity: 0, x: -12 }}
                 animate={{ opacity: 1, x: 0 }}
                 transition={{ delay: 0.1 + i * 0.05, duration: 0.3 }}
               >
-                <span className="min-w-0 flex-1 truncate text-sm text-on-background">
+                <span className="min-w-0 truncate text-sm text-on-background">
                   {job.fileName ?? job.input_file}
                 </span>
                 <FormatMorph from={job.source_format} to={job.target_format} size="sm" />
                 <StatusBadge status={job.status} />
-                <span className="hidden w-32 shrink-0 text-right font-mono text-xs text-muted sm:block">
+                <span className="hidden text-right font-mono text-xs text-muted sm:block">
                   {formatDateTime(job.createdAt)}
                 </span>
-                {job.status === "COMPLETED" && (
-                  <button
-                    onClick={() => handleDownload(job.job_id)}
-                    className="text-muted transition-colors hover:scale-110 hover:text-primary"
-                    aria-label="Download"
-                  >
-                    <Download size={18} />
-                  </button>
-                )}
-                {job.status === "FAILED" && <ErrorButton message={job.errorMessage} />}
+                <div className="flex items-center justify-end">
+                  {job.status === "COMPLETED" && (
+                    <button
+                      onClick={() => handleDownload(job.job_id)}
+                      className="text-muted transition-colors hover:scale-110 hover:text-primary"
+                      aria-label="Download"
+                    >
+                      <Download size={18} />
+                    </button>
+                  )}
+                  {job.status === "FAILED" && <ErrorButton message={job.errorMessage} />}
+                </div>
               </motion.li>
             ))}
           </ul>

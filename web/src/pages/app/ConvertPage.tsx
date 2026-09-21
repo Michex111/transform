@@ -5,7 +5,9 @@ import { ArrowRight, UploadSimple, Swap } from "@phosphor-icons/react";
 import { useAuth } from "@/auth/AuthContext";
 import { useToast } from "@/auth/ToastContext";
 import { useJobs } from "@/jobs/JobsContext";
+import { activeJobs, jobProgress } from "@/jobs/jobStore";
 import { cacheFileForJob } from "@/lib/fileCache";
+import { fileNameExtension } from "@/lib/format";
 import { useConversionMap } from "@/lib/useConversionMap";
 import { FormatPicker } from "@/components/FormatPicker";
 import { Button, Card, FormatMorph, FormatChip, ProgressBar, StatusBadge } from "@/components/ui";
@@ -51,7 +53,9 @@ export function ConvertPage() {
     }
   }, [allowedTargets, to]);
 
-  const inlineQueue = useMemo(() => jobs.filter((j) => j.status !== "COMPLETED" && j.status !== "FAILED").slice(0, 4), [jobs]);
+  // One shared "still in flight" predicate (it counts AWAITING_UPLOAD as
+  // active), so the inline queue matches the Queue page exactly.
+  const inlineQueue = useMemo(() => activeJobs(jobs).slice(0, 4), [jobs]);
 
   // ---- Drag & drop ----
   function onDragOver(e: React.DragEvent<HTMLDivElement>) {
@@ -79,7 +83,7 @@ export function ConvertPage() {
     if (!dropped) return;
     // Infer the source format from the file extension and switch to it if it's
     // a valid source, so the job is created with the correct source format.
-    const ext = dropped.name.split(".").pop()?.toLowerCase();
+    const ext = fileNameExtension(dropped.name);
     if (ext && allowedSources.includes(ext)) {
       setFrom(ext);
     } else if (ext) {
@@ -143,7 +147,7 @@ export function ConvertPage() {
       {/* Conversion panel */}
       <Card className="space-y-6 p-6">
         {/* Format picker: source → target with a swap control */}
-        <div className="flex items-center justify-center gap-6">
+        <div className="flex items-center justify-center gap-4 sm:gap-6">
           <div className="flex flex-col items-center gap-2">
             <span className="text-xs font-medium uppercase tracking-wide text-muted">From</span>
             <FormatPicker
@@ -274,7 +278,7 @@ export function ConvertPage() {
                 <StatusBadge status={job.status} />
                 <div className="hidden sm:block">
                   <ProgressBar
-                    value={job.progress ?? (job.status === "COMPLETED" ? 100 : job.status === "PROCESSING" ? 45 : 0)}
+                    value={jobProgress(job)}
                     from="var(--color-primary)"
                   />
                 </div>
