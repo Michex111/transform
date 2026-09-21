@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Transform">
+  <title>Transform</title>
+  <defs>
+    <linearGradient id="tfm-tile" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#FF5A5F"/>
+      <stop offset="1" stop-color="#5A6BFF"/>
+    </linearGradient>
+  </defs>
+  <!-- Tile blends the brand's PDF red into its primary indigo: the source-to-target
+       idea that the app itself is built on. -->
+  <rect width="64" height="64" rx="15" fill="url(#tfm-tile)"/>
+
+  <!-- Glyph: a circular BIDIRECTIONAL arrow - two arcs running in opposite
+       directions, each closing with an arrowhead, so the mark reads as a cycle
+       rather than a single one-way trip.
+       Stroke colour is the brand ink (on-primary #0B0D12), not white: white on
+       the red end of this gradient is only about 3:1, too weak at 16px. -->
+  <g stroke="#0B0D12" stroke-width="6" fill="none" stroke-linecap="butt">
+    <!-- upper arc, travelling left to right -->
+    <path d="M16.03 26.19A17 17 0 0 1 45.4 21.53"/>
+    <!-- lower arc, travelling right to left -->
+    <path d="M47.97 37.81A17 17 0 0 1 18.6 42.47"/>
+  </g>
+  <!-- Arrowheads. Their barbs are wider than the band so the two directions stay
+       distinguishable even when the whole mark is 16px across. -->
+  <path d="M51.82 30.46L38.42 26.55L52.38 16.51Z" fill="#0B0D12"/>
+  <path d="M12.18 33.54L25.58 37.45L11.62 47.49Z" fill="#0B0D12"/>
+</svg>

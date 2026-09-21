@@ -158,6 +158,7 @@ function PublicFooter() {
           title="Product"
           links={[
             { label: "Convert", to: "/convert" },
+            { label: "Format catalog", to: "/#format-catalog" },
             { label: "Queue", to: "/app/queue" },
             { label: "Pricing", to: "/pricing" },
             { label: "API keys" },

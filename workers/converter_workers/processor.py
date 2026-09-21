@@ -1,7 +1,6 @@
 import asyncio
 import tempfile
 import time
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable, Coroutine, Protocol
 
@@ -13,6 +12,7 @@ from src.domain.conversions.entities.conversion_job import ConversionJob, JobSta
 from src.domain.conversions.exceptions import InvalidStateTransition
 from src.domain.conversions.value_object.conversion_type import ConversionType
 from src.domain.conversions.policies.credit_calculator import calculate_credits
+from src.domain.subscriptions.value_object.credit_period import current_period_key
 from src.domain.subscriptions.value_object.tier import SubscriptionTier
 from src.infrastructure.config.settings import get_settings
 
@@ -179,8 +179,8 @@ def _actor_key(job: ConversionJob) -> str:
 
 
 def _period_key() -> str:
-    """Monthly credit period key, mirroring src.presentation.api.routers.v1.credits."""
-    return datetime.now(UTC).strftime("%Y-%m")
+    """Monthly credit period key, shared with the API's credit routers."""
+    return current_period_key()
 
 
 def _mark_failed(job: ConversionJob, message: str) -> None:

@@ -656,6 +656,12 @@ def test_full_user_journey_e2e(tmp_path, monkeypatch) -> None:
         assert dash["conversion_stats"]["successful_jobs"] == 1
         # The folder upload was deleted in step 9c; only the job input remains.
         assert dash["storage_stats"]["file_count"] == 1  # job input only
+        # New additive field: storage grouped by extension, largest first.
+        breakdown = dash["storage_stats"]["breakdown"]
+        assert set(breakdown[0]) == {"extension", "bytes", "file_count"}
+        assert [entry["extension"] for entry in breakdown] == ["txt"]
+        assert breakdown[0]["file_count"] == 1
+        assert breakdown[0]["bytes"] > 0
         assert dash["credit_balance"] == 500
         assert dash["tier"] == "PRO"
         assert dash["active_api_keys"] == 1

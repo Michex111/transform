@@ -292,12 +292,16 @@ def _install_fake_b2sdk(
     class FakeBucket:
         type_ = "allPrivate"
 
-        def update(self, bucket_type: str | None = None, cors_rules=None) -> None:
-            origins = (
-                recorded_origins
-                if recorded_origins is not None
-                else cors_rules[0]["allowedOrigins"]
-            )
+        def update(
+            self,
+            bucket_type: str | None = None,
+            cors_rules: list[dict[str, list[str]]] | None = None,
+        ) -> None:
+            if recorded_origins is not None:
+                origins = recorded_origins
+            else:
+                assert cors_rules is not None  # always passed by _apply_b2_cors
+                origins = cors_rules[0]["allowedOrigins"]
             state["rules"] = [{"allowedOrigins": list(origins)}]
 
         def as_dict(self) -> dict:

@@ -1,4 +1,5 @@
-import { Link } from "react-router-dom";
+import { useEffect, useMemo } from "react";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import { motion } from "motion/react";
 import {
   ArrowRight,
@@ -8,7 +9,11 @@ import {
   Key,
   ShieldCheck,
 } from "@phosphor-icons/react";
-import { Button, FormatChip, FormatMorph } from "@/components/ui";
+import { Button } from "@/components/ui";
+import { ConverterCard } from "@/components/ConverterCard";
+import { FormatCatalog } from "@/components/FormatCatalog";
+import { FormatThumb } from "@/components/FormatThumb";
+import { useConversionMap } from "@/lib/useConversionMap";
 import { Stagger, Item, Reveal } from "@/lib/motion";
 
 const SECURITY_FEATURES = [
@@ -49,7 +54,44 @@ const STEPS = [
   { n: "3", title: "Download the result", body: "Watch it move through the queue, then grab it." },
 ];
 
+/** The formats shown as a thumbnail strip under the hero copy. */
+const HERO_FORMATS = ["pdf", "docx", "xlsx", "png", "mp3", "mp4"];
+
+/** Canonical showcase pair, used until the live graph can confirm a better one. */
+const DEFAULT_HERO_PAIR = { from: "pdf", to: "docx" };
+
 export function LandingPage() {
+  const navigate = useNavigate();
+  const { map, sources, targetsFor, loading } = useConversionMap({ guest: true });
+
+  // Show a pair that genuinely exists in the conversion graph. While the graph
+  // loads (or if it is unavailable) fall back to the site's canonical
+  // PDF → DOCX example — clicking it just opens the converter, which re-validates.
+  const heroPair = useMemo(() => {
+    if (!loading && map[DEFAULT_HERO_PAIR.from]?.includes(DEFAULT_HERO_PAIR.to)) {
+      return DEFAULT_HERO_PAIR;
+    }
+    if (!loading) {
+      const source = sources.find((s) => targetsFor(s).length > 0);
+      const target = source ? targetsFor(source)[0] : undefined;
+      if (source && target) return { from: source, to: target };
+    }
+    return DEFAULT_HERO_PAIR;
+  }, [loading, map, sources, targetsFor]);
+
+  const openConverter = () =>
+    navigate("/convert", { state: { source: heroPair.from, target: heroPair.to } });
+
+  // The footer links to `/#format-catalog`. React Router does not scroll to a
+  // hash on its own, so honour it explicitly. `scrollIntoView` respects the
+  // section's `scroll-mt-*`, keeping the heading clear of the sticky header.
+  const { hash } = useLocation();
+  useEffect(() => {
+    if (!hash) return;
+    const target = document.getElementById(hash.slice(1));
+    target?.scrollIntoView({ behavior: "auto", block: "start" });
+  }, [hash]);
+
   return (
     <div className="format-glyph-field">
       {/* Hero */}
@@ -90,18 +132,29 @@ export function LandingPage() {
             </Link>
             .
           </p>
-          <p className="font-mono text-xs text-muted">
-            PDF · DOCX · XLSX · images · audio · video
-          </p>
+          <div
+            className="flex flex-wrap items-center gap-2"
+            role="group"
+            aria-label="Supported formats"
+          >
+            {HERO_FORMATS.map((format) => (
+              <FormatThumb key={format} format={format} size="md" />
+            ))}
+          </div>
         </motion.div>
 
         <motion.div
           initial={{ opacity: 0, scale: 0.96 }}
           animate={{ opacity: 1, scale: 1 }}
           transition={{ duration: 0.6, delay: 0.15 }}
-          className="flex items-center justify-center rounded-2xl border border-outline bg-surface/60 p-10"
+          className="flex items-center justify-center rounded-2xl border border-outline bg-surface/60 p-6 sm:p-10"
         >
-          <FormatMorph from="pdf" to="docx" size="lg" animated />
+          <ConverterCard
+            from={heroPair.from}
+            to={heroPair.to}
+            onFromClick={openConverter}
+            onToClick={openConverter}
+          />
         </motion.div>
       </section>
 
@@ -113,14 +166,18 @@ export function LandingPage() {
         <Stagger className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
           {FORMAT_GROUPS.map(({ format, label }) => (
             <Item key={format} as="div">
-              <div className="flex flex-col items-start gap-2 rounded-xl border border-outline bg-surface p-4 transition-colors hover:border-primary/40">
-                <FormatChip format={format} />
+              <div className="flex flex-col items-start gap-3 rounded-xl border border-outline bg-surface p-4 transition-colors hover:border-primary/40">
+                <FormatThumb format={format} size="lg" />
                 <span className="text-sm text-muted">{label}</span>
               </div>
             </Item>
           ))}
         </Stagger>
       </section>
+
+      {/* Format catalog — the richer expansion of the supported-formats cards,
+          populated live from the real conversion graph. */}
+      <FormatCatalog />
 
       {/* How it works */}
       <section className="mx-auto max-w-6xl px-4 py-12 sm:px-6">

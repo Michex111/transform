@@ -35,6 +35,13 @@
   --font-display: "Space Grotesk", system-ui, sans-serif;
   --font-body: "Inter", system-ui, sans-serif;
   --font-mono: "JetBrains Mono", ui-monospace, monospace;
+
+  /* Motion — custom animations used by the converter card. Declaring them in
+     `@theme` is the Tailwind v4 way to generate the `animate-*` utilities
+     (`animate-arrow-sweep`, `animate-spin-pulse`, `animate-output-pulse`). */
+  --animate-arrow-sweep: arrow-sweep 1.6s linear infinite;
+  --animate-spin-pulse: spin-pulse 2.4s ease-in-out infinite;
+  --animate-output-pulse: output-pulse 2.6s ease-in-out infinite;
 }
 
 @layer base {
@@ -87,5 +94,51 @@
   }
   50% {
     opacity: 0.4;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Converter-card motion (Consumed as `animate-*` utilities, see       */
+/* ConverterCard.tsx). Kept out of `@theme` so they are always emitted */
+/* as plain CSS alongside the utilities that reference them.          */
+/* ------------------------------------------------------------------ */
+
+/* A light streak sweeping along the connector rules. */
+@keyframes arrow-sweep {
+  0%, 100% {
+    opacity: 0;
+    transform: translateX(-100%);
+  }
+  50% {
+    opacity: 1;
+    transform: translateX(100%);
+  }
+}
+
+/* The rotating operation glyph in the middle of the card. */
+@keyframes spin-pulse {
+  0%, 100% {
+    opacity: 0.85;
+    transform: rotate(0deg);
+  }
+  50% {
+    opacity: 1;
+    transform: rotate(180deg);
+  }
+}
+
+/* The output card's breathing glow. The colour comes from custom properties so
+   the pulse can follow the *target format's* colour (set inline on the card)
+   while the fallbacks keep the animation standalone and brand-neutral. */
+@keyframes output-pulse {
+  0%, 100% {
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 0.06),
+      0 8px 32px var(--output-glow-soft, rgb(190 50 50 / 0.18));
+  }
+  50% {
+    box-shadow:
+      inset 0 1px 0 rgb(255 255 255 / 0.06),
+      0 8px 38px var(--output-glow-strong, rgb(220 80 80 / 0.32));
   }
 }

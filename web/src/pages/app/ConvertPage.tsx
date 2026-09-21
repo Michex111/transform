@@ -264,9 +264,9 @@ export function ConvertPage() {
                 <div className="min-w-0">
                   <p className="truncate text-sm text-on-background">{job.fileName ?? job.input_file}</p>
                   <div className="mt-1 flex items-center gap-2">
-                    <FormatChip format={job.source_format} />
+                    <FormatChip format={job.source_format} size="xs" />
                     <ArrowRight size={12} className="text-muted" />
-                    <FormatChip format={job.target_format} />
+                    <FormatChip format={job.target_format} size="xs" />
                   </div>
                 </div>
                 <StatusBadge status={job.status} />

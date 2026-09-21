@@ -38,14 +38,17 @@ async def _add_user(factory, username: str = "file-user") -> UserModel:
         return user
 
 
-async def _add_file(factory, *, user_id: int, file_key: str, folder_id: str | None = None) -> str:
+async def _add_file(factory, *, user_id: int, file_key: str, folder_id: str | None = None,
+                    file_name: str | None = None, file_size_bytes: int = 10,
+                    file_extension: str = "") -> str:
     async with factory() as session:
         return await SQLUserFileRepository(session).save(
             user_id=user_id,
             file_key=file_key,
-            file_name=file_key.split("/")[-1],
-            file_size_bytes=10,
+            file_name=file_name if file_name is not None else file_key.split("/")[-1],
+            file_size_bytes=file_size_bytes,
             mime_type="application/pdf",
+            file_extension=file_extension,
             folder_id=folder_id,
         )
 
@@ -124,5 +127,91 @@ def test_list_favorites_empty() -> None:
                 rows, total = await repo.list_favorites(user.id)
                 assert total == 0
                 assert rows == []
+
+        asyncio.run(_run())
+
+
+def test_save_normalises_file_extension() -> None:
+    with sqlite_session_factory() as factory:
+
+        async def _run() -> None:
+            async with factory() as session:
+                user = await _add_user(factory)
+                repo = SQLUserFileRepository(session)
+
+                file_id = await _add_file(
+                    factory, user_id=user.id, file_key="a.bin",
+                    file_name="a.bin", file_extension=".PDF",
+                )
+                row = await repo.get_by_id(file_id)
+                assert row is not None
+                assert row.file_extension == "pdf"
+
+        asyncio.run(_run())
+
+
+def test_storage_breakdown_groups_and_orders_by_bytes() -> None:
+    with sqlite_session_factory() as factory:
+
+        async def _run() -> None:
+            async with factory() as session:
+                user = await _add_user(factory)
+                other = await _add_user(factory, username="file-user-2")
+                repo = SQLUserFileRepository(session)
+
+                # 2 PDFs (10 MiB), 2 PNGs (one of them zero-byte, so excluded),
+                # a no-extension file and a multi-dot archive name.
+                await _add_file(factory, user_id=user.id, file_key="a.pdf",
+                                file_extension="pdf", file_size_bytes=5_242_880)
+                await _add_file(factory, user_id=user.id, file_key="b.pdf",
+                                file_extension="pdf", file_size_bytes=5_242_880)
+                await _add_file(factory, user_id=user.id, file_key="c.png",
+                                file_extension="png", file_size_bytes=7_340_032)
+                await _add_file(factory, user_id=user.id, file_key="d.png",
+                                file_extension="png", file_size_bytes=0)
+                await _add_file(factory, user_id=user.id, file_key="README",
+                                file_name="README", file_extension="", file_size_bytes=1_024)
+                await _add_file(factory, user_id=user.id, file_key="archive.tar.bz2",
+                                file_name="archive.tar.bz2", file_extension="tar.bz2",
+                                file_size_bytes=2_048)
+                # Another user's file must not leak into the aggregation.
+                await _add_file(factory, user_id=other.id, file_key="z.pdf",
+                                file_extension="pdf", file_size_bytes=999)
+
+                rows = await repo.get_storage_breakdown_by_extension(user.id)
+
+                assert [(r.extension, r.bytes, r.file_count) for r in rows] == [
+                    ("pdf", 10_485_760, 2),
+                    ("png", 7_340_032, 1),
+                    ("tar.bz2", 2_048, 1),
+                    ("", 1_024, 1),
+                ]
+
+        asyncio.run(_run())
+
+
+def test_storage_breakdown_empty_for_user_without_files() -> None:
+    with sqlite_session_factory() as factory:
+
+        async def _run() -> None:
+            async with factory() as session:
+                user = await _add_user(factory)
+                repo = SQLUserFileRepository(session)
+                rows = await repo.get_storage_breakdown_by_extension(user.id)
+                assert rows == []
+
+        asyncio.run(_run())
+
+
+def test_storage_breakdown_excludes_all_zero_byte_files() -> None:
+    with sqlite_session_factory() as factory:
+
+        async def _run() -> None:
+            async with factory() as session:
+                user = await _add_user(factory)
+                repo = SQLUserFileRepository(session)
+                await _add_file(factory, user_id=user.id, file_key="empty.pdf",
+                                file_extension="pdf", file_size_bytes=0)
+                assert await repo.get_storage_breakdown_by_extension(user.id) == []
 
         asyncio.run(_run())
