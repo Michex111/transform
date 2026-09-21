@@ -36,6 +36,16 @@ type JobProcess = Callable[[WorkerContext, ConversionJob], Coroutine[None, None,
 
 settings = get_settings()
 
+# Upper bound for a single object-storage transfer. Storage calls are blocking
+# and were previously unbounded, so a stalled B2 socket blocked the
+# single-threaded worker loop indefinitely: no other job ran, no stale sweep
+# happened, and because the container never exited `restart: unless-stopped`
+# never fired either. Chosen to match the default conversion timeout so a hung
+# transfer fails the job on the same order of magnitude as a hung converter.
+# Note that this bounds the *await*, not the underlying thread — a thread stuck
+# in the SDK call keeps running (see the timeout test in test_processor.py).
+_STORAGE_OP_TIMEOUT_SECONDS = 600
+
 
 @retry_on_exception(logger=worker_logger)
 async def _download_input_file(context: WorkerContext, job: ConversionJob, input_dest: Path) -> Path:
@@ -51,7 +61,10 @@ async def _download_input_file(context: WorkerContext, job: ConversionJob, input
     decrypt when the object is actually encrypted — otherwise we pass the
     plaintext through so plaintext uploads convert correctly.
     """
-    await asyncio.to_thread(context.storage_port.download, job.object_key, input_dest)
+    await asyncio.wait_for(
+        asyncio.to_thread(context.storage_port.download, job.object_key, input_dest),
+        timeout=_STORAGE_OP_TIMEOUT_SECONDS,
+    )
     log_context = context.get_log_context(job_id=job.job_id, conversion_type=job.conversion)
     worker_logger.debug(f"Downloaded input file for job {job.job_id} to {input_dest}", extra=log_context)
 
@@ -171,7 +184,10 @@ async def _upload_output_file(context: WorkerContext, job: ConversionJob, output
         )
         upload_source = encrypted_file
 
-    await asyncio.to_thread(context.storage_port.upload, output_dest, upload_source)
+    await asyncio.wait_for(
+        asyncio.to_thread(context.storage_port.upload, output_dest, upload_source),
+        timeout=_STORAGE_OP_TIMEOUT_SECONDS,
+    )
     log_context = context.get_log_context(job_id=job.job_id, conversion_type=job.conversion)
     worker_logger.debug(f"Uploaded output file for job {job.job_id} to {output_dest}", extra=log_context)
     return output_dest
@@ -201,15 +217,77 @@ async def process_job(context: WorkerContext, job: ConversionJob) -> None:
     worker_logger.info(f"Starting processing job {job.job_id} with conversion {job.conversion}", extra=log_context)
     event = EventContext(job_id=job.job_id)
 
-    async def _persist() -> None:
-        """Persist the job's current status when a repository is configured."""
-        if context.job_repository is not None:
+    async def _persist(*, terminal: bool = False) -> None:
+        """Persist the job's current status when a repository is configured.
+
+        ``terminal=True`` marks the final write for a finished job: those are
+        retried once (the repository already retries dropped connections) and a
+        final failure is logged at ERROR. A row left in ``PROCESSING`` while the
+        user already received a terminal event is otherwise invisible in
+        production. Persistence failures still never fail the conversion — the
+        output already exists and must not be thrown away.
+        """
+        if context.job_repository is None:
+            return
+        attempts = 2 if terminal else 1
+        for attempt in range(attempts):
             try:
                 await context.job_repository.update_conversion_job(job)
+                return
             except Exception as e:  # never let persistence failures fail the conversion
-                worker_logger.warning(
-                    f"Failed to persist job {job.job_id} status: {e}", extra=log_context
-                )
+                if attempt + 1 < attempts:
+                    worker_logger.warning(
+                        f"Retrying persistence of job {job.job_id} after error: {e}",
+                        extra=log_context,
+                    )
+                    continue
+                log = worker_logger.error if terminal else worker_logger.warning
+                log(f"Failed to persist job {job.job_id} status: {e}", extra=log_context)
+
+    async def _load_persisted_job() -> ConversionJob | None:
+        """Read the stored row for this job, or None when unavailable.
+
+        A read failure is deliberately non-fatal: a transient DB hiccup must
+        not stop a job from being converted. It only disables the idempotency
+        guard for this pass.
+        """
+        if context.job_repository is None:
+            return None
+        try:
+            return await context.job_repository.get_conversion_job(job.job_id)
+        except Exception as e:  # noqa: BLE001 — best-effort idempotency check
+            worker_logger.warning(
+                f"Could not read persisted job {job.job_id} for the idempotency "
+                f"check: {e}",
+                extra=log_context,
+            )
+            return None
+
+    # --- Idempotency guard -------------------------------------------------
+    # The queue can legitimately deliver the same job twice (a stale reclaim
+    # after a crashed worker re-queues it, or a future dead-letter replay).
+    # ``job`` here is a fresh PENDING entity built from the stream fields only,
+    # so without this check a replay would convert the file again *and* call
+    # ``consume`` again — charging the user twice. Skip if the persisted row
+    # already shows a completed output.
+    persisted = await _load_persisted_job()
+    if persisted is not None and persisted.status == JobStatus.COMPLETED and persisted.output_file:
+        worker_logger.warning(
+            f"Job {job.job_id} is already COMPLETED; skipping duplicate processing",
+            extra=log_context,
+        )
+        # Re-emit the terminal event so a client still waiting on SSE for this
+        # delivery learns the job finished, then return normally so the worker
+        # ACKs the redelivered message.
+        await context.event_port.publish(
+            job_id=job.job_id,
+            status="COMPLETED",
+            progress=100,
+            message="conversion completed",
+            compute_duration_ms=persisted.compute_duration_ms,
+            credits_used=persisted.credits_used,
+        )
+        return
 
     credit_port = context.credit_port
     # Credits are only enforced for authenticated jobs when a credit port is
@@ -238,7 +316,7 @@ async def process_job(context: WorkerContext, job: ConversionJob) -> None:
                         "Conversion credits exhausted. Upgrade your plan or purchase more credits."
                     )
                     _mark_failed(job, error_message)
-                    await _persist()
+                    await _persist(terminal=True)
                     # Terminal, permanent state — do NOT retry. Return normally so the
                     # worker acks the message instead of re-queueing it.
                     await context.event_port.publish(
@@ -333,13 +411,13 @@ async def process_job(context: WorkerContext, job: ConversionJob) -> None:
             # Previously the event was published first, causing a race where the
             # History/Queue/guest download could show "Ready" but fail to find a
             # downloadable output until a refresh.
-            await _persist()
+            await _persist(terminal=True)
             await context.event_port.publish(**completed_fields)
 
     except Exception as e:
         error_message = str(e)
         _mark_failed(job, error_message)
-        await _persist()
+        await _persist(terminal=True)
         await context.event_port.publish(**event.failed(error_message).to_dict())
         raise RuntimeError(error_message)
 

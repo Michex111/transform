@@ -5,7 +5,7 @@ import { useAuth } from "@/auth/AuthContext";
 import { useToast } from "@/auth/ToastContext";
 import { Modal } from "@/components/Modal";
 import { Button } from "@/components/ui";
-import { formatBytes } from "@/lib/format";
+import { fileNameExtension, formatBytes } from "@/lib/format";
 
 /** Mirrors the advertised tier upload limit shown across the UI (100 MB). */
 const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
@@ -51,7 +51,7 @@ export function FilesUploadModal({
 
   async function upload() {
     if (!file || busy) return;
-    const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
+    const ext = fileNameExtension(file.name);
     setBusy(true);
     try {
       // 1. Open a presigned upload session scoped to the current folder.

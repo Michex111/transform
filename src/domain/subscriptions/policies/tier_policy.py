@@ -21,17 +21,6 @@ class TierPolicy:
     monthly_api_conversion_credits: int | None
 
     @property
-    def api_access(self) -> bool:
-        """Returns True if the tier allows API access."""
-        return self.tier in {
-            SubscriptionTier.FREE,
-            SubscriptionTier.PREMIUM,
-            SubscriptionTier.PRO,
-            SubscriptionTier.PRO_PLUS,
-            SubscriptionTier.ENTERPRISE,
-        }
-
-    @property
     def has_persistent_credits(self) -> bool:
         """Returns True if the tier has persistent monthly conversion credits."""
         return self.monthly_conversion_credits is not None

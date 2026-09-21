@@ -1,5 +1,6 @@
 """Webhook handling API endpoints for Stripe and other integrations."""
 
+import asyncio
 import logging
 import uuid
 from typing import Annotated, Any
@@ -22,6 +23,11 @@ from src.presentation.schemas.credit import TransactionType
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/v1/webhooks", tags=["webhooks"])
+
+# Stripe events are small (<1 MB in practice). Reject anything larger before
+# buffering the body so an unauthenticated caller cannot make the process read
+# an arbitrarily large payload (the signature is verified only afterwards).
+_MAX_WEBHOOK_BODY_BYTES = 1024 * 1024  # 1 MiB
 
 _TIER_BY_NAME: dict[str, SubscriptionTier] = {
     "pro": SubscriptionTier.PRO,
@@ -218,6 +224,21 @@ async def handle_stripe_webhook(
             detail="Stripe webhook secret not configured",
         )
 
+    # Reject an oversized body before reading it. Requests without a
+    # Content-Length header (e.g. chunked) are not pre-rejected so a legitimate
+    # chunked client keeps working.
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            declared_length = int(content_length)
+        except ValueError:
+            declared_length = None
+        if declared_length is not None and declared_length > _MAX_WEBHOOK_BODY_BYTES:
+            raise HTTPException(
+                status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                detail="Webhook payload too large",
+            )
+
     payload = await request.body()
     sig_header = request.headers.get("stripe-signature", "")
 
@@ -322,7 +343,9 @@ async def _refresh_allowance_for_invoice(db: AsyncSession, event_data: dict[str,
     try:
         from src.infrastructure.adapters.payment.stripe_service import StripeService
         client = StripeService()._get_client()
-        sub = client.v1.subscriptions.retrieve(subscription_id)
+        # The Stripe SDK is synchronous; run it off the event loop so the
+        # webhook does not block the whole server for a network round-trip.
+        sub = await asyncio.to_thread(client.v1.subscriptions.retrieve, subscription_id)
     except Exception as e:
         logger.error("Failed to refresh allowance from subscription: %s", e, exc_info=True)
         return

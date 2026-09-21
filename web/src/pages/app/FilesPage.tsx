@@ -34,8 +34,6 @@ import { useToast } from "@/auth/ToastContext";
 import { Button, Skeleton } from "@/components/ui";
 import { Modal } from "@/components/Modal";
 import { FileThumbnail } from "@/components/FileThumbnail";
-import { resolveServerPath } from "@/api/client";
-import { downloadFromUrl } from "@/lib/download";
 import { formatExt } from "@/lib/format";
 import { FilesUploadModal } from "./FilesUploadModal";
 import { FilesConvertModal } from "./FilesConvertModal";
@@ -114,28 +112,41 @@ export function FilesPage() {
   const reduce = useReducedMotion();
   const currentFolderId = path[path.length - 1]?.id ?? null;
 
+  // Monotonic request id: clicking quickly through folders leaves several loads
+  // in flight, and only the newest may render. Without this an earlier response
+  // could land last and show folder A's contents under folder B's breadcrumb
+  // (and clear `loading` while a newer request is still running).
+  const loadIdRef = useRef(0);
+
   const load = useCallback(async () => {
+    const requestId = ++loadIdRef.current;
+    const superseded = () => requestId !== loadIdRef.current;
     setLoading(true);
     try {
       if (showFavorites) {
         // Favorites view lists favorited files across all folders; folders are
         // not shown in this cross-folder aggregate view.
         const res = await client.listFavorites(1, 100);
+        if (superseded()) return;
         setFolders([]);
         setFiles(res.files);
       } else if (currentFolderId) {
         const contents = await client.getFolderContents(currentFolderId);
+        if (superseded()) return;
         setFolders(contents.folders);
         setFiles(contents.files);
       } else {
         const [f, fl] = await Promise.all([client.listFolders(), client.listFiles()]);
+        if (superseded()) return;
         setFolders(f.folders);
         setFiles(fl.files);
       }
     } catch (e) {
+      if (superseded()) return;
       error(e instanceof Error ? e.message : "Could not load files");
     } finally {
-      setLoading(false);
+      // Only the newest request owns the loading flag.
+      if (!superseded()) setLoading(false);
     }
   }, [client, currentFolderId, error, showFavorites]);
 
@@ -383,22 +394,10 @@ export function FilesPage() {
 
   async function downloadFile(file: FileMetadataResponse) {
     try {
-      const { download_url } = await client.getFileDownload(file.id);
-      if (download_url.startsWith("http")) {
-        downloadFromUrl(download_url, file.file_name);
-      } else {
-        // The backend returns a server-relative path (e.g. `/api/v1/files/:id/stream`).
-        // Resolve it against the configured API origin — the SPA is hosted
-        // separately from the API, so a bare relative fetch would hit the wrong host.
-        const res = await fetch(resolveServerPath(download_url), {
-          headers: { Authorization: `Bearer ${localStorage.getItem("transform_access_token")}` },
-        });
-        if (!res.ok) throw new Error(`Download failed (${res.status})`);
-        const blob = await res.blob();
-        const url = URL.createObjectURL(blob);
-        downloadFromUrl(url, file.file_name);
-        setTimeout(() => URL.revokeObjectURL(url), 1000);
-      }
+      // Routed through the API client so the Authorization header, the silent
+      // 401 refresh, the API-origin resolution, the scheme allowlist and blob
+      // saving all live in one place (shared with the conversion download).
+      await client.downloadLibraryFile(file.id, file.file_name);
     } catch (err) {
       error(err instanceof Error ? err.message : "Could not download file");
     }
@@ -666,20 +665,22 @@ export function FilesPage() {
             transition={{ duration: 0.18 }}
           >
             {/* Folders section — horizontal rows stacked in a grid, always on top.
-                One per row on phones (full-width, readable names), widening to
-                2 then 3 columns as space allows. */}
+                Two per row on phones (the file grid already pairs up at that
+                width), widening to 3 as space allows. */}
             {(folders.length > 0 || newFolder) && (
               <motion.div
-                className="grid grid-cols-1 gap-3 sm:grid-cols-2 sm:gap-4 lg:grid-cols-3"
+                className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-3"
                 variants={reduce ? undefined : staggerContainer}
                 initial={reduce ? false : "hidden"}
                 animate={reduce ? undefined : "visible"}
                 {...makeDropHandlers(currentFolderId)}
               >
-                {/* New-folder placeholder card (inline editable) */}
+                {/* New-folder placeholder card (inline editable). It spans the
+                    row on phones: the editable name field needs the width, and
+                    it is transient. */}
                 {newFolder && (
-                  <Item className="w-full">
-                    <div className="flex w-full flex-col gap-1.5 rounded-xl border border-primary/50 bg-surface px-4 py-4">
+                  <Item className="col-span-2 w-full sm:col-span-1">
+                    <div className="flex w-full flex-col gap-1.5 rounded-xl border border-primary/50 bg-surface px-3 py-3 sm:px-4 sm:py-4">
                       <div className="flex w-full items-center gap-3">
                         <FolderSimple size={22} weight="duotone" className="shrink-0 text-primary" />
                         <form onSubmit={saveNewFolder} className="flex min-w-0 flex-1 items-center gap-1.5">
@@ -1040,7 +1041,7 @@ function FolderCard({
         whileTap={reduce || editing || isDragging ? undefined : { scale: 0.98 }}
         animate={reduce || editing ? undefined : { scale: selected ? 1.02 : 1 }}
         transition={{ type: "spring", stiffness: 300, damping: 26 }}
-        className={`group flex w-full items-center gap-3 rounded-xl border px-4 py-4 transition-colors ${
+        className={`group flex w-full items-center gap-2 rounded-xl border px-3 py-3 transition-colors sm:gap-3 sm:px-4 sm:py-4 ${
           selected
             ? "border-primary bg-primary-container/20 ring-2 ring-primary/40"
             : over
@@ -1049,7 +1050,7 @@ function FolderCard({
         } ${isDragging ? "opacity-40" : ""}`}
       >
         {selectable && (
-          <SelectionCheckbox selected={selected} ariaLabel={`Select folder ${folder.name}`} />
+          <SelectionCheckbox selected={selected} />
         )}
         <FolderSimple
           size={22}
@@ -1236,10 +1237,7 @@ function FileCard({
           ) : (
             <>
               {selectionMode && (
-                <SelectionCheckbox
-                  selected={selected}
-                  ariaLabel={`Select file ${file.file_name}`}
-                />
+                <SelectionCheckbox selected={selected} />
               )}
               <div
                 className="min-w-0 flex-1 truncate text-left text-sm font-medium text-on-background"
@@ -1281,16 +1279,12 @@ function CardMenu({
   onDownload,
   onConvert,
   onMove,
-  onToggleFavorite,
-  isFavorite,
   onDelete,
 }: {
   onRename?: () => void;
   onDownload?: () => void;
   onConvert?: () => void;
   onMove?: () => void;
-  onToggleFavorite?: () => void;
-  isFavorite?: boolean;
   onDelete: () => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -1405,16 +1399,6 @@ function CardMenu({
                   <ArrowsClockwise size={15} /> Convert
                 </button>
               )}
-              {onToggleFavorite && (
-                <button
-                  role="menuitem"
-                  onClick={() => { setOpen(false); onToggleFavorite(); }}
-                  className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm text-on-background hover:bg-surface-variant"
-                >
-                  <Star size={15} weight={isFavorite ? "fill" : "regular"} className={isFavorite ? "text-warning" : ""} />
-                  {isFavorite ? "Remove from favorites" : "Add to favorites"}
-                </button>
-              )}
               {onRename && (
                 <button
                   role="menuitem"
@@ -1439,20 +1423,15 @@ function CardMenu({
   );
 }
 
-/** A small circular check that indicates a card is selected in selection mode. */
-function SelectionCheckbox({
-  selected,
-  ariaLabel,
-}: {
-  selected: boolean;
-  ariaLabel: string;
-}) {
+/** A small circular check that indicates a card is selected in selection mode.
+ *
+ * Decorative on purpose: the card itself is the control (`role="button"` +
+ * `aria-pressed`), so the visual box must not advertise a second, unoperable
+ * checkbox role to assistive tech. */
+function SelectionCheckbox({ selected }: { selected: boolean }) {
   return (
     <span
-      role="checkbox"
-      aria-checked={selected}
-      aria-label={ariaLabel}
-      tabIndex={-1}
+      aria-hidden
       className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-md border transition-colors ${
         selected
           ? "border-primary bg-primary text-on-primary"

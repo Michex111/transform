@@ -5,10 +5,15 @@ from src.presentation.api.middleware.rate_limit import RateLimitMiddleware
 
 
 class _FakeRequest:
-    def __init__(self, path: str, headers: dict | None = None, host: str = "1.2.3.4"):
+    def __init__(
+        self, path: str, headers: dict | None = None, host: str = "1.2.3.4", method: str = "GET"
+    ):
         self.url = type("URL", (), {"path": path})()
         self.headers = headers or {}
         self.client = type("Client", (), {"host": host})()
+        # Starlette's Request always exposes `method`; the 429 audit event
+        # records it, so the fake has to carry it too.
+        self.method = method
 
 
 def _middleware() -> RateLimitMiddleware:
@@ -37,6 +42,31 @@ def test_auth_endpoints_get_stricter_limit() -> None:
 
     key, limit = mw._resolve_limit(req)  # type: ignore[arg-type]
     assert key.endswith(":auth")
+    assert limit == 10
+
+
+def test_random_api_key_header_does_not_escape_the_auth_limit() -> None:
+    """SEC-3: a throwaway X-API-Key must not buy the 1000/min bucket on login."""
+    mw = _middleware()
+    mw._settings = type(  # type: ignore[assignment]
+        "S", (), {"RATE_LIMIT_AUTH": 10, "RATE_LIMIT_API_KEY_DEFAULT": 1000}
+    )()
+    req = _FakeRequest("/api/users/token", headers={"x-api-key": "tr_attacker"})
+
+    key, limit = mw._resolve_limit(req)  # type: ignore[arg-type]
+    assert key == "ip:1.2.3.4:auth"
+    assert limit == 10
+
+
+def test_bearer_header_does_not_escape_the_auth_limit() -> None:
+    mw = _middleware()
+    mw._settings = type(  # type: ignore[assignment]
+        "S", (), {"RATE_LIMIT_AUTH": 10, "RATE_LIMIT_AUTHENTICATED": 600}
+    )()
+    req = _FakeRequest("/api/users/refresh", headers={"authorization": "Bearer junk"})
+
+    key, limit = mw._resolve_limit(req)  # type: ignore[arg-type]
+    assert key == "ip:1.2.3.4:auth"
     assert limit == 10
 
 

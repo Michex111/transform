@@ -15,6 +15,7 @@ import json
 import logging
 import sys
 import time
+from collections.abc import Mapping
 from contextvars import ContextVar
 from typing import Any
 
@@ -26,7 +27,38 @@ _ACTOR: ContextVar[str | None] = ContextVar("audit_actor", default=None)
 class AuditFormatter(logging.Formatter):
     """Format log records as single-line JSON with a stable event schema."""
 
-    _RESERVED = ("message", "asctime", "levelname", "name", "funcName", "lineno", "thread")
+    # Standard LogRecord attributes. None of these belong in an audit event:
+    # they are implementation detail of the logging call, not evidence. Anything
+    # absent from this set is treated as a deliberate structured field (either
+    # ``extra=`` on the call or the mapping the helpers pass as the message's
+    # arguments).
+    _RESERVED = frozenset(
+        {
+            "args",
+            "asctime",
+            "created",
+            "exc_info",
+            "exc_text",
+            "filename",
+            "funcName",
+            "levelname",
+            "levelno",
+            "lineno",
+            "message",
+            "module",
+            "msecs",
+            "msg",
+            "name",
+            "pathname",
+            "process",
+            "processName",
+            "relativeCreated",
+            "stack_info",
+            "taskName",
+            "thread",
+            "threadName",
+        }
+    )
 
     def format(self, record: logging.LogRecord) -> str:  # noqa: D102
         payload: dict[str, Any] = {
@@ -35,6 +67,16 @@ class AuditFormatter(logging.Formatter):
             "event": record.getMessage(),
             "logger": record.name,
         }
+        # The helpers in this module pass their structured fields as the
+        # message's mapping argument (logging's ``args``), which lives on
+        # ``record.args`` rather than ``record.__dict__``. Promote it so the
+        # documented fields stay at the top level of the event, where a SIEM
+        # parses them (docs/security/access-control-policy.md lists
+        # ``scope``/``key``/``limit`` and ``user_id``/``action``/``resource``).
+        args = record.args
+        if isinstance(args, Mapping):
+            for key, value in args.items():
+                payload[str(key)] = value
         # Merge structured `extra` fields, excluding reserved LogRecord keys.
         for key, value in record.__dict__.items():
             if key in self._RESERVED or key.startswith("_"):

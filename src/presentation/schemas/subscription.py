@@ -44,16 +44,6 @@ def domain_tier_to_api(tier: DomainTier) -> SubscriptionTier:
     }[tier]
 
 
-def domain_tier_name(tier: DomainTier) -> str:
-    """Return the lowercase Stripe plan name for a domain tier."""
-    return {
-        DomainTier.PREMIUM: "pro",
-        DomainTier.PRO: "pro",
-        DomainTier.PRO_PLUS: "pro_plus",
-        DomainTier.ENTERPRISE: "enterprise",
-    }.get(tier, "pro")
-
-
 class SubscriptionPlanResponse(BaseModel):
     tier: SubscriptionTier
     name: str

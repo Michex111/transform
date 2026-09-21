@@ -1,4 +1,33 @@
-version: "3.9"
+# ============================================================================
+# LOCAL DEVELOPMENT compose stack.
+#
+# `version:` was removed: it is obsolete in Compose v2 and warns on every
+# invocation.
+#
+# BEFORE THIS STACK IS USED ANYWHERE BUT A TRUSTED LOCAL MACHINE, the following
+# must be tightened (recorded here deliberately rather than left as an
+# oversight):
+#
+#   1. Credentials — `POSTGRES_PASSWORD`, `MINIO_ROOT_USER/PASSWORD` are
+#      hardcoded below. Move them to env vars / a secret store. Do NOT bake
+#      them into the images.
+#   2. Port publishing — `postgres:5432`, `redis:6379`, `minio:9000/9001`,
+#      `api:8000` and `nginx:80` are bound to 0.0.0.0. Bind datastores to
+#      `127.0.0.1:` (or drop the mapping entirely) so they are not exposed on a
+#      shared network.
+#   3. Resource limits — no `mem_limit`/`cpus` are set, so one pathological
+#      conversion (e.g. a PDF fanned out to per-page images) can OOM the host.
+#      Worker containers should have explicit memory limits + an OOM policy.
+#   4. Healthchecks — the `worker` and `worker-cleanup` services have none, so
+#      a wedged worker looks healthy to `docker ps`.
+#   5. `uv run` at container start re-syncs dependencies from the network (see
+#      worker.Dockerfile) — a runtime dependency for a production image.
+#
+# `stop_grace_period` on the worker services is intentionally longer than
+# WORKER_CONVERSION_TIMEOUT (600s) so `docker stop` / `restart: unless-stopped`
+# lets the in-flight job finish and ACK instead of SIGKILLing it mid-conversion.
+# A job killed anyway is recovered by the worker's stale-pending reclaim sweep.
+# ============================================================================
 
 services:
   api:
@@ -34,6 +63,9 @@ services:
     networks:
       - converter-net
     restart: unless-stopped
+    # Above WORKER_CONVERSION_TIMEOUT (600s): let the in-flight job finish and
+    # ACK rather than SIGKILLing it mid-conversion.
+    stop_grace_period: 15m
     deploy:
       replicas: 3
 
@@ -53,6 +85,9 @@ services:
     networks:
       - converter-net
     restart: unless-stopped
+    # Let the in-flight cleanup cycle finish; the cycle is re-run on restart so
+    # an interrupted one is not lost work.
+    stop_grace_period: 5m
 
   postgres:
     image: postgres:15-alpine

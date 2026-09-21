@@ -142,11 +142,6 @@ export interface ConversionMapResponse {
   conversions: Record<string, string[]>
 }
 
-/** Map of every supported source format to its valid target formats. */
-export interface ConversionMap {
-  conversions: Record<string, string[]>
-}
-
 // ---- Guest (no-account) ----
 /** Response from creating a guest conversion job (includes the guest token). */
 export interface GuestJobResponse extends ConversionJobResponse {
@@ -347,8 +342,4 @@ export interface JobProgressEvent {
   message?: string
   compute_duration_ms?: number
   credits_used?: number
-}
-
-export interface JobErrorEvent {
-  error: string
 }

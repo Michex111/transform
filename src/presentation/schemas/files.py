@@ -37,18 +37,14 @@ class FavoriteFileRequest(BaseModel):
 
 
 class BatchDeleteRequest(BaseModel):
-    file_ids: list[str] = []
-    folder_ids: list[str] = []
+    # Each entry triggers a storage + DB delete, so bound the batch size.
+    file_ids: list[str] = Field(default_factory=list, max_length=100)
+    folder_ids: list[str] = Field(default_factory=list, max_length=100)
 
 
 class BatchDeleteResponse(BaseModel):
     deleted_files: int
     deleted_folders: int
-
-
-class PresignedUrlRequest(BaseModel):
-    object_key: str
-    expiry_seconds: int = Field(default=900, ge=60, le=86400)
 
 
 class PresignedUrlResponse(BaseModel):

@@ -5,12 +5,13 @@ import json
 import logging
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 
 from src.infrastructure.adapters.queues.redis_stream_status_queue import JobEventSubscriber
 from src.infrastructure.adapters.repository.sql_conversion_job_repo import SQLConversionJobRepository
 from src.presentation.api.dependencies.auth_dependencies import CurrentUser
+from src.presentation.api.dependencies.job_access import assert_job_owner
 from src.presentation.api.dependencies.service_dependencies import (
     get_conversion_repository,
     get_event_subscriber,
@@ -44,8 +45,7 @@ async def stream_job_events(
     """
     # Ownership check: an authenticated user may only watch their own jobs.
     job = await repository.get_conversion_job(job_id)
-    if job is None or job.user_id is None or job.user_id != current_user.id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    assert_job_owner(job, current_user.id)
 
     async def event_generator():
         try:

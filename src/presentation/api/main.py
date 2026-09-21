@@ -6,6 +6,7 @@ real-time progress updates, subscription-based billing,
 and secure file storage.
 """
 
+import asyncio
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -70,7 +71,7 @@ async def lifespan(_: FastAPI):
     # origin(s). Failures are non-fatal (logged) but configured origins are
     # honoured so direct uploads are not blocked by bucket CORS.
     try:
-        apply_bucket_cors()
+        await asyncio.to_thread(apply_bucket_cors)
     except Exception as e:  # noqa: BLE001 — startup must proceed
         logger.warning("Bucket CORS setup failed: %s", e)
 
@@ -100,13 +101,27 @@ app.add_middleware(build_rate_limit_middleware)
 app.add_middleware(SecurityHeadersMiddleware)
 
 
+def _metric_path(request: Request) -> str:
+    """Prometheus ``path`` label for a request.
+
+    Uses the matched route *template* (e.g. ``/api/v1/files/{file_id}``) rather
+    than the raw path. Using the raw path made every scanner/404 path a new
+    time series (unbounded memory and ``/metrics`` growth) and leaked
+    job/file ids into the metrics. Requests that matched no route share the
+    single ``"unmatched"`` label.
+    """
+    route = request.scope.get("route")
+    return getattr(route, "path", None) or "unmatched"
+
+
 @app.middleware("http")
 async def metrics_middleware(request: Request, call_next):
     start = time.perf_counter()
     response = await call_next(request)
     duration = time.perf_counter() - start
-    HTTP_REQUESTS.labels(request.method, request.url.path, response.status_code).inc()
-    HTTP_REQUEST_DURATION.labels(request.method, request.url.path).observe(duration)
+    path = _metric_path(request)
+    HTTP_REQUESTS.labels(request.method, path, response.status_code).inc()
+    HTTP_REQUEST_DURATION.labels(request.method, path).observe(duration)
     return response
 
 

@@ -14,8 +14,3 @@ class SubscriptionTier(StrEnum):
     PRO = "PRO"
     PRO_PLUS = "PRO_PLUS"
     ENTERPRISE = "ENTERPRISE"
-
-    @classmethod
-    def paid_tiers(cls) -> set["SubscriptionTier"]:
-        """Return the set of paid subscription tiers."""
-        return {cls.PRO, cls.PRO_PLUS, cls.ENTERPRISE}

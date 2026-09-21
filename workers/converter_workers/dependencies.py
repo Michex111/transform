@@ -45,6 +45,23 @@ class WorkerJobRepository(JobRepositoryPort):
                     raise
                 continue
 
+    async def get_conversion_job(self, job_id: str) -> ConversionJob | None:
+        """Read a job row, retrying once on a dropped connection.
+
+        The processor uses this to decide whether a redelivered message has
+        already been completed, so it must fail closed only on real errors.
+        """
+        for attempt in range(2):
+            try:
+                async with self._session_factory() as session:
+                    return await SQLConversionJobRepository(session=session).get_conversion_job(job_id)
+            except _RETRYABLE_DB_ERRORS:
+                if attempt == 1:
+                    raise
+                continue
+        # Unreachable: the loop above always returns or raises.
+        raise RuntimeError("unreachable: job read loop exhausted")
+
 
 class WorkerCreditRepository(CreditPort):
     """Resolves tiers and atomically consumes monthly credits for the worker.

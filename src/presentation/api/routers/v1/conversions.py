@@ -1,5 +1,4 @@
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 from typing import Annotated
 
 import base64
@@ -18,10 +17,13 @@ from src.application.services.file_transfer_service import TransferService
 from src.infrastructure.adapters.repository.sql_conversion_job_repo import SQLConversionJobRepository
 from src.infrastructure.adapters.security.encryption import FileEncryptionService
 from src.infrastructure.adapters.storage.minio_storage_adapter import MinioFileStorageAdapter
+from src.infrastructure.adapters.storage.sanitize import extension_from_filename
+from src.infrastructure.logging.audit import log_data_access
 from src.infrastructure.converters.conversion_map import build_conversion_map
 from src.infrastructure.converters.converter_registry import get_registry
 from src.presentation.api.dependencies.auth_dependencies import CurrentUser
 from src.presentation.api.dependencies.download_stream import iter_decrypted_object
+from src.presentation.api.dependencies.job_access import assert_job_owner
 from src.presentation.api.dependencies.service_dependencies import (
     get_conversion_repository,
     get_conversion_service,
@@ -207,7 +209,7 @@ async def create_conversion_job(
             except FileSystemError as exc:
                 raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
-            source_format = Path(file.file_name).suffix.lstrip(".").lower()
+            source_format = extension_from_filename(file.file_name)
             target_format = payload.target_format.lower().strip()
             if not source_format:
                 raise HTTPException(
@@ -263,12 +265,8 @@ async def get_conversion_job(
     encryption_service: Annotated[FileEncryptionService | None, Depends(get_encryption_service)],
 ) -> ConversionJobResponse:
     job = await repository.get_conversion_job(job_id)
-    if job is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
-
-    # Authenticated users may only inspect their own jobs.
-    if job.user_id is not None and job.user_id != current_user.id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    # Authenticated users may only inspect their own jobs (guest jobs included).
+    assert_job_owner(job, current_user.id)
 
     download_url = None
     if str(job.status).lower() == "completed" and job.output_file:
@@ -322,14 +320,21 @@ async def download_conversion_output(
         )
 
     job = await repository.get_conversion_job(job_id)
-    if job is None or str(job.status).lower() != "completed" or not job.output_file:
+    # Ownership check: authenticated users may only read their own outputs
+    # (never an ownerless guest job's output).
+    assert_job_owner(job, current_user.id)
+    if str(job.status).lower() != "completed" or not job.output_file:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job output not found")
 
-    # Ownership check: authenticated users may only read their own outputs.
-    if job.user_id is not None and job.user_id != current_user.id:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
-
-    actor_key = str(job.user_id) if job.user_id is not None else "guest"
+    actor_key = str(job.user_id)
+    # Forensics/evidence trail required by docs/security/backup-recovery.md
+    # ("a data_access event on a test download").
+    log_data_access(
+        user_id=str(current_user.id),
+        action="download",
+        resource="conversion_output",
+        job_id=job.job_id,
+    )
     return StreamingResponse(
         iter_decrypted_object(storage, job.output_file, encryption_service, actor_key),
         media_type="application/octet-stream",

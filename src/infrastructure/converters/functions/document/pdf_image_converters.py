@@ -152,13 +152,19 @@ def _write_multi_frame_pages(
     input_file: str, output_file: str, target_format: str, dpi: int
 ) -> int:
     """Write every page of a PDF into one multi-frame file; return page count."""
-    frames = list(_render_pages(input_file, dpi))
-    if not frames:
-        raise RuntimeError(f"{input_file} contains no pages to convert")
-
     pillow_format = FORMAT_BY_EXT[target_format]
+    pages = _render_pages(input_file, dpi)
+    try:
+        first = next(pages)
+    except StopIteration:
+        pages.close()
+        raise RuntimeError(f"{input_file} contains no pages to convert") from None
+
     if pillow_format == "GIF":
-        frames = _same_canvas(frames)
+        # GIF frames must share one canvas, so the largest page size is only
+        # known once every page has been rendered. Re-encoding would double the
+        # (dominant) render cost, so this target keeps the whole set in memory.
+        frames = _same_canvas([first, *pages])
         frames[0].save(
             output_file,
             format=pillow_format,
@@ -167,15 +173,33 @@ def _write_multi_frame_pages(
             duration=GIF_PAGE_DURATION_MS,
             loop=0,
         )
-    else:  # TIFF
-        frames[0].save(
+        return len(frames)
+
+    # TIFF frames are encoded sequentially, so the remaining pages are streamed
+    # straight into the writer: only one decoded page is resident at a time.
+    # Materialising them instead costs ~3.5 GB for a 300-page A4 PDF at 200 DPI
+    # (≈11.6 MB/page) and has OOMed the worker; Pillow's `append_images` accepts
+    # any iterable, and an iterator produces byte-identical output to a list.
+    remaining = 0
+
+    def _remaining_pages() -> Iterator[Image.Image]:
+        nonlocal remaining
+        for page in pages:
+            remaining += 1
+            yield page
+
+    try:
+        first.save(
             output_file,
             format=pillow_format,
             save_all=True,
-            append_images=frames[1:],
+            append_images=_remaining_pages(),
             compression="tiff_deflate",
         )
-    return len(frames)
+    finally:
+        # Releases the pdfium document even if the writer stopped early.
+        pages.close()
+    return 1 + remaining
 
 
 def _write_page_images_archive(

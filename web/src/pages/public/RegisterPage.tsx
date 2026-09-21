@@ -100,9 +100,19 @@ export function RegisterPage() {
           </Button>
         </form>
 
+        {/* Neither document exists yet, so these are inert, muted text (with
+            `aria-disabled`) rather than dead `href="#"` links — the same
+            treatment `PublicLayout`'s footer deliberately uses. */}
         <p className="mt-4 text-center text-xs text-muted">
-          By continuing you agree to the <a href="#" className="text-primary hover:underline">Terms</a> and{" "}
-          <a href="#" className="text-primary hover:underline">Privacy Policy</a>.
+          By continuing you agree to the{" "}
+          <span className="cursor-default text-muted" title="Coming soon" aria-disabled="true">
+            Terms
+          </span>{" "}
+          and{" "}
+          <span className="cursor-default text-muted" title="Coming soon" aria-disabled="true">
+            Privacy Policy
+          </span>
+          .
         </p>
 
         <div className="my-6 flex items-center gap-3 text-xs text-muted">

@@ -9,6 +9,7 @@ import pytest
 from pydantic import SecretStr
 
 from src.infrastructure.adapters.storage import cors as cors_module
+from src.infrastructure.config.settings import get_settings
 from src.infrastructure.adapters.storage.cors import (
     _build_b2_cors,
     _build_s3_cors,
@@ -117,10 +118,44 @@ def test_apply_bucket_cors_routes_backblaze_endpoint_to_b2(
         cors_module, "_apply_s3_cors", lambda origins: routed.append("s3")
     )
 
-    cors_module.apply_bucket_cors(["https://app.example.com"])
+    # conftest pins BACKBLAZE_ENDPOINT to ``https://example.invalid``, which is
+    # not a B2 host — with that value this test would exercise the S3 *fallback*
+    # and assert the opposite of its name. Point the endpoint at a real B2 host
+    # for the duration of the test and drop the cached Settings so the routing
+    # decision under test is genuinely the B2 branch.
+    monkeypatch.setenv("BACKBLAZE_ENDPOINT", "s3.us-east-005.backblazeb2.com")
+    get_settings.cache_clear()
+    try:
+        cors_module.apply_bucket_cors(["https://app.example.com"])
+    finally:
+        # Leave no cached Settings behind for the next test (the env var itself
+        # is restored by monkeypatch).
+        get_settings.cache_clear()
 
-    # get_settings() reads the test env (BACKBLAZE_ENDPOINT=https://example.invalid
-    # in conftest), which is not a B2 host, so the generic S3 path is correct.
+    assert routed == ["b2"]
+
+
+def test_apply_bucket_cors_falls_back_to_s3_for_a_non_b2_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-B2 (S3-compatible/MinIO) endpoint takes the generic S3 path."""
+    routed: list[str] = []
+    monkeypatch.setattr(
+        cors_module, "_apply_b2_cors", lambda origins: routed.append("b2")
+    )
+    monkeypatch.setattr(
+        cors_module, "_apply_s3_cors", lambda origins: routed.append("s3")
+    )
+
+    # conftest's default endpoint is exactly this case, but pin it explicitly so
+    # the fallback stays covered independently of the test environment.
+    monkeypatch.setenv("BACKBLAZE_ENDPOINT", "https://example.invalid")
+    get_settings.cache_clear()
+    try:
+        cors_module.apply_bucket_cors(["https://app.example.com"])
+    finally:
+        get_settings.cache_clear()
+
     assert routed == ["s3"]
 
 

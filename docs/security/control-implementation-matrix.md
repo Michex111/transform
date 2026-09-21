@@ -91,7 +91,7 @@ for full rationale & gaps).
 | A.8.3 Information access restriction | I | `file_service.py`, `conversions.py`, `events.py`, `upload.py`, `api_keys.py`. |
 | A.8.4 Source code access | P | Repo branch protections (assumed). |
 | A.8.5 Secure authentication | I | `src/infrastructure/auth/jwt_provider.py`; `api_key_service.py`; token `type` claim enforcement. |
-| A.8.6 Capacity mgmt | I | `settings.py` tier size/rate limits; `WORKER_BATCH_SIZE`, `WORKER_CONVERSION_TIMEOUT`; `nginx.conf` `client_max_body_size 1024M`. |
+| A.8.6 Capacity mgmt | I | `settings.py` tier size/rate limits; worker consumer group (`WORKER_CONSUMER_GROUP`) + `WORKER_CONVERSION_TIMEOUT` (the per-read batch size `WORKER_BATCH_SIZE` is defined but **not yet wired** into the consumer — see the worker note below); `nginx.conf` `client_max_body_size 1024M`. |
 | A.8.7 Malware protection | P | Non-root container + frozen deps; **no AV scan** (G4). |
 | A.8.8 Technical vulnerabilities | P | Pinned deps + boot validation; **no SAST/DAST/CVE gate** (G8). |
 | A.8.9 Configuration mgmt | I | `src/infrastructure/config/settings.py`; `.env.example`; `RUN_MIGRATIONS` toggle. |
