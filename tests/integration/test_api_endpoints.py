@@ -218,6 +218,42 @@ def test_conversion_history_endpoint_respects_pagination() -> None:
     assert payload["page_size"] == 2
 
 
+def test_conversion_history_endpoint_reports_credits_used() -> None:
+    """History must carry the token cost, which the web History table renders.
+
+    The cost used to be visible only in the Queue, which is now an active-only
+    view, so History is the one place a finished conversion reports it. Pinning
+    the field here keeps that contract from silently regressing.
+    """
+    with create_test_client() as client:
+        client.post(
+            "/api/conversions/jobs",
+            json={"source_format": "pdf", "target_format": "docx", "input_key": "uploads/a.pdf"},
+        )
+        conversion_service = client.app.state.fake_conversion_service  # type: ignore
+        conversion_service.created_jobs[0].set_compute_result(duration_ms=1200, credits=7)
+
+        response = client.get("/api/conversions/history")
+
+    assert response.status_code == 200
+    jobs = response.json()["jobs"]
+    assert len(jobs) == 1
+    assert jobs[0]["credits_used"] == 7
+
+
+def test_conversion_history_endpoint_defaults_credits_used_to_zero() -> None:
+    """A job that never ran reports 0 tokens rather than omitting the field."""
+    with create_test_client() as client:
+        client.post(
+            "/api/conversions/jobs",
+            json={"source_format": "pdf", "target_format": "docx", "input_key": "uploads/a.pdf"},
+        )
+        response = client.get("/api/conversions/history")
+
+    assert response.status_code == 200
+    assert response.json()["jobs"][0]["credits_used"] == 0
+
+
 # ---------------------------------------------------------------------------
 # Library-path conversion (file already in object storage, no re-upload)
 # ---------------------------------------------------------------------------
