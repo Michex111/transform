@@ -8,10 +8,12 @@ from src.infrastructure.converters.functions import office
 from src.infrastructure.converters.functions import font
 from src.infrastructure.converters.functions import document
 from src.infrastructure.converters.functions.document import pdf_docs_, pdf_image_converters
+from src.infrastructure.converters.functions.image import image_pdf_converters
 
 __all__ = [
     "pdf_docs_",
     "pdf_image_converters",
+    "image_pdf_converters",
     "audio",
     "video",
     "image",

@@ -34,7 +34,6 @@ _SIGNATURES: list[_Sig] = [
     _Sig((b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08"), "zip"),
     _Sig((b"\x1f\x8b",), "gz"),  # gzip
     _Sig((b"GIF87a", b"GIF89a"), "gif"),
-    _Sig((b"RIFF",), "wav"),  # container; audio may be wav
     _Sig((b"OggS",), "ogg"),
     _Sig((b"fLaC",), "flac"),
     _Sig((b"ID3",), "mp3"),  # ID3 tag precedes MPEG frames
@@ -61,6 +60,12 @@ _LENIENT_EXTENSIONS = {
 
 def detect_type(head: bytes) -> str | None:
     """Return a best-effort type label from the leading bytes, or None."""
+    # RIFF is a shared container header, so the form type at offset 8 is what
+    # identifies the format. Without this a genuine ``RIFF…WEBP`` image was
+    # reported as ``wav`` and rejected as a type mismatch on upload, which made
+    # every WebP → anything conversion impossible.
+    if len(head) >= 12 and head[:4] == b"RIFF":
+        return "webp" if head[8:12] == b"WEBP" else "wav"
     for sig in _SIGNATURES:
         for prefix in sig.prefixes:
             if head.startswith(prefix):
@@ -97,6 +102,7 @@ def validate_upload_signature(head: bytes, extension: str) -> bool:
         "ogv": {"ogg", "ogv"},
         "webm": {"webm"},
         "wav": {"wav"},
+        "webp": {"webp"},
         "mp3": {"mp3"},
         "zip": {"zip"},
         "gz": {"gz"},
