@@ -2,13 +2,14 @@ import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { Download, ArrowCounterClockwise, Trash } from "@phosphor-icons/react";
 import { useJobs, type UiJob } from "@/jobs/JobsContext";
+import { showsCreditsUsed } from "@/jobs/jobStore";
 import { useAuth } from "@/auth/AuthContext";
 import { useToast } from "@/auth/ToastContext";
 import { getCachedFile, dropCachedFile } from "@/lib/fileCache";
 import { Dropdown } from "@/components/Dropdown";
 import { ErrorButton } from "@/components/ErrorButton";
 import { Modal } from "@/components/Modal";
-import { Button, Card, FormatChip, StatusBadge } from "@/components/ui";
+import { Button, Card, CreditsBadge, FormatChip, StatusBadge } from "@/components/ui";
 import { formatDateTime } from "@/lib/format";
 
 const PRIMARY_FORMATS = ["pdf", "docx", "xlsx", "png"] as const;
@@ -76,6 +77,7 @@ const HistoryRow = memo(function HistoryRow({
         <span className="hidden font-mono text-xs text-muted lg:block">
           {formatDateTime(job.createdAt)}
         </span>
+        {showsCreditsUsed(job) && <CreditsBadge credits={job.credits_used ?? 0} />}
         <button
           onClick={() => onDelete(job)}
           className="text-muted transition-transform hover:scale-110 hover:text-error"
