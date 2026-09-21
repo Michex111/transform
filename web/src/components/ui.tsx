@@ -34,9 +34,9 @@ export function SkeletonText({ lines = 2 }: { lines?: number }) {
 }
 
 /** A skeleton for a stat/analytics card. */
-export function StatCardSkeleton() {
+export function StatCardSkeleton({ className = "" }: { className?: string }) {
   return (
-    <div className="rounded-xl border border-outline bg-surface p-5">
+    <div className={`rounded-xl border border-outline bg-surface p-5 ${className}`}>
       <div className="mb-2 flex items-center gap-2">
         <Skeleton className="h-4 w-4" />
         <Skeleton className="h-3 w-24" />

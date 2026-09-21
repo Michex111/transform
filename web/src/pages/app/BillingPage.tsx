@@ -5,7 +5,7 @@ import { useAuth } from "@/auth/AuthContext";
 import { useToast } from "@/auth/ToastContext";
 import { Button, Card, Skeleton, SkeletonText } from "@/components/ui";
 import { Modal } from "@/components/Modal";
-import { formatDate } from "@/lib/format";
+import { formatDate, formatDateOrNull } from "@/lib/format";
 import type {
   CreditBalanceResponse,
   CreditPricingResponse,
@@ -130,6 +130,10 @@ export function BillingPage() {
     }
   }
 
+  // Absent on an older API and `null` for tiers without persistent credits —
+  // both omit the line rather than showing a placeholder date.
+  const resetLabel = formatDateOrNull(credit?.credits_reset_at);
+
   return (
     <div className="mx-auto max-w-5xl space-y-6">
       <h1 className="font-display text-2xl font-semibold">Billing</h1>
@@ -183,6 +187,13 @@ export function BillingPage() {
           </div>
           <Coins size={28} className="text-primary" />
         </div>
+        {/* When the monthly plan allowance refreshes. Shown in the viewer's
+            local timezone, and omitted for tiers without persistent credits. */}
+        {!loading && resetLabel && (
+          <p className="mt-2 text-xs text-muted">
+            Resets <span className="font-medium text-on-background">{resetLabel}</span>
+          </p>
+        )}
         <div className="mt-6">
           <p className="mb-2 text-sm font-medium">Buy credits</p>
           {loading ? (

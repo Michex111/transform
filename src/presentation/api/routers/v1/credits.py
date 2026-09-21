@@ -6,6 +6,10 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from src.domain.subscriptions.policies.tier_policy import TierPolicy
+from src.domain.subscriptions.value_object.credit_period import (
+    current_period_key,
+    next_period_start,
+)
 from src.domain.subscriptions.value_object.tier import SubscriptionTier
 from src.infrastructure.adapters.payment.stripe_service import StripeService
 from src.infrastructure.adapters.repository.sql_credit_repo import SQLCreditRepository
@@ -70,9 +74,13 @@ async def get_credit_balance(
     """Get the current user's credit balance for the active monthly period."""
     tier = await subscription_repo.get_tier_for_user(current_user.id)
     policy = TierPolicy.for_tier(tier)
-    allowance = policy.monthly_conversion_credits or 0
+    monthly_credits = policy.monthly_conversion_credits
+    allowance = monthly_credits or 0
 
-    period_key = datetime.now(UTC).strftime("%Y-%m")
+    # One instant per request so the period key and the reset date can never
+    # straddle a month boundary.
+    now = datetime.now(UTC)
+    period_key = current_period_key(now)
     credit = await credit_repo.get_credit(str(current_user.id), period_key)
 
     remaining = credit.remaining if credit is not None else allowance
@@ -82,6 +90,7 @@ async def get_credit_balance(
         tier=domain_tier_to_api(tier).value,
         monthly_allowance=allowance,
         monthly_remaining=remaining,
+        credits_reset_at=next_period_start(now) if monthly_credits is not None else None,
     )
 
 

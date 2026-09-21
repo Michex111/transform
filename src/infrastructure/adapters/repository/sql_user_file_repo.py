@@ -1,12 +1,23 @@
 """SQLAlchemy repository for user files stored in S3/Minio."""
 
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, UTC
 
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.infrastructure.adapters.storage.sanitize import normalize_extension
 from src.infrastructure.database.models import UserFileModel
+
+
+@dataclass(frozen=True)
+class StorageBreakdownRow:
+    """One row of the per-extension storage aggregation."""
+
+    extension: str
+    bytes: int
+    file_count: int
 
 
 class SQLUserFileRepository:
@@ -17,6 +28,7 @@ class SQLUserFileRepository:
 
     async def save(self, *, user_id: int, file_key: str, file_name: str,
                    file_size_bytes: int, mime_type: str,
+                   file_extension: str = "",
                    folder_id: str | None = None,
                    expires_at: datetime | None = None) -> str:
         """Create a new file record. Returns the new file ID."""
@@ -27,6 +39,7 @@ class SQLUserFileRepository:
             folder_id=folder_id,
             file_key=file_key,
             file_name=file_name,
+            file_extension=normalize_extension(file_extension),
             file_size_bytes=file_size_bytes,
             mime_type=mime_type,
             created_at=datetime.now(UTC),
@@ -148,3 +161,34 @@ class SQLUserFileRepository:
             .where(UserFileModel.user_id == user_id)
         )
         return result.scalar_one()
+
+    async def get_storage_breakdown_by_extension(
+        self, user_id: int
+    ) -> list[StorageBreakdownRow]:
+        """Storage usage per file extension for a user, largest first.
+
+        Runs a single ``GROUP BY file_extension`` aggregation. Zero-byte files
+        are excluded so the result only contains entries with ``bytes > 0``.
+        """
+        total_bytes = func.sum(UserFileModel.file_size_bytes)
+        result = await self._session.execute(
+            select(
+                UserFileModel.file_extension,
+                total_bytes,
+                func.count(),
+            )
+            .where(
+                UserFileModel.user_id == user_id,
+                UserFileModel.file_size_bytes > 0,
+            )
+            .group_by(UserFileModel.file_extension)
+            .order_by(total_bytes.desc())
+        )
+        return [
+            StorageBreakdownRow(
+                extension=extension,
+                bytes=int(group_bytes),
+                file_count=int(group_count),
+            )
+            for extension, group_bytes, group_count in result.all()
+        ]

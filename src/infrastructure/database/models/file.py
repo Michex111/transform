@@ -3,7 +3,16 @@
 from datetime import UTC, datetime
 
 import sqlalchemy as sa
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.infrastructure.database.session import Base
@@ -30,6 +39,13 @@ class UserFileModel(Base):
     )
     file_key: Mapped[str] = mapped_column(String(512), nullable=False, comment="S3 object key")
     file_name: Mapped[str] = mapped_column(String(255), nullable=False, comment="Original filename")
+    file_extension: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="",
+        server_default="",
+        comment="Lowercase extension without a leading dot; '' when absent",
+    )
     file_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     mime_type: Mapped[str] = mapped_column(String(100), nullable=False, default="application/octet-stream")
     is_favorite: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=sa.text("false"))
@@ -42,6 +58,14 @@ class UserFileModel(Base):
         DateTime(timezone=True),
         nullable=True,
         comment="When this file should be cleaned up (guest files)",
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_user_files_user_id_file_extension",
+            "user_id",
+            "file_extension",
+        ),
     )
 
 

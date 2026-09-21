@@ -21,6 +21,10 @@ from src.application.exceptions.file_system_exceptions import (
 )
 from src.application.services.file_magic import validate_upload_signature
 from src.domain.subscriptions.value_object.tier import SubscriptionTier
+from src.infrastructure.adapters.storage.sanitize import (
+    extension_from_filename,
+    normalize_extension,
+)
 from src.infrastructure.config.settings import get_settings
 from src.infrastructure.database.models import UserFileModel, UserFolderModel
 
@@ -30,8 +34,8 @@ class FileRepositoryPort(Protocol):
 
     async def save(
         self, *, user_id: int, file_key: str, file_name: str,
-        file_size_bytes: int, mime_type: str, folder_id: str | None = None,
-        expires_at=None,
+        file_size_bytes: int, mime_type: str, file_extension: str = "",
+        folder_id: str | None = None, expires_at=None,
     ) -> str: ...
 
     async def get_by_id(self, file_id: str) -> UserFileModel | None: ...
@@ -367,10 +371,16 @@ class FileService:
             await self.get_folder(user_id, session.folder_id)
 
         file_name = session.file_name or Path(session.object_key).name
+        # Prefer the extension the client declared at upload time; fall back to
+        # deriving it from the file name (legacy sessions predate the field).
+        file_extension = normalize_extension(session.file_extension) or extension_from_filename(
+            file_name
+        )
         return await self._files.save(
             user_id=user_id,
             file_key=session.object_key,
             file_name=file_name,
+            file_extension=file_extension,
             file_size_bytes=size,
             mime_type=stats.get("content_type") or "application/octet-stream",
             folder_id=session.folder_id,

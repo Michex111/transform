@@ -5,6 +5,7 @@ class UploadSession(BaseModel):
     object_key: str
     status: str = "pending"
     file_name: str | None = None
+    file_extension: str | None = None
     folder_id: str | None = None
     user_id: str | None = None
 
