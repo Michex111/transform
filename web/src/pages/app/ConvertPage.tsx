@@ -6,6 +6,7 @@ import { useAuth } from "@/auth/AuthContext";
 import { useToast } from "@/auth/ToastContext";
 import { useJobs } from "@/jobs/JobsContext";
 import { cacheFileForJob } from "@/lib/fileCache";
+import { useConversionMap } from "@/lib/useConversionMap";
 import { FormatPicker } from "@/components/FormatPicker";
 import { Button, Card, FormatMorph, FormatChip, ProgressBar, StatusBadge } from "@/components/ui";
 
@@ -29,26 +30,13 @@ export function ConvertPage() {
   const [busy, setBusy] = useState(false);
   const [dragOver, setDragOver] = useState(false);
 
-  // Source → valid target formats from the backend conversion map.
-  const [conversionMap, setConversionMap] = useState<Record<string, string[]>>({});
-
-  useEffect(() => {
-    let active = true;
-    client
-      .conversionMap()
-      .then((res) => active && setConversionMap(res.conversions))
-      .catch(() => {
-        /* fall back to un-restricted picker */
-      });
-    return () => {
-      active = false;
-    };
-  }, [client]);
+  // Source → valid target formats, served from the shared conversion-map store:
+  // it is already populated from cache on the first render, so the pickers below
+  // never offer formats the backend cannot convert.
+  const { sources: allowedSources, targetsFor, loading: mapLoading } = useConversionMap();
 
   // The target formats currently allowed for the chosen source.
-  const allowedTargets = useMemo(() => conversionMap[from] ?? [], [conversionMap, from]);
-  // The source formats that have at least one valid target.
-  const allowedSources = useMemo(() => Object.keys(conversionMap), [conversionMap]);
+  const allowedTargets = useMemo(() => targetsFor(from), [targetsFor, from]);
 
   // Keep `to` valid for the selected source, and keep `from` a valid source.
   useEffect(() => {
@@ -158,7 +146,14 @@ export function ConvertPage() {
         <div className="flex items-center justify-center gap-6">
           <div className="flex flex-col items-center gap-2">
             <span className="text-xs font-medium uppercase tracking-wide text-muted">From</span>
-            <FormatPicker value={from} onChange={setFrom} ariaLabel="Choose source format" align="left" allowed={allowedSources} />
+            <FormatPicker
+              value={from}
+              onChange={setFrom}
+              ariaLabel="Choose source format"
+              align="left"
+              allowed={allowedSources}
+              pending={mapLoading}
+            />
           </div>
 
           <div className="flex flex-col items-center gap-1">
@@ -167,7 +162,7 @@ export function ConvertPage() {
                 // Swap, then ensure the new target is valid for the new source.
                 const newFrom = to;
                 const newTo = from;
-                const targets = conversionMap[newFrom] ?? [];
+                const targets = targetsFor(newFrom);
                 setFrom(newFrom);
                 setTo(targets.includes(newTo) ? newTo : (targets[0] ?? newTo));
               }}
@@ -183,7 +178,14 @@ export function ConvertPage() {
 
           <div className="flex flex-col items-center gap-2">
             <span className="text-xs font-medium uppercase tracking-wide text-muted">To</span>
-            <FormatPicker value={to} onChange={setTo} ariaLabel="Choose target format" align="right" allowed={allowedTargets} />
+            <FormatPicker
+              value={to}
+              onChange={setTo}
+              ariaLabel="Choose target format"
+              align="right"
+              allowed={allowedTargets}
+              pending={mapLoading}
+            />
           </div>
         </div>
 

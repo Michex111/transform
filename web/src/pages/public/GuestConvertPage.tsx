@@ -9,6 +9,7 @@ import { Button, Card, FormatMorph, FormatChip, ProgressBar, StatusBadge } from 
 import { formatDateTime, formatMeta } from "@/lib/format";
 import { normalizeExt } from "@/lib/formatVisual";
 import { friendlyErrorMessage } from "@/lib/errorMessages";
+import { useConversionMap } from "@/lib/useConversionMap";
 import { useGuestHistory } from "@/lib/useGuestHistory";
 import type { GuestHistoryItem } from "@/api/types";
 
@@ -65,24 +66,13 @@ export function GuestConvertPage() {
   const [busy, setBusy] = useState(false);
   const [dragOver, setDragOver] = useState(false);
 
-  // Source → valid target formats from the guest conversion map.
-  const [conversionMap, setConversionMap] = useState<Record<string, string[]>>({});
+  // Source → valid target formats, served from the shared conversion-map store:
+  // it is already populated from cache on the first render, so the pickers below
+  // never offer formats the backend cannot convert.
+  const { sources: allowedSources, targetsFor, loading: mapLoading } =
+    useConversionMap({ guest: true });
 
-  useEffect(() => {
-    let active = true;
-    client
-      .guestConversionMap()
-      .then((res) => active && setConversionMap(res.conversions))
-      .catch(() => {
-        /* fall back to un-restricted picker */
-      });
-    return () => {
-      active = false;
-    };
-  }, [client]);
-
-  const allowedTargets = useMemo(() => conversionMap[from] ?? [], [conversionMap, from]);
-  const allowedSources = useMemo(() => Object.keys(conversionMap), [conversionMap]);
+  const allowedTargets = useMemo(() => targetsFor(from), [targetsFor, from]);
 
   // Keep `to` valid for the selected source, and `from` a valid source.
   useEffect(() => {
@@ -229,7 +219,14 @@ export function GuestConvertPage() {
           <div className="flex items-center justify-center gap-6">
             <div className="flex flex-col items-center gap-2">
               <span className="text-xs font-medium uppercase tracking-wide text-muted">From</span>
-              <FormatPicker value={from} onChange={setFrom} ariaLabel="Choose source format" align="left" allowed={allowedSources} />
+              <FormatPicker
+                value={from}
+                onChange={setFrom}
+                ariaLabel="Choose source format"
+                align="left"
+                allowed={allowedSources}
+                pending={mapLoading}
+              />
             </div>
 
             <div className="flex flex-col items-center gap-1">
@@ -237,7 +234,7 @@ export function GuestConvertPage() {
                 onClick={() => {
                   const newFrom = to;
                   const newTo = from;
-                  const targets = conversionMap[newFrom] ?? [];
+                  const targets = targetsFor(newFrom);
                   setFrom(newFrom);
                   setTo(targets.includes(newTo) ? newTo : (targets[0] ?? newTo));
                 }}
@@ -253,7 +250,14 @@ export function GuestConvertPage() {
 
             <div className="flex flex-col items-center gap-2">
               <span className="text-xs font-medium uppercase tracking-wide text-muted">To</span>
-              <FormatPicker value={to} onChange={setTo} ariaLabel="Choose target format" align="right" allowed={allowedTargets} />
+              <FormatPicker
+                value={to}
+                onChange={setTo}
+                ariaLabel="Choose target format"
+                align="right"
+                allowed={allowedTargets}
+                pending={mapLoading}
+              />
             </div>
           </div>
 

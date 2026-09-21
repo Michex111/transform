@@ -7,6 +7,7 @@ import { Modal } from "@/components/Modal";
 import { Button, FormatChip } from "@/components/ui";
 import { FormatIcon } from "@/components/FormatPicker";
 import { formatExt, formatMeta } from "@/lib/format";
+import { useConversionMap } from "@/lib/useConversionMap";
 import type { FileMetadataResponse } from "@/api/types";
 
 export function FilesConvertModal({
@@ -21,31 +22,24 @@ export function FilesConvertModal({
   const { api: client } = useAuth();
   const { addJob } = useJobs();
   const { success, error } = useToast();
-  const [conversionMap, setConversionMap] = useState<Record<string, string[]>>({});
   const [target, setTarget] = useState("");
   const [busy, setBusy] = useState(false);
 
   // Source format inferred from the file name (fall back to mime type).
   const source = useMemo(() => (file ? formatExt(file.file_name, file.mime_type) : ""), [file]);
-  // Valid targets for this source, normalized to lowercase for matching.
+  // Valid targets for this source, normalized to lowercase for matching. The map
+  // is cached across the session, so reopening the modal is instant; `enabled`
+  // keeps a closed modal from requesting it at all.
+  const { targetsFor } = useConversionMap({ enabled: open });
   const allowedTargets = useMemo(
-    () => (conversionMap[source] ?? []).map((t) => t.toLowerCase()),
-    [conversionMap, source],
+    () => targetsFor(source).map((t) => t.toLowerCase()),
+    [targetsFor, source],
   );
 
-  // Load the conversion map each time the modal opens.
+  // Reset the chosen target each time the modal opens.
   useEffect(() => {
-    if (!open) return;
-    let active = true;
-    setTarget("");
-    client
-      .conversionMap()
-      .then((res) => active && setConversionMap(res.conversions))
-      .catch(() => active && setConversionMap({}));
-    return () => {
-      active = false;
-    };
-  }, [open, client]);
+    if (open) setTarget("");
+  }, [open]);
 
   // Default the target to the first valid format for the source.
   useEffect(() => {

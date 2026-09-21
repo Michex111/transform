@@ -22,6 +22,42 @@ class ConverterRegistry:
         return set(self._registry.keys())
 
 
+def converter_output_extension(
+    converter: ConverterFunction | None,
+    default: str,
+    input_path: str | None = None,
+) -> str:
+    """Output extension a converter declares for its result.
+
+    By default a converted file is named ``<stem>.<target_format>``. A converter
+    may override that by carrying an ``output_extension`` attribute, either
+
+    * a plain extension string (e.g. ``"zip"``), or
+    * a callable ``(input_path) -> str | None`` for outputs whose container
+      depends on the input (e.g. ``pdf -> png`` zips the page images only when
+      the PDF has more than one page).
+
+    A callable that returns ``None``/``""`` (or that cannot be called because no
+    ``input_path`` is available) keeps ``default``.
+    """
+    declared = getattr(converter, "output_extension", None)
+    if declared is None:
+        return default
+
+    if callable(declared):
+        if input_path is None:
+            # The hook needs the downloaded input to decide, so a caller that
+            # has not downloaded the object yet keeps the target extension.
+            return default
+        resolved = declared(input_path)
+    else:
+        resolved = declared
+
+    if not resolved:
+        return default
+    return str(resolved).lstrip(".").lower()
+
+
 # Create a global registry instance
 converter_registry = ConverterRegistry()
 

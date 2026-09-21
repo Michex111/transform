@@ -398,7 +398,7 @@ class ApiClient {
 
     if (url.startsWith('http')) {
       // Pre-signed GET URL — no auth header needed, download directly.
-      downloadFromUrl(url, filename ?? defaultJobFilename(job))
+      downloadFromUrl(url, filename ?? jobOutputFilename(job))
     } else {
       // Same-origin streaming endpoint — requires the Authorization header.
       const res = await fetch(resolveServerPath(url), {
@@ -406,7 +406,7 @@ class ApiClient {
       })
       if (!res.ok) throw new Error(`Download failed (${res.status})`)
       const blob = await res.blob()
-      saveBlob(blob, filename ?? defaultJobFilename(job))
+      saveBlob(blob, filename ?? jobOutputFilename(job))
     }
   }
 
@@ -538,6 +538,8 @@ class ApiClient {
     job_id?: string | null
     download_url?: string | null
     input_file?: string | null
+    /** Object key the worker produced; its extension drives the download name. */
+    output_file?: string | null
     target_format: string
     guest_token: string
   }): Promise<void> {
@@ -558,13 +560,13 @@ class ApiClient {
 
     if (url.startsWith('http')) {
       // Pre-signed GET URL — no auth header needed, download directly.
-      downloadFromUrl(url, guestFilename(job))
+      downloadFromUrl(url, jobOutputFilename(job))
     } else {
       // Same-origin streaming endpoint — requires the guest token.
       const res = await fetch(`${resolveServerPath(url)}?guest_token=${encodeURIComponent(job.guest_token)}`)
       if (!res.ok) throw new Error(`Download failed (${res.status})`)
       const blob = await res.blob()
-      saveBlob(blob, guestFilename(job))
+      saveBlob(blob, jobOutputFilename(job))
     }
   }
 
@@ -760,16 +762,26 @@ function subscribeToJobStream(
   return () => controller.abort()
 }
 
-/** Build a sensible output filename for a completed job's download. */
-function defaultJobFilename(job: { input_file: string; target_format: string }): string {
-  const base = job.input_file.split('/').pop()?.replace(/\.[^.]+$/, '') || 'converted'
-  return `${base}.${job.target_format}`
-}
-
-/** Build an output filename for a guest download (falls back to the target ext). */
-function guestFilename(job: { input_file?: string | null; target_format: string }): string {
-  const source = job.input_file?.split('/').pop()?.replace(/\.[^.]+$/, '') || 'converted'
-  return `${source}.${job.target_format}`
+/**
+ * Download filename for a converted job.
+ *
+ * Prefers the extension of the object the worker actually produced
+ * (`output_file`), because a converter may emit a *container* instead of the
+ * target format — e.g. a multi-page `pdf -> png` job produces a `.zip` holding
+ * one image per page. Naming that download `<name>.png` would silently hand the
+ * user a corrupt file. Falls back to the target format when the job carries no
+ * output key yet (e.g. a guest payload before completion).
+ */
+export function jobOutputFilename(job: {
+  input_file?: string | null
+  target_format: string
+  output_file?: string | null
+}): string {
+  const base = job.input_file?.split('/').pop()?.replace(/\.[^.]+$/, '') || 'converted'
+  const produced = job.output_file?.split('/').pop() ?? ''
+  const dot = produced.lastIndexOf('.')
+  const extension = dot > 0 ? produced.slice(dot + 1).toLowerCase() : ''
+  return `${base}.${extension || job.target_format}`
 }
 
 export const api = new ApiClient()

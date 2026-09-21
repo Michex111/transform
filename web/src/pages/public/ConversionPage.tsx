@@ -16,6 +16,12 @@ import { Reveal } from "@/lib/motion";
 /** Cap on how many sibling pairs we list so the page stays scannable. */
 const MAX_RELATED = 12;
 
+/** Image targets that get one file per page when the PDF has several pages. */
+const PDF_ARCHIVE_TARGETS = new Set(["png", "jpg", "jpeg", "webp", "bmp"]);
+
+/** Image targets that hold every page inside the single output file. */
+const PDF_MULTI_FRAME_TARGETS = new Set(["tiff", "gif"]);
+
 interface ConversionPageProps {
   /** Normalised source extension, e.g. "pdf". */
   from: string;
@@ -41,6 +47,18 @@ export function ConversionPage({ from, to }: ConversionPageProps) {
 
   const relatedTargets = targets.filter((t) => t !== to);
   const relatedSources = sources.filter((s) => s !== from);
+
+  // pdf -> image is the one conversion whose output shape depends on the input:
+  // a multi-page PDF cannot be one image, so it is bundled instead. Say so here
+  // rather than letting a ZIP arrive as a surprise.
+  const pdfImageNote =
+    from === "pdf"
+      ? PDF_MULTI_FRAME_TARGETS.has(to)
+        ? `Every page of a multi-page PDF stays in the single ${toVisual.label} output file.`
+        : PDF_ARCHIVE_TARGETS.has(to)
+          ? `A one-page PDF becomes a single ${toVisual.label} image; a multi-page PDF arrives as a ZIP holding one image per page.`
+          : null
+      : null;
 
   /* ---------------- loading ---------------- */
   if (loading) {
@@ -165,6 +183,9 @@ export function ConversionPage({ from, to }: ConversionPageProps) {
             {sources.length} format{sources.length === 1 ? "" : "s"} convert into{" "}
             {toVisual.label}. Free, no sign-up required.
           </p>
+          {pdfImageNote && (
+            <p className="mt-3 max-w-2xl text-sm text-muted">{pdfImageNote}</p>
+          )}
         </Reveal>
 
         <Reveal className="mt-8">
