@@ -82,6 +82,19 @@ class TestConverterRegistryCoverage:
         ("pdf", "gif"),
     ]
 
+    IMAGE_PDF_CONVERSIONS = [
+        ("jpg", "pdf"),
+        ("jpeg", "pdf"),
+        ("png", "pdf"),
+        ("webp", "pdf"),
+        ("gif", "pdf"),
+        ("bmp", "pdf"),
+        ("tiff", "pdf"),
+        ("ico", "pdf"),
+        ("avif", "pdf"),
+        ("svg", "pdf"),
+    ]
+
     EBOOK_CONVERSIONS = [
         ("epub", "pdf"),
         ("pdf", "epub"),
@@ -162,6 +175,13 @@ class TestConverterRegistryCoverage:
             converter = registry.get_converter(ct)
             assert converter is not None, f"Missing converter: {source} -> {target}"
 
+    def test_all_image_pdf_converters_registered(self):
+        registry = get_registry()
+        for source, target in self.IMAGE_PDF_CONVERSIONS:
+            ct = ConversionType(source, target)
+            converter = registry.get_converter(ct)
+            assert converter is not None, f"Missing converter: {source} -> {target}"
+
     def test_all_ebook_converters_registered(self):
         registry = get_registry()
         for source, target in self.EBOOK_CONVERSIONS:
@@ -200,6 +220,7 @@ class TestConverterRegistryCoverage:
             + len(self.VIDEO_CONVERSIONS)
             + len(self.IMAGE_CONVERSIONS)
             + len(self.PDF_IMAGE_CONVERSIONS)
+            + len(self.IMAGE_PDF_CONVERSIONS)
             + len(self.EBOOK_CONVERSIONS)
             + len(self.ARCHIVE_CONVERSIONS)
             + len(self.FONT_CONVERSIONS)
@@ -251,6 +272,9 @@ class TestConverterRegistryCoverage:
         # pdf rasterises to images as well (pypdfium2).
         for image_target in ["png", "jpg", "webp", "bmp", "tiff", "gif"]:
             assert image_target in mapping["pdf"], f"pdf -> {image_target} missing"
+        # ...and images go back into a PDF (Pillow / cairosvg).
+        for image_source in ["jpg", "jpeg", "png", "webp", "gif", "bmp", "tiff", "ico", "avif", "svg"]:
+            assert "pdf" in mapping[image_source], f"{image_source} -> pdf missing"
         assert "xlsx" in mapping
         assert "csv" in mapping["xlsx"]
         assert "ods" in mapping["xlsx"]

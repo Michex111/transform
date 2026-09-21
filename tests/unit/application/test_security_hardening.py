@@ -46,6 +46,19 @@ def test_validate_upload_signature_accepts_alias_extensions() -> None:
     assert validate_upload_signature(b"\x00\x00\x00\x18ftyp...", "mov") is True
 
 
+def test_detect_type_distinguishes_riff_containers() -> None:
+    # RIFF carries both WAV audio and WebP images; offset 8 tells them apart.
+    assert detect_type(b"RIFF\x24\x00\x00\x00WEBPVP8 ") == "webp"
+    assert detect_type(b"RIFF\x24\x00\x00\x00WAVEfmt ") == "wav"
+
+
+def test_validate_upload_signature_accepts_webp_images() -> None:
+    # Regression: a real WebP was reported as WAV and rejected on upload, which
+    # blocked every WebP conversion (including WebP → PDF).
+    assert validate_upload_signature(b"RIFF\x24\x00\x00\x00WEBPVP8 ", "webp") is True
+    assert validate_upload_signature(b"RIFF\x24\x00\x00\x00WEBPVP8 ", "wav") is False
+
+
 # ---------------------------------------------------------------------------
 # Archive decompression-bomb guard (F3)
 # ---------------------------------------------------------------------------

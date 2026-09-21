@@ -22,6 +22,9 @@ const PDF_ARCHIVE_TARGETS = new Set(["png", "jpg", "jpeg", "webp", "bmp"]);
 /** Image targets that hold every page inside the single output file. */
 const PDF_MULTI_FRAME_TARGETS = new Set(["tiff", "gif"]);
 
+/** Image sources whose frames each become a page of the output PDF. */
+const MULTI_FRAME_IMAGE_SOURCES = new Set(["gif", "tiff"]);
+
 interface ConversionPageProps {
   /** Normalised source extension, e.g. "pdf". */
   from: string;
@@ -48,17 +51,22 @@ export function ConversionPage({ from, to }: ConversionPageProps) {
   const relatedTargets = targets.filter((t) => t !== to);
   const relatedSources = sources.filter((s) => s !== from);
 
-  // pdf -> image is the one conversion whose output shape depends on the input:
-  // a multi-page PDF cannot be one image, so it is bundled instead. Say so here
-  // rather than letting a ZIP arrive as a surprise.
-  const pdfImageNote =
+  // Two conversions have an output shape that depends on the input, and a
+  // surprise is worse than a sentence, so both are spelled out here.
+  //   pdf -> image: a multi-page PDF cannot be one image, so it is bundled.
+  //   multi-frame image -> pdf: every frame of the source is kept, one page each.
+  const outputShapeNote =
     from === "pdf"
       ? PDF_MULTI_FRAME_TARGETS.has(to)
         ? `Every page of a multi-page PDF stays in the single ${toVisual.label} output file.`
         : PDF_ARCHIVE_TARGETS.has(to)
           ? `A one-page PDF becomes a single ${toVisual.label} image; a multi-page PDF arrives as a ZIP holding one image per page.`
           : null
-      : null;
+      : to === "pdf" && MULTI_FRAME_IMAGE_SOURCES.has(from)
+        ? from === "gif"
+          ? `An animated ${fromVisual.label} becomes a multi-page PDF — every frame is one page.`
+          : `A multi-page ${fromVisual.label} becomes a multi-page PDF — every page is kept.`
+        : null;
 
   /* ---------------- loading ---------------- */
   if (loading) {
@@ -183,8 +191,8 @@ export function ConversionPage({ from, to }: ConversionPageProps) {
             {sources.length} format{sources.length === 1 ? "" : "s"} convert into{" "}
             {toVisual.label}. Free, no sign-up required.
           </p>
-          {pdfImageNote && (
-            <p className="mt-3 max-w-2xl text-sm text-muted">{pdfImageNote}</p>
+          {outputShapeNote && (
+            <p className="mt-3 max-w-2xl text-sm text-muted">{outputShapeNote}</p>
           )}
         </Reveal>
 
