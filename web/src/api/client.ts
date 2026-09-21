@@ -1,44 +1,49 @@
 import { downloadFromUrl, saveBlob } from '@/lib/download'
 import { encryptFileToFencr, fencrDataKeyToBase64 } from '@/lib/fencr'
+import {
+  normalizeApiKeyCreate,
+  normalizeApiKeyList,
+  normalizeBatchDelete,
+  normalizeCancelSubscription,
+  normalizeCheckout,
+  normalizeConversionHistory,
+  normalizeConversionJob,
+  normalizeConversionMap,
+  normalizeCreditBalance,
+  normalizeCreditHistory,
+  normalizeCreditPricing,
+  normalizeDashboard,
+  normalizeFile,
+  normalizeFileDownload,
+  normalizeFileList,
+  normalizeFolder,
+  normalizeFolderContents,
+  normalizeFolderList,
+  normalizeGuestJob,
+  normalizePortal,
+  normalizePresignedUrls,
+  normalizeSubscriptionPlans,
+  normalizeSubscriptionStatus,
+  normalizeSupportedConversions,
+  normalizeTokenResponse,
+  normalizeUploadResponse,
+  normalizeUploadSession,
+  normalizeUser,
+} from './normalize'
 import type {
   APIKeyCreateRequest,
-  APIKeyCreateResponse,
-  APIKeyListResponse,
   BatchDeleteRequest,
-  BatchDeleteResponse,
-  CancelSubscriptionResponse,
-  CheckoutResponse,
-  ConversionHistoryResponse,
   ConversionJobResponse,
-  ConversionMapResponse,
-  CreditBalanceResponse,
-  CreditPricingResponse,
   CreditPurchaseRequest,
-  CreditTransactionResponse,
   CreateConversionJobRequest,
   CreateLibraryConversionRequest,
   CreateUploadSessionRequest,
-  DashboardResponse,
   FavoriteFileRequest,
-  FileDownloadResponse,
   GuestJobResponse,
-  FileListResponse,
-  FileMetadataResponse,
-  FolderContentsResponse,
-  FolderListResponse,
-  FolderResponse,
-  PortalResponse,
-  PresignedUrlResponse,
   PresignedUrlsRequest,
   RefreshTokenRequest,
-  SubscriptionPlanResponse,
-  SubscriptionStatusResponse,
-  SupportedConversion,
   TokenResponse,
-  UploadResponse,
-  UploadSession,
   UserCreateRequest,
-  UserResponse,
 } from './types'
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? '/api').replace(/\/$/, '')
@@ -122,7 +127,7 @@ class ApiClient {
         body: JSON.stringify({ refresh_token: rt } satisfies RefreshTokenRequest),
       })
       if (!res.ok) return false
-      const data = (await res.json()) as TokenResponse
+      const data = normalizeTokenResponse(await res.json())
       this.setTokens(data)
       return true
     } catch {
@@ -174,7 +179,9 @@ class ApiClient {
 
   // ---- Auth ----
   register = (body: UserCreateRequest) =>
-    this.request<UserResponse>('/users/register', { method: 'POST', body: JSON.stringify(body) })
+    this.request<unknown>('/users/register', { method: 'POST', body: JSON.stringify(body) }).then(
+      normalizeUser,
+    )
 
   login = async (username: string, password: string) => {
     const form = new URLSearchParams({ username, password })
@@ -187,29 +194,32 @@ class ApiClient {
       const body = await res.json().catch(() => ({}))
       throw new Error(body.detail ?? 'Invalid credentials')
     }
-    const data = (await res.json()) as TokenResponse
+    const data = normalizeTokenResponse(await res.json())
     // Persist tokens immediately so subsequent calls are authenticated.
     this.setTokens(data)
     return data
   }
 
-  me = () => this.request<UserResponse>('/users/me')
+  me = () => this.request<unknown>('/users/me').then(normalizeUser)
 
   // ---- Dashboard ----
-  dashboard = () => this.request<DashboardResponse>('/v1/user/dashboard')
-  profile = () => this.request<UserResponse>('/v1/user/profile')
+  dashboard = () => this.request<unknown>('/v1/user/dashboard').then(normalizeDashboard)
+  profile = () => this.request<unknown>('/v1/user/profile').then(normalizeUser)
 
   // ---- Upload (presigned URL flow) ----
   createUploadSession = (body: CreateUploadSessionRequest) =>
-    this.request<UploadResponse>('/uploads/sessions', { method: 'POST', body: JSON.stringify(body) })
+    this.request<unknown>('/uploads/sessions', { method: 'POST', body: JSON.stringify(body) }).then(
+      normalizeUploadResponse,
+    )
 
-  getUploadSession = (id: string) => this.request<UploadSession>(`/uploads/sessions/${id}`)
+  getUploadSession = (id: string) =>
+    this.request<unknown>(`/uploads/sessions/${id}`).then(normalizeUploadSession)
 
   verifyUpload = (id: string, jobId?: string) =>
-    this.request<UploadSession>(
+    this.request<unknown>(
       `/uploads/sessions/${id}/verify${jobId ? `?job_id=${encodeURIComponent(jobId)}` : ''}`,
       { method: 'POST' },
-    )
+    ).then(normalizeUploadSession)
 
   cancelUpload = (id: string) =>
     this.request<void>(`/uploads/sessions/${id}`, { method: 'DELETE' })
@@ -256,33 +266,38 @@ class ApiClient {
   }
 
   // ---- Conversions ----
-  supportedConversions = () => this.request<SupportedConversion[]>('/conversions/supported')
+  supportedConversions = () =>
+    this.request<unknown>('/conversions/supported').then(normalizeSupportedConversions)
   /** Map of source format -> valid target formats. */
-  conversionMap = () => this.request<ConversionMapResponse>('/conversions/supported/map')
+  conversionMap = () =>
+    this.request<unknown>('/conversions/supported/map').then(normalizeConversionMap)
   createConversion = (body: CreateConversionJobRequest) =>
-    this.request<ConversionJobResponse>('/conversions/jobs', { method: 'POST', body: JSON.stringify(body) })
+    this.request<unknown>('/conversions/jobs', { method: 'POST', body: JSON.stringify(body) }).then(
+      normalizeConversionJob,
+    )
   /**
    * Convert a file that already exists in the user's library (object storage).
    * The server infers the source format from the stored file's extension and
    * enqueues the job immediately.
    */
   convertLibraryFile = (fileId: string, targetFormat: string) =>
-    this.request<ConversionJobResponse>('/conversions/jobs', {
+    this.request<unknown>('/conversions/jobs', {
       method: 'POST',
       body: JSON.stringify({ file_id: fileId, target_format: targetFormat } satisfies CreateLibraryConversionRequest),
-    })
-  getJob = (id: string) => this.request<ConversionJobResponse>(`/conversions/jobs/${id}`)
+    }).then(normalizeConversionJob)
+  getJob = (id: string) =>
+    this.request<unknown>(`/conversions/jobs/${id}`).then(normalizeConversionJob)
   /** Paginated conversion history for the current user, optionally time-ranged. */
   conversionHistory = (page = 1, pageSize = 20, range?: string) =>
-    this.request<ConversionHistoryResponse>(
+    this.request<unknown>(
       `/conversions/history?page=${page}&page_size=${pageSize}${range ? `&range=${encodeURIComponent(range)}` : ''}`,
-    )
+    ).then(normalizeConversionHistory)
   /** Delete a single history record owned by the current user. */
   deleteHistoryJob = (id: string) =>
     this.request<void>(`/conversions/history/${id}`, { method: 'DELETE' })
   /** Retry a failed job without re-uploading its input file. */
   retryJob = (id: string) =>
-    this.request<ConversionJobResponse>(`/conversions/jobs/${id}/retry`, { method: 'POST' })
+    this.request<unknown>(`/conversions/jobs/${id}/retry`, { method: 'POST' }).then(normalizeConversionJob)
 
   /**
    * Run the full "normal conversion" flow with a file: create the job, open an
@@ -397,21 +412,22 @@ class ApiClient {
 
   // ---- Guest (no-account) ----
   /** Map of source format -> valid target formats for guest conversions. */
-  guestConversionMap = () => this.request<ConversionMapResponse>('/guest/conversions/supported/map')
+  guestConversionMap = () =>
+    this.request<unknown>('/guest/conversions/supported/map').then(normalizeConversionMap)
 
   /** Create a guest conversion job. Returns the job + its guest token. */
   guestCreateJob = (body: CreateConversionJobRequest) =>
-    this.request<GuestJobResponse>('/guest/conversions/jobs', {
+    this.request<unknown>('/guest/conversions/jobs', {
       method: 'POST',
       body: JSON.stringify(body),
-    })
+    }).then(normalizeGuestJob)
 
   /** Open a guest upload session (returns the presigned PUT URL). */
   guestCreateUploadSession = (body: CreateUploadSessionRequest) =>
-    this.request<UploadResponse>('/guest/uploads/sessions', {
+    this.request<unknown>('/guest/uploads/sessions', {
       method: 'POST',
       body: JSON.stringify(body),
-    })
+    }).then(normalizeUploadResponse)
 
   /**
    * Upload guest file bytes directly to the presigned URL (no Content-Type
@@ -421,10 +437,10 @@ class ApiClient {
 
   /** Verify a guest upload and enqueue its conversion job. */
   guestVerifyUpload = (uploadId: string, jobId: string, guestToken: string) =>
-    this.request<UploadSession>(
+    this.request<unknown>(
       `/guest/uploads/sessions/${uploadId}/verify?job_id=${encodeURIComponent(jobId)}&guest_token=${encodeURIComponent(guestToken)}`,
       { method: 'POST' },
-    )
+    ).then(normalizeUploadSession)
 
   /**
    * Run the full guest conversion flow with a file: create the job, open an
@@ -481,9 +497,9 @@ class ApiClient {
 
   /** Fetch a single guest job by id + token. */
   guestGetJob = (jobId: string, guestToken: string) =>
-    this.request<GuestJobResponse>(
+    this.request<unknown>(
       `/guest/conversions/jobs/${jobId}?guest_token=${encodeURIComponent(guestToken)}`,
-    )
+    ).then(normalizeGuestJob)
 
   /**
    * Subscribe to SSE progress for a guest job. No Authorization header — the
@@ -553,88 +569,98 @@ class ApiClient {
   }
 
   // ---- Files ----
-  listFolders = () => this.request<FolderListResponse>('/v1/files/folders')
+  listFolders = () => this.request<unknown>('/v1/files/folders').then(normalizeFolderList)
   /** Get the subfolders + files directly inside a folder. */
   getFolderContents = (folderId: string) =>
-    this.request<FolderContentsResponse>(`/v1/files/folders/${folderId}`)
+    this.request<unknown>(`/v1/files/folders/${folderId}`).then(normalizeFolderContents)
   createFolder = (name: string, parentId?: string | null) =>
-    this.request<FolderResponse>('/v1/files/folders', {
+    this.request<unknown>('/v1/files/folders', {
       method: 'POST',
       body: JSON.stringify({ name, parent_id: parentId ?? null }),
-    })
+    }).then(normalizeFolder)
   renameFolder = (id: string, name: string) =>
-    this.request<FolderResponse>(`/v1/files/folders/${id}`, {
+    this.request<unknown>(`/v1/files/folders/${id}`, {
       method: 'PATCH',
       body: JSON.stringify({ name }),
-    })
+    }).then(normalizeFolder)
   deleteFolder = (id: string) => this.request<void>(`/v1/files/folders/${id}`, { method: 'DELETE' })
   listFiles = (folderId?: string) =>
-    this.request<FileListResponse>(`/v1/files${folderId ? `?folder_id=${encodeURIComponent(folderId)}` : ''}`)
-  getFile = (id: string) => this.request<FileMetadataResponse>(`/v1/files/${id}`)
+    this.request<unknown>(`/v1/files${folderId ? `?folder_id=${encodeURIComponent(folderId)}` : ''}`).then(
+      normalizeFileList,
+    )
+  getFile = (id: string) => this.request<unknown>(`/v1/files/${id}`).then(normalizeFile)
   deleteFile = (id: string) => this.request<void>(`/v1/files/${id}`, { method: 'DELETE' })
   renameFile = (id: string, name: string) =>
-    this.request<FileMetadataResponse>(`/v1/files/${id}`, {
+    this.request<unknown>(`/v1/files/${id}`, {
       method: 'PATCH',
       body: JSON.stringify({ name }),
-    })
+    }).then(normalizeFile)
   moveFile = (id: string, folderId: string | null) =>
-    this.request<FileMetadataResponse>(`/v1/files/${id}/move`, {
+    this.request<unknown>(`/v1/files/${id}/move`, {
       method: 'POST',
       body: JSON.stringify({ folder_id: folderId }),
-    })
-  getFileDownload = (id: string) => this.request<FileDownloadResponse>(`/v1/files/${id}/download`)
+    }).then(normalizeFile)
+  getFileDownload = (id: string) =>
+    this.request<unknown>(`/v1/files/${id}/download`).then(normalizeFileDownload)
   getPresignedUrls = (body: PresignedUrlsRequest) =>
-    this.request<PresignedUrlResponse[]>('/v1/files/urls', { method: 'POST', body: JSON.stringify(body) })
+    this.request<unknown>('/v1/files/urls', { method: 'POST', body: JSON.stringify(body) }).then(
+      normalizePresignedUrls,
+    )
   /** Set whether a file is a favorite (pinned to the favorites view). */
   setFileFavorite = (id: string, isFavorite: boolean) =>
-    this.request<FileMetadataResponse>(`/v1/files/${id}/favorite`, {
+    this.request<unknown>(`/v1/files/${id}/favorite`, {
       method: 'PATCH',
       body: JSON.stringify({ is_favorite: isFavorite } satisfies FavoriteFileRequest),
-    })
+    }).then(normalizeFile)
   /** Paginated list of the user's favorited files. */
   listFavorites = (page = 1, pageSize = 50) =>
-    this.request<FileListResponse>(`/v1/files/favorites?page=${page}&page_size=${pageSize}`)
+    this.request<unknown>(`/v1/files/favorites?page=${page}&page_size=${pageSize}`).then(normalizeFileList)
   /** Delete multiple files and/or folders in one request. */
   batchDelete = (body: BatchDeleteRequest) =>
-    this.request<BatchDeleteResponse>('/v1/files/batch-delete', {
+    this.request<unknown>('/v1/files/batch-delete', {
       method: 'POST',
       body: JSON.stringify(body),
-    })
+    }).then(normalizeBatchDelete)
   /** Move a folder under a new parent (pass null to move to the root). */
   moveFolder = (id: string, parentId: string | null) =>
-    this.request<FolderResponse>(`/v1/files/folders/${id}/move`, {
+    this.request<unknown>(`/v1/files/folders/${id}/move`, {
       method: 'POST',
       body: JSON.stringify({ parent_id: parentId }),
-    })
+    }).then(normalizeFolder)
 
   // ---- Credits ----
-  creditBalance = () => this.request<CreditBalanceResponse>('/v1/credits/balance')
-  creditHistory = () => this.request<CreditTransactionResponse[]>('/v1/credits/history')
+  creditBalance = () => this.request<unknown>('/v1/credits/balance').then(normalizeCreditBalance)
+  creditHistory = () => this.request<unknown>('/v1/credits/history').then(normalizeCreditHistory)
   purchaseCredits = (amount: number) =>
-    this.request<CheckoutResponse>('/v1/credits/purchase', {
+    this.request<unknown>('/v1/credits/purchase', {
       method: 'POST',
       body: JSON.stringify({ amount } satisfies CreditPurchaseRequest),
-    })
-  creditPricing = () => this.request<CreditPricingResponse[]>('/v1/credits/pricing')
-
+    }).then(normalizeCheckout)
+  creditPricing = () => this.request<unknown>('/v1/credits/pricing').then(normalizeCreditPricing)
   // ---- Subscription ----
-  subscriptionPlans = () => this.request<SubscriptionPlanResponse[]>('/v1/subscription/plans')
-  subscriptionStatus = () => this.request<SubscriptionStatusResponse>('/v1/subscription/status')
+  subscriptionPlans = () =>
+    this.request<unknown>('/v1/subscription/plans').then(normalizeSubscriptionPlans)
+  subscriptionStatus = () =>
+    this.request<unknown>('/v1/subscription/status').then(normalizeSubscriptionStatus)
   /** Open a Stripe Customer Portal session for self-service billing management. */
   createPortalSession = () =>
-    this.request<PortalResponse>('/v1/subscription/portal', { method: 'POST' })
+    this.request<unknown>('/v1/subscription/portal', { method: 'POST' }).then(normalizePortal)
   checkout = (tier: string) =>
-    this.request<CheckoutResponse>('/v1/subscription/checkout', {
+    this.request<unknown>('/v1/subscription/checkout', {
       method: 'POST',
       body: JSON.stringify({ tier }),
-    })
+    }).then(normalizeCheckout)
   cancelSubscription = () =>
-    this.request<CancelSubscriptionResponse>('/v1/subscription/cancel', { method: 'POST' })
+    this.request<unknown>('/v1/subscription/cancel', { method: 'POST' }).then(
+      normalizeCancelSubscription,
+    )
 
   // ---- API Keys ----
   createApiKey = (body: APIKeyCreateRequest) =>
-    this.request<APIKeyCreateResponse>('/v1/api-keys', { method: 'POST', body: JSON.stringify(body) })
-  listApiKeys = () => this.request<APIKeyListResponse>('/v1/api-keys')
+    this.request<unknown>('/v1/api-keys', { method: 'POST', body: JSON.stringify(body) }).then(
+      normalizeApiKeyCreate,
+    )
+  listApiKeys = () => this.request<unknown>('/v1/api-keys').then(normalizeApiKeyList)
   deleteApiKey = (id: string) => this.request<void>(`/v1/api-keys/${id}`, { method: 'DELETE' })
 
   /**
