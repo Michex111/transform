@@ -5,6 +5,10 @@ from pathlib import Path
 from typing import Callable, Coroutine, Protocol
 
 from src.infrastructure.logging.loggers import worker_logger
+from src.infrastructure.converters.converter_registry import (
+    ConverterFunction,
+    converter_output_extension,
+)
 from workers.converter_workers.context.worker_context import WorkerContext
 from workers.converter_workers.context.event_context import EventContext
 from workers.converter_workers.retry import retry_on_exception
@@ -256,12 +260,27 @@ async def process_job(context: WorkerContext, job: ConversionJob) -> None:
                 tier = SubscriptionTier.FREE
 
         with tempfile.TemporaryDirectory() as temp_dir:
-            input_file, output_file = resolve_path(job.input_file, job.conversion, Path(temp_dir))
+            work_dir = Path(temp_dir)
+            # The input path only depends on the job's input name, so it can be
+            # resolved before the object is downloaded.
+            input_file = resolve_input_path(job.input_file, work_dir)
 
             # Download the input file (decrypting it first when at-rest
             # encryption is enabled)
             await context.event_port.publish(**event.downloading().to_dict())
             plain_input = await _download_input_file(context, job, input_file)
+
+            # Resolve the output name now that the input is on disk: a converter
+            # may declare a container extension derived from the input (e.g.
+            # pdf -> png zips the page images of a multi-page PDF).
+            converter = context.converter_registry.get_converter(job.conversion)
+            output_file = resolve_output_path(
+                job.input_file,
+                job.conversion,
+                work_dir,
+                converter=converter,
+                input_path=plain_input,
+            )
 
             # Perform the conversion — measure actual compute time
             await context.event_port.publish(**event.processing().to_dict())
@@ -353,26 +372,58 @@ def _safe_filename(name: str) -> str:
     return name[:_MAX_FILENAME_LEN]
 
 
+def resolve_input_path(file_location: str, directory: Path) -> Path:
+    """Path the job's input object is downloaded to inside ``directory``."""
+    file_name = _safe_filename(Path(file_location).name)
+
+    downloads = directory / "downloads"
+    downloads.mkdir(parents=True, exist_ok=True)
+
+    return downloads / file_name
+
+
+def resolve_output_path(
+    file_location: str,
+    conversion: ConversionType,
+    directory: Path,
+    *,
+    converter: ConverterFunction | None = None,
+    input_path: str | Path | None = None,
+) -> Path:
+    """Path the converted file is written to (and uploaded from).
+
+    The extension is the conversion's target format unless the converter
+    declares otherwise via its ``output_extension`` hook — used by converters
+    that emit a container, e.g. ``pdf -> png`` zips the page images of a
+    multi-page PDF. The hook may need the input on disk, so callers that have
+    already downloaded the object should pass ``input_path``.
+    """
+    file_name = _safe_filename(Path(file_location).name)
+    safe_stem = _safe_filename(Path(file_name).stem)
+
+    extension = converter_output_extension(
+        converter,
+        conversion.target_format,
+        None if input_path is None else str(input_path),
+    )
+
+    uploads = directory / "uploads"
+    uploads.mkdir(parents=True, exist_ok=True)
+
+    return uploads / f"{safe_stem}.{extension}"
+
+
 def resolve_path(
     file_location: str,
     conversion: ConversionType,
     directory: Path,
 ) -> tuple[Path, Path]:
-    file_name = _safe_filename(Path(file_location).name)
-    safe_stem = _safe_filename(Path(file_name).stem)
+    """Default (hook-free) input/output paths for a job inside ``directory``."""
+    return (
+        resolve_input_path(file_location, directory),
+        resolve_output_path(file_location, conversion, directory),
+    )
 
-    output_name = safe_stem + f".{conversion.target_format}"
-
-    downloads = directory / "downloads"
-    uploads = directory / "uploads"
-
-    downloads.mkdir(parents=True, exist_ok=True)
-    uploads.mkdir(parents=True, exist_ok=True)
-
-    input_file = downloads / file_name
-    output_file = uploads / output_name
-
-    return input_file, output_file
 
 
 

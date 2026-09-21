@@ -68,6 +68,47 @@ describe("resolveServerPath", () => {
   });
 });
 
+describe("jobOutputFilename", () => {
+  it("names the download after the produced object's extension", async () => {
+    const { jobOutputFilename } = await loadClient();
+    // A multi-page pdf -> png job is delivered as a zip of page images.
+    expect(
+      jobOutputFilename({
+        input_file: "uploads/report.pdf",
+        target_format: "png",
+        output_file: "output/user/1/job/job-1/report.zip",
+      }),
+    ).toBe("report.zip");
+  });
+
+  it("falls back to the target format when no output key is stored yet", async () => {
+    const { jobOutputFilename } = await loadClient();
+    expect(
+      jobOutputFilename({
+        input_file: "uploads/report.pdf",
+        target_format: "png",
+        output_file: null,
+      }),
+    ).toBe("report.png");
+  });
+
+  it("keeps a plain target-format output name", async () => {
+    const { jobOutputFilename } = await loadClient();
+    expect(
+      jobOutputFilename({
+        input_file: "uploads/report.pdf",
+        target_format: "jpg",
+        output_file: "output/user/1/job/job-1/report.jpg",
+      }),
+    ).toBe("report.jpg");
+  });
+
+  it("defaults the stem when the input path is unknown", async () => {
+    const { jobOutputFilename } = await loadClient();
+    expect(jobOutputFilename({ input_file: null, target_format: "png" })).toBe("converted.png");
+  });
+});
+
 describe("cross-origin request URLs", () => {
   it("builds the guest SSE URL against the absolute API origin", async () => {
     const fetchMock = vi.fn().mockResolvedValue({ ok: false, status: 500, body: null });

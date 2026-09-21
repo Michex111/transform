@@ -7,6 +7,7 @@ import { Modal } from "@/components/Modal";
 import { Button, FormatChip } from "@/components/ui";
 import { FormatIcon } from "@/components/FormatPicker";
 import { formatMeta } from "@/lib/format";
+import { useConversionMap } from "@/lib/useConversionMap";
 import { motion, AnimatePresence } from "motion/react";
 import type { FileMetadataResponse } from "@/api/types";
 
@@ -35,30 +36,24 @@ export function FilesMassConvertModal({
   const { api: client } = useAuth();
   const { addJob } = useJobs();
   const { success, error } = useToast();
-  const [conversionMap, setConversionMap] = useState<Record<string, string[]>>({});
   const [target, setTarget] = useState("");
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState<{ ok: number; failed: number } | null>(null);
 
   const source = sourceFormat.toLowerCase();
+  // Valid targets come from the shared, cached conversion map; `enabled` keeps a
+  // closed modal from requesting it at all.
+  const { targetsFor } = useConversionMap({ enabled: open });
   const allowedTargets = useMemo(
-    () => (conversionMap[source] ?? []).map((t) => t.toLowerCase()),
-    [conversionMap, source],
+    () => targetsFor(source).map((t) => t.toLowerCase()),
+    [targetsFor, source],
   );
 
   useEffect(() => {
     if (!open) return;
-    let active = true;
     setTarget("");
     setDone(null);
-    client
-      .conversionMap()
-      .then((res) => active && setConversionMap(res.conversions))
-      .catch(() => active && setConversionMap({}));
-    return () => {
-      active = false;
-    };
-  }, [open, client]);
+  }, [open]);
 
   useEffect(() => {
     if (!target && allowedTargets.length) setTarget(allowedTargets[0]);

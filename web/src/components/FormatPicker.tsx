@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import { MagnifyingGlass, CaretDown, CaretRight, Check } from "@phosphor-icons/react";
 import { FORMAT_CATEGORIES, type FormatDef } from "@/lib/formatCatalog";
+import { isPickableFormat, restrictFormatCategories } from "@/lib/formatPickerOptions";
 
 interface FormatPickerProps {
   /** Currently selected format extension, e.g. "pdf". */
@@ -13,8 +14,17 @@ interface FormatPickerProps {
   /** Optional label/aria for the trigger. */
   ariaLabel?: string;
   align?: "left" | "right";
-  /** If provided, only these extensions may be picked (valid target formats). */
+  /**
+   * Valid extension extensions for this picker. When provided, ONLY these may
+   * be picked. An empty list means there is nothing valid to offer yet (the
+   * backend graph has not arrived), so the picker offers nothing rather than
+   * falling back to the entire static catalogue — that fallback used to let
+   * users select pairs the server rejects. Omit to leave the picker
+   * unrestricted.
+   */
   allowed?: string[];
+  /** True while `allowed` is still being resolved, for a friendlier empty state. */
+  pending?: boolean;
 }
 
 /** A rich format picker — a popover with a category sidebar, a search box,
@@ -26,6 +36,7 @@ export function FormatPicker({
   ariaLabel = "Choose format",
   align = "left",
   allowed,
+  pending = false,
 }: FormatPickerProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
@@ -33,14 +44,16 @@ export function FormatPicker({
   const rootRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
 
-  // Restrict visible categories to those containing an allowed format.
-  const allowedSet = useMemo(() => new Set((allowed ?? []).map((a) => a.toLowerCase())), [allowed]);
-  const restrictedCategories = useMemo(() => {
-    if (!allowedSet.size) return categories;
-    return categories
-      .map((cat) => ({ ...cat, formats: cat.formats.filter((f) => allowedSet.has(f.ext)) }))
-      .filter((cat) => cat.formats.length > 0);
-  }, [categories, allowedSet]);
+  // Restrict visible categories to those containing an allowed format. An
+  // `undefined` allowed list leaves the picker unrestricted; an explicitly empty
+  // one restricts it to nothing, so the popover offers no formats at all.
+  const restrictedCategories = useMemo(
+    () => restrictFormatCategories(allowed, categories),
+    [allowed, categories],
+  );
+
+  // Whether the picker has anything it could legitimately offer.
+  const hasOptions = restrictedCategories.length > 0;
 
   // Close when clicking outside.
   useEffect(() => {
@@ -74,7 +87,7 @@ export function FormatPicker({
   const selected = getSelectedLabel(value);
 
   // If the currently selected value is no longer allowed, disable the trigger.
-  const isAllowed = !allowedSet.size || allowedSet.has(value.toLowerCase());
+  const isAllowed = isPickableFormat(allowed, value);
 
   function pick(ext: string) {
     onChange(ext);
@@ -91,7 +104,17 @@ export function FormatPicker({
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-disabled={!isAllowed}
-        className="flex w-28 flex-col items-center gap-2 rounded-xl border border-outline bg-surface px-3 py-4 text-sm font-semibold text-on-background transition-colors hover:border-primary/50 focus:border-primary focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+        aria-busy={pending}
+        title={
+          !isAllowed
+            ? pending
+              ? "Loading the supported formats…"
+              : "No supported format is available for this conversion."
+            : undefined
+        }
+        className={`flex w-28 flex-col items-center gap-2 rounded-xl border border-outline bg-surface px-3 py-4 text-sm font-semibold text-on-background transition-colors hover:border-primary/50 focus:border-primary focus:outline-none disabled:cursor-not-allowed disabled:opacity-50 ${
+          isAllowed ? "" : "cursor-not-allowed opacity-50"
+        }`}
       >
         <FormatIcon ext={value} />
         <span className="uppercase">{selected}</span>
@@ -109,72 +132,84 @@ export function FormatPicker({
               align === "right" ? "right-0" : "left-0"
             }`}
           >
-            {/* Category sidebar */}
-            <div className="flex w-40 shrink-0 flex-col border-r border-outline">
-              <div className="border-b border-outline p-2">
-                <div className="flex items-center gap-2 rounded-lg bg-surface-variant px-2 py-1.5">
-                  <MagnifyingGlass size={14} className="text-muted" />
-                  <input
-                    ref={searchRef}
-                    value={query}
-                    onChange={(e) => setQuery(e.target.value)}
-                    placeholder="Search Format"
-                    className="w-full bg-transparent text-sm text-on-background placeholder:text-muted focus:outline-none"
-                    aria-label="Search format"
-                  />
+            {!hasOptions ? (
+              // Nothing may legitimately be picked (the conversion graph has not
+              // arrived, or this format converts to nothing). Showing the full
+              // catalogue here would offer formats the server would reject, so
+              // say why the list is empty instead.
+              <p className="flex-1 p-8 text-center text-sm text-muted" role="status">
+                {pending ? "Loading supported formats…" : "No supported formats available."}
+              </p>
+            ) : (
+              <>
+                {/* Category sidebar */}
+                <div className="flex w-40 shrink-0 flex-col border-r border-outline">
+                  <div className="border-b border-outline p-2">
+                    <div className="flex items-center gap-2 rounded-lg bg-surface-variant px-2 py-1.5">
+                      <MagnifyingGlass size={14} className="text-muted" />
+                      <input
+                        ref={searchRef}
+                        value={query}
+                        onChange={(e) => setQuery(e.target.value)}
+                        placeholder="Search Format"
+                        className="w-full bg-transparent text-sm text-on-background placeholder:text-muted focus:outline-none"
+                        aria-label="Search format"
+                      />
+                    </div>
+                  </div>
+                  <nav className="flex-1 overflow-y-auto py-1" aria-label="Format categories">
+                    {restrictedCategories.map((cat) => (
+                      <button
+                        key={cat.id}
+                        onClick={() => {
+                          setActiveCat(cat.id);
+                          setQuery("");
+                        }}
+                        className={`flex w-full items-center justify-between px-3 py-2 text-left text-sm transition-colors ${
+                          cat.id === activeCategory?.id && !query
+                            ? "bg-primary-container text-on-primary-container"
+                            : "text-muted hover:bg-surface-variant hover:text-on-background"
+                        }`}
+                      >
+                        {cat.name}
+                        <CaretRight size={12} className="opacity-60" />
+                      </button>
+                    ))}
+                  </nav>
                 </div>
-              </div>
-              <nav className="flex-1 overflow-y-auto py-1" aria-label="Format categories">
-                {restrictedCategories.map((cat) => (
-                  <button
-                    key={cat.id}
-                    onClick={() => {
-                      setActiveCat(cat.id);
-                      setQuery("");
-                    }}
-                    className={`flex w-full items-center justify-between px-3 py-2 text-left text-sm transition-colors ${
-                      cat.id === activeCategory?.id && !query
-                        ? "bg-primary-container text-on-primary-container"
-                        : "text-muted hover:bg-surface-variant hover:text-on-background"
-                    }`}
-                  >
-                    {cat.name}
-                    <CaretRight size={12} className="opacity-60" />
-                  </button>
-                ))}
-              </nav>
-            </div>
 
-            {/* Format grid */}
-            <div className="flex-1 overflow-y-auto p-3">
-              <div className="grid grid-cols-3 gap-1.5">
-                {visibleFormats.map((f) => {
-                  const isSel = f.ext === value;
-                  return (
-                    <button
-                      key={f.ext}
-                      onClick={() => pick(f.ext)}
-                      aria-selected={isSel}
-                      className={`relative flex h-9 items-center justify-center rounded border font-mono text-xs font-semibold transition-colors ${
-                        isSel
-                          ? "border-primary bg-primary-container text-on-primary-container"
-                          : "border-outline bg-surface-variant/40 text-on-background hover:border-primary/50"
-                      }`}
-                    >
-                      {f.label}
-                      {isSel && (
-                        <span className="absolute right-1 top-1 text-primary">
-                          <Check size={10} weight="bold" />
-                        </span>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-              {visibleFormats.length === 0 && (
-                <p className="py-8 text-center text-sm text-muted">No formats found.</p>
-              )}
-            </div>
+                {/* Format grid */}
+                <div className="flex-1 overflow-y-auto p-3">
+                  <div className="grid grid-cols-3 gap-1.5">
+                    {visibleFormats.map((f) => {
+                      const isSel = f.ext === value;
+                      return (
+                        <button
+                          key={f.ext}
+                          onClick={() => pick(f.ext)}
+                          aria-selected={isSel}
+                          className={`relative flex h-9 items-center justify-center rounded border font-mono text-xs font-semibold transition-colors ${
+                            isSel
+                              ? "border-primary bg-primary-container text-on-primary-container"
+                              : "border-outline bg-surface-variant/40 text-on-background hover:border-primary/50"
+                          }`}
+                        >
+                          {f.label}
+                          {isSel && (
+                            <span className="absolute right-1 top-1 text-primary">
+                              <Check size={10} weight="bold" />
+                            </span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                  {visibleFormats.length === 0 && (
+                    <p className="py-8 text-center text-sm text-muted">No formats found.</p>
+                  )}
+                </div>
+              </>
+            )}
           </motion.div>
         )}
       </AnimatePresence>
