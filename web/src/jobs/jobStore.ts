@@ -84,6 +84,42 @@ export function removeStoredJobs(
   }
 }
 
+/** Anything carrying a status, so these predicates accept jobs and server rows. */
+interface StatusBearing {
+  status: string;
+}
+
+/**
+ * True while a conversion is still in progress — i.e. it belongs in the Queue.
+ *
+ * The Queue is a *live* view of work in flight. A finished conversion leaves it
+ * and is reported by History instead, which is where its outcome (and its token
+ * cost) is shown. `AWAITING_UPLOAD` counts as active: the job exists and is
+ * waiting on its input, so it must not vanish from the queue.
+ */
+export function isActiveJob(job: StatusBearing): boolean {
+  return IN_FLIGHT_STATUSES.has(job.status);
+}
+
+/** The still-in-progress subset of `jobs`, order preserved. */
+export function activeJobs<T extends StatusBearing>(jobs: readonly T[]): T[] {
+  return jobs.filter(isActiveJob);
+}
+
+/**
+ * Whether a job should display its token (credit) cost.
+ *
+ * Tokens are charged only for a *successful* conversion — the worker deducts
+ * them after the output is uploaded — so a failed or in-flight job has nothing
+ * to report. Single source of truth for the Queue and History tables, which
+ * previously duplicated (and so could drift on) this rule.
+ */
+export function showsCreditsUsed(
+  job: StatusBearing & { credits_used?: number | null },
+): boolean {
+  return job.status === "COMPLETED" && (job.credits_used ?? 0) > 0;
+}
+
 /**
  * Reconcile the on-screen list against the server's history for this identity.
  *
