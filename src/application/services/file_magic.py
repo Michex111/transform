@@ -46,15 +46,35 @@ _SIGNATURES: list[_Sig] = [
     _Sig((b"<",), "xml"),  # html/xml; lenient
 ]
 
+# ISO base media file format brands, read from offset 8. mp4, mov, avif and
+# heic all share the ``....ftyp`` header, so the brand is the only thing that
+# distinguishes them; without it an AVIF image was reported as ``mp4`` and
+# rejected as a type mismatch on upload.
+_ISO_BMFF_BRANDS = {
+    b"avif": "avif",
+    b"avis": "avif",  # AVIF image sequence
+    b"heic": "heic",
+    b"heix": "heic",
+    b"hevc": "heic",
+    b"hevx": "heic",
+    b"mif1": "heic",
+    b"msf1": "heic",
+}
+
 # Extensions whose signature is too variable to sanity-check cheaply (e.g.
-# LibreOffice text/document formats, fonts). These are allowed without a magic
-# check. Formats with a strong, distinct magic signature (pdf/png/jpeg/gif/zip)
-# are deliberately NOT here so extension-spoofing is caught.
+# LibreOffice text/document formats, fonts) or inherently ambiguous (markup).
+# These are allowed without a magic check. Formats with a strong, distinct magic
+# signature (pdf/png/jpeg/gif/zip) are deliberately NOT here so
+# extension-spoofing is caught.
 _LENIENT_EXTENSIONS = {
     "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp",
     "rtf", "txt", "md", "html", "csv", "xml", "json", "epub", "mobi", "azw3",
     "ttf", "woff", "woff2", "otf", "eot",  # fonts
     "tar", "bz2", "xz", "m4a", "aac", "avi", "mkv",
+    # SVG is XML; its leading bytes are just "<svg"/"<?xml", which is the same
+    # weak signal a generic .xml/.html file gives. Rejecting on it made every
+    # SVG upload fail with a misleading "content does not match" error.
+    "svg",
 }
 
 
@@ -70,9 +90,9 @@ def detect_type(head: bytes) -> str | None:
         for prefix in sig.prefixes:
             if head.startswith(prefix):
                 return sig.label
-    # ISO BMFF (mp4/mov) has "ftyp" at offset 4.
+    # ISO BMFF (mp4/mov/avif/heic) carries its brand at offset 8.
     if len(head) >= 12 and head[4:8] == b"ftyp":
-        return "mp4"
+        return _ISO_BMFF_BRANDS.get(head[8:12], "mp4")
     return None
 
 
@@ -103,6 +123,8 @@ def validate_upload_signature(head: bytes, extension: str) -> bool:
         "webm": {"webm"},
         "wav": {"wav"},
         "webp": {"webp"},
+        "avif": {"avif"},
+        "heic": {"heic", "heif"},
         "mp3": {"mp3"},
         "zip": {"zip"},
         "gz": {"gz"},
