@@ -1,0 +1,121 @@
+/**
+ * Pure, DOM-free state helpers behind the conversion job store
+ * (`JobsContext`).
+ *
+ * These live apart from the React provider because they encode the rules that
+ * decide *whose* conversions the UI may show. Keeping them pure makes those
+ * rules unit-testable without a browser — they previously could not be tested,
+ * which is how a cross-account leak shipped.
+ */
+
+import type { ConversionJobResponse } from "@/api/types";
+
+/** A client-side job with upload/progress augmentation. */
+export interface UiJob extends ConversionJobResponse {
+  fileName?: string;
+  progress?: number;
+  createdAt?: string;
+  /** Error message from the SSE stream for failed conversions. */
+  errorMessage?: string;
+}
+
+/** Base key. Every cache entry is suffixed with the identity that owns it. */
+export const JOBS_STORAGE_KEY = "transform_jobs";
+
+/**
+ * The pre-scoping key. It held whichever account used the browser last, so its
+ * owner is unknown and it is discarded rather than adopted.
+ */
+export const LEGACY_JOBS_STORAGE_KEY = JOBS_STORAGE_KEY;
+
+/** Statuses that mean a job is still running (so may not be in history yet). */
+export const IN_FLIGHT_STATUSES: ReadonlySet<string> = new Set([
+  "PENDING",
+  "PROCESSING",
+  "AWAITING_UPLOAD",
+]);
+
+/** Minimal storage surface, so callers/tests can inject a double. */
+export interface KeyValueStore {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+  removeItem(key: string): void;
+}
+
+/**
+ * The `localStorage` key holding exactly one identity's job cache.
+ *
+ * Scoping by identity is what stops a brand-new account from opening onto the
+ * previous account's queue and history on a shared browser.
+ */
+export function storageKeyFor(
+  userId: number | null,
+  baseKey: string = JOBS_STORAGE_KEY,
+): string {
+  return `${baseKey}:${userId ?? "anon"}`;
+}
+
+/** Read one identity's cached jobs, tolerating missing/corrupt data. */
+export function readStoredJobs(
+  userId: number | null,
+  store: KeyValueStore,
+  baseKey: string = JOBS_STORAGE_KEY,
+): UiJob[] {
+  try {
+    const raw = store.getItem(storageKeyFor(userId, baseKey));
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as UiJob[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Drop one identity's cache, so it cannot outlive its session. */
+export function removeStoredJobs(
+  userId: number | null,
+  store: KeyValueStore,
+  baseKey: string = JOBS_STORAGE_KEY,
+): void {
+  try {
+    store.removeItem(storageKeyFor(userId, baseKey));
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * Reconcile the on-screen list against the server's history for this identity.
+ *
+ * The server is authoritative, so anything it does not return is dropped —
+ * including a leftover in-flight row that belonged to a previously signed-in
+ * account (merging unconditionally was what let such a row survive every
+ * refresh and sit in the queue forever). The single exception is a job started
+ * during *this* session and still in flight: it may be too new to appear in the
+ * response yet, so it is kept along with its live progress, which is ahead of
+ * the server's copy.
+ */
+export function reconcileJobs(
+  previous: UiJob[],
+  serverJobs: ConversionJobResponse[],
+  sessionJobIds: ReadonlySet<string>,
+): UiJob[] {
+  const inFlight = new Map(
+    previous
+      .filter((job) => sessionJobIds.has(job.job_id) && IN_FLIGHT_STATUSES.has(job.status))
+      .map((job) => [job.job_id, job] as const),
+  );
+
+  const reconciled = serverJobs.map((job) => {
+    const local = inFlight.get(job.job_id);
+    return local
+      ? { ...local, ...job, progress: local.progress }
+      : { ...job, errorMessage: job.error_message ?? undefined };
+  });
+
+  const serverIds = new Set(serverJobs.map((job) => job.job_id));
+  const notYetIndexed = [...inFlight.values()].filter((job) => !serverIds.has(job.job_id));
+
+  // Jobs too new for the server's list first; the rest newest-first, as returned.
+  return [...notYetIndexed, ...reconciled];
+}

@@ -8,18 +8,18 @@ import {
   type ReactNode,
 } from "react";
 import { api } from "@/api/client";
-import type { ConversionJobResponse } from "@/api/types";
+import { useAuth } from "@/auth/AuthContext";
+import {
+  LEGACY_JOBS_STORAGE_KEY,
+  readStoredJobs,
+  reconcileJobs,
+  removeStoredJobs,
+  storageKeyFor,
+  type UiJob,
+} from "@/jobs/jobStore";
 
-/** A client-side job with upload/progress augmentation. */
-export interface UiJob extends ConversionJobResponse {
-  fileName?: string;
-  progress?: number;
-  createdAt?: string;
-  /** Error message from the SSE stream for failed conversions. */
-  errorMessage?: string;
-}
-
-const STORAGE_KEY = "transform_jobs";
+// Re-exported for the pages that render jobs (`HistoryPage`, `QueuePage`).
+export type { UiJob };
 
 interface JobsContextValue {
   jobs: UiJob[];
@@ -31,24 +31,60 @@ interface JobsContextValue {
 
 const JobsContext = createContext<JobsContextValue | undefined>(undefined);
 
+/**
+ * Provides the client-side conversion job list (queue + history).
+ *
+ * The store is scoped to the signed-in identity and is remounted whenever that
+ * identity changes, so one account's conversions can never appear in another's
+ * session. It previously read and wrote a single unscoped `localStorage` entry
+ * that was never cleared on sign-out, so creating a brand-new account in the
+ * same browser opened onto the previous account's queue and history.
+ */
 export function JobsProvider({ children }: { children: ReactNode }) {
-  const [jobs, setJobs] = useState<UiJob[]>(() => {
+  const { user } = useAuth();
+  const userId = user?.id ?? null;
+  const previousId = useRef<number | null | undefined>(undefined);
+
+  // One-time migration: drop the unscoped cache instead of adopting it.
+  useEffect(() => {
     try {
-      return JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]") as UiJob[];
+      localStorage.removeItem(LEGACY_JOBS_STORAGE_KEY);
     } catch {
-      return [];
+      /* ignore */
     }
-  });
+  }, []);
+
+  // Once an identity is gone, discard its cache so a shared browser does not
+  // retain one account's history for the next one to sign in.
+  useEffect(() => {
+    const previous = previousId.current;
+    previousId.current = userId;
+    if (previous === undefined || previous === userId) return;
+    if (previous !== null) removeStoredJobs(previous, localStorage);
+  }, [userId]);
+
+  return (
+    <JobsStore key={userId ?? "anon"} userId={userId}>
+      {children}
+    </JobsStore>
+  );
+}
+
+function JobsStore({ userId, children }: { userId: number | null; children: ReactNode }) {
+  const [jobs, setJobs] = useState<UiJob[]>(() => readStoredJobs(userId, localStorage));
   const subs = useRef<Map<string, () => void>>(new Map());
+  // Jobs started during this session. Only these may outlive a server refresh
+  // while still in flight; anything else on screen is stale by definition.
+  const sessionJobIds = useRef<Set<string>>(new Set());
 
   // Persist to localStorage whenever jobs change.
   useEffect(() => {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(jobs));
+      localStorage.setItem(storageKeyFor(userId), JSON.stringify(jobs));
     } catch {
       /* ignore quota */
     }
-  }, [jobs]);
+  }, [jobs, userId]);
 
   // Stable primitive key derived from the *set* of active job ids, so the
   // subscription effect only re-runs when the active set changes — not on every
@@ -102,13 +138,26 @@ export function JobsProvider({ children }: { children: ReactNode }) {
       });
       subs.current.set(id, cleanup);
     }
-    // No teardown here: subscriptions self-terminate via `onDone` (the server
-    // closes the stream), and the provider only unmounts at the app level.
-    // Keying on `activeKey` means SSE ticks (which change `jobs` but not the
-    // active set) no longer tear down/recreate every subscription.
+    // No teardown *here*: subscriptions self-terminate via `onDone` (the server
+    // closes the stream). Keying on `activeKey` means SSE ticks (which change
+    // `jobs` but not the active set) no longer tear down/recreate every
+    // subscription. Unmount teardown is handled by the effect below.
   }, [activeKey]);
 
+  // This store is remounted whenever the signed-in identity changes, so it can
+  // unmount while streams are still open. Close them, otherwise the previous
+  // account's subscriptions linger and keep pushing their events into a store
+  // that no longer belongs to them.
+  useEffect(() => {
+    const openSubscriptions = subs.current;
+    return () => {
+      for (const cleanup of openSubscriptions.values()) cleanup();
+      openSubscriptions.clear();
+    };
+  }, []);
+
   const addJob = useCallback((job: UiJob) => {
+    sessionJobIds.current.add(job.job_id);
     setJobs((prev) => [{ ...job, createdAt: job.createdAt ?? new Date().toISOString() }, ...prev]);
   }, []);
 
@@ -125,29 +174,9 @@ export function JobsProvider({ children }: { children: ReactNode }) {
   const refresh = useCallback(async (range?: string) => {
     try {
       const { jobs: serverJobs } = await api.conversionHistory(1, 100, range);
-      // Merge server history with any local in-flight job progress, so active
-      // jobs keep their progress/errorMessage until the server catches up.
-      setJobs((prev) => {
-        const localActive = prev.filter(
-          (j) => j.status === "PENDING" || j.status === "PROCESSING" || j.status === "AWAITING_UPLOAD",
-        );
-        const merged = [...localActive];
-        for (const s of serverJobs) {
-          const existing = localActive.find((l) => l.job_id === s.job_id);
-          merged.push(
-            existing
-              ? { ...existing, ...s, progress: existing.progress }
-              : { ...s, errorMessage: s.error_message ?? undefined },
-          );
-        }
-        // Deduplicate by job_id, newest-first as returned by the server.
-        const seen = new Set<string>();
-        return merged.filter((j) => {
-          if (seen.has(j.job_id)) return false;
-          seen.add(j.job_id);
-          return true;
-        });
-      });
+      // The server is authoritative for this identity: reconcile against it so
+      // another account's leftovers cannot survive a refresh. See `reconcileJobs`.
+      setJobs((prev) => reconcileJobs(prev, serverJobs, sessionJobIds.current));
     } catch {
       // History endpoint unavailable — keep current local state.
       setJobs((prev) => [...prev]);
