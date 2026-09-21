@@ -76,7 +76,7 @@ Implementation: `src/application/services/api_key_service.py`,
 | **Expiry** | Optional `expires_in_days` (default 30); `is_valid()` checks status + expiry. |
 | **Revocation** | `revoke(key_id, user_id)` marks the status `REVOKED` and checks the key is owned by `user_id` (`int(api_key.user_id) != user_id → None`). |
 | **Deletion** | `delete(key_id, user_id)` permanently removes an owned key. |
-| **Last-used** | `touch_last_used` updates `last_used_at` on each successful authenticate. |
+| **Last-used** | `touch_last_used` updates `last_used_at` on a successful authenticate, coalesced to at most once per 5 minutes (`_last_used_is_stale`) so a hot API key does not force a row update on every request. |
 
 - **Keys are never stored in plaintext** (A.5.17). The `tr_` prefix allows
   recognition without reveal. The prefix is also exposed in list responses

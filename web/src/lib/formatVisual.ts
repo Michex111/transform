@@ -285,10 +285,11 @@ export function formatVisual(ext: string): FormatVisual {
 /**
  * Build a translucent version of a format color.
  *
- * NOTE: appending an alpha hex suffix to a `var(--token)` color (the pattern
- * used elsewhere in the codebase, e.g. `${color}1a`) is a no-op in CSS — the
- * resulting declaration is invalid at computed-value time and gets dropped.
- * `color-mix()` produces a real alpha color instead.
+ * NOTE: appending an alpha hex suffix to a `var(--token)` color (e.g.
+ * `${color}1a`) is a no-op in CSS — the resulting declaration is invalid at
+ * computed-value time and gets dropped, which silently removed the tint from the
+ * status badges and format tiles before they used this helper. `color-mix()`
+ * produces a real alpha color instead.
  */
 export function formatTint(color: string, percent: number, mixWith = "transparent"): string {
   return `color-mix(in srgb, ${color} ${percent}%, ${mixWith})`;

@@ -8,8 +8,6 @@ windows and limits.
 import time
 from typing import Protocol
 
-from src.infrastructure.config.settings import get_settings
-
 
 class RateLimiterPort(Protocol):
     """Protocol for rate limiting implementations."""
@@ -63,16 +61,3 @@ class RedisRateLimiter:
 
         current_count = results[2]  # zcard result (after adding this request)
         return max(0, limit - current_count)
-
-
-def get_tier_rate_limit(tier: str) -> int:
-    """Get the rate limit for a given subscription tier."""
-    settings = get_settings()
-    tier_limits = {
-        "guest": settings.RATE_LIMIT_GUEST,
-        "free": settings.RATE_LIMIT_FREE,
-        "pro": settings.RATE_LIMIT_PRO,
-        "pro_plus": settings.RATE_LIMIT_PRO_PLUS,
-        "enterprise": settings.RATE_LIMIT_ENTERPRISE,
-    }
-    return tier_limits.get(tier.lower(), settings.RATE_LIMIT_FREE)

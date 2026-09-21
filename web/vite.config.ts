@@ -22,6 +22,11 @@ export default defineConfig({
         target: "http://localhost:8000",
         changeOrigin: true,
       },
+      // The API also serves its OpenAPI docs and health probes at its *root*
+      // (`/docs`, `/health`), which the Support page links to. Forward those too,
+      // otherwise they would be served by the SPA router (an empty page).
+      "/docs": { target: "http://localhost:8000", changeOrigin: true },
+      "/health": { target: "http://localhost:8000", changeOrigin: true },
     },
   },
   test: {

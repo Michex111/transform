@@ -4,7 +4,7 @@ from src.infrastructure.database.models import ConversionJobModel
 from src.domain.conversions.entities.conversion_job import ConversionJob
 from src.domain.conversions.value_object.conversion_type import ConversionType
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 class SQLConversionJobRepository:
@@ -59,6 +59,36 @@ class SQLConversionJobRepository:
         )
         await self.session.execute(stmt)
         await self.session.commit()
+
+    async def list_owned_object_keys(self, user_id: int, object_keys: list[str]) -> set[str]:
+        """Return the subset of ``object_keys`` owned by ``user_id``.
+
+        A key counts as owned when it is the job's input ``object_key`` or its
+        ``output_file``. One query instead of a probe per key; used to
+        authorise presigned-URL requests without leaking other tenants' objects.
+        """
+        unique_keys = list(dict.fromkeys(object_keys))
+        if not unique_keys:
+            return set()
+        stmt = select(
+            ConversionJobModel.object_key,
+            ConversionJobModel.output_file,
+        ).where(
+            ConversionJobModel.user_id == user_id,
+            or_(
+                ConversionJobModel.object_key.in_(unique_keys),
+                ConversionJobModel.output_file.in_(unique_keys),
+            ),
+        )
+        result = await self.session.execute(stmt)
+        owned: set[str] = set()
+        wanted = set(unique_keys)
+        for object_key, output_file in result.all():
+            if object_key in wanted:
+                owned.add(object_key)
+            if output_file in wanted:
+                owned.add(output_file)
+        return owned
 
     async def get_conversion_job(self, job_id: str) -> ConversionJob | None:
         """

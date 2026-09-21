@@ -7,7 +7,7 @@
 
 import { describe, expect, it } from "vitest";
 import { renderToString } from "react-dom/server";
-import { FormatPicker } from "@/components/FormatPicker";
+import { FormatIcon, FormatPicker } from "@/components/FormatPicker";
 
 function renderPicker(props: Parameters<typeof FormatPicker>[0]) {
   return renderToString(<FormatPicker {...props} />);
@@ -41,5 +41,32 @@ describe("FormatPicker trigger", () => {
   it("is disabled when the current value is not allowed", () => {
     const html = renderPicker({ value: "pdf", onChange: () => {}, allowed: ["png", "jpg"] });
     expect(html).toContain('aria-disabled="true"');
+  });
+
+  it("does not claim a listbox it does not implement", () => {
+    // The popover is a 3-column grid of toggle buttons (plus a category sidebar
+    // and a search box), not a linear listbox, and it has no arrow-key model —
+    // so the trigger must not advertise `aria-haspopup="listbox"`.
+    const html = renderPicker({ value: "pdf", onChange: () => {} });
+    expect(html).not.toContain("aria-haspopup");
+    // The popup's open state is still conveyed.
+    expect(html).toContain('aria-expanded="false"');
+  });
+});
+
+describe("FormatIcon", () => {
+  it("tints its tile with a real, computed colour", () => {
+    // `${color}1a` / `${color}40` on a `var(--token)` colour is invalid CSS and
+    // was dropped, leaving the tile untinted.
+    const html = renderToString(<FormatIcon ext="pdf" />);
+    expect(html).toContain("color-mix(");
+    expect(html).not.toContain("var(--color-fmt-pdf)1a");
+    expect(html).not.toContain("1px solid var(--color-fmt-pdf)40");
+  });
+
+  it("resolves a format case-insensitively, like every other helper", () => {
+    expect(renderToString(<FormatIcon ext="PDF" />)).toBe(
+      renderToString(<FormatIcon ext="pdf" />),
+    );
   });
 });

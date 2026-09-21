@@ -12,6 +12,7 @@ from src.application.services.conversion_service import ConversionService
 from src.application.services.file_service import FileService
 from src.application.services.file_transfer_service import TransferService
 from src.presentation.api.dependencies.auth_dependencies import CurrentUser
+from src.presentation.api.dependencies.job_access import assert_job_owner
 from src.presentation.api.dependencies.service_dependencies import (
 	get_conversion_service,
 	get_file_service,
@@ -81,7 +82,11 @@ async def verify_upload_session(
 		if job_id is None:
 			return session
 		job = await conversion_service.get_conversion_job(job_id)
-		if job:
+		if job is not None:
+			# The job must belong to the caller: without this check any
+			# authenticated user could re-point and re-enqueue another user's
+			# (or an ownerless guest) job via the job_id query param.
+			assert_job_owner(job, current_user.id)
 			# Point the job at the object key that was actually uploaded so the
 			# worker reads the correct file.
 			job.object_key = session.object_key

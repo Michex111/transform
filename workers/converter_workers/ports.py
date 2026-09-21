@@ -67,4 +67,12 @@ class JobRepositoryPort(Protocol):
 
     async def update_conversion_job(self, job: ConversionJob) -> None: ...
 
+    async def get_conversion_job(self, job_id: str) -> ConversionJob | None:
+        """Read the persisted row for a job.
+
+        Used by the processor's idempotency guard before it converts anything,
+        so a redelivered job cannot be converted — and charged — twice.
+        """
+        ...
+
     

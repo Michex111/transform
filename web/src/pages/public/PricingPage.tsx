@@ -47,8 +47,6 @@ export function PricingPage() {
     }
   }
 
-  const list = plans;
-
   return (
     <div className="mx-auto max-w-6xl px-4 py-16 sm:px-6">
       <Reveal className="mb-12 text-center">
@@ -74,7 +72,7 @@ export function PricingPage() {
         </div>
       ) : (
       <Stagger className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        {list.map((plan) => {
+        {plans.map((plan) => {
           const popular = plan.tier === "PRO_PLUS";
           const enterprise = plan.tier === "ENTERPRISE";
           return (

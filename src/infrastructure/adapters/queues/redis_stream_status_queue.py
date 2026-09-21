@@ -1,5 +1,23 @@
+import asyncio
+import logging
 from typing import AsyncIterator
 from redis.asyncio import Redis
+
+logger = logging.getLogger(__name__)
+
+# Approximate cap on retained job events. The stream had no bound at all while
+# ``publish`` appends ~5 entries per job (guest jobs included), so it grew
+# forever and could eventually hit the Redis plan's memory cap and start
+# rejecting writes. ~100k entries is weeks of history at current volumes — far
+# more than any connected SSE client needs — and the subscriber tolerates a
+# late connect because the client falls back to GET /jobs/{id} and the stream
+# emits heartbeats. It is deliberately not so small that a long-running job's
+# own events could be evicted before its client reads them.
+_EVENT_STREAM_MAXLEN = 100_000
+
+# Bounded backoff for the SSE replay loop when Redis is unreachable.
+_REPLAY_RETRY_BASE_DELAY = 0.5
+_REPLAY_RETRY_MAX_DELAY = 10.0
 
 
 class JobEventPublisher:
@@ -19,7 +37,9 @@ class JobEventPublisher:
         }
         # Preserve extra event fields (e.g. compute_duration_ms, credits_used)
         event.update({k: str(v) for k, v in kwargs.items() if v is not None})
-        await self.redis_client.xadd(self.stream_name, event)
+        await self.redis_client.xadd(
+            self.stream_name, event, maxlen=_EVENT_STREAM_MAXLEN
+        )
 
 
 class JobEventSubscriber:
@@ -42,15 +62,26 @@ class JobEventSubscriber:
         """
         last_id = "0"  # replay history first
         terminal_seen = False
+        backoff = _REPLAY_RETRY_BASE_DELAY
 
         while not terminal_seen:
             try:
                 entries = await self.redis_client.xread(  # type: ignore[arg-type]
                     {self.stream_name: str(last_id)}, count=50, block=5000
                 )
-            except Exception:
-                # Redis unreachable — keep the stream alive and retry.
-                entries = []
+                backoff = _REPLAY_RETRY_BASE_DELAY  # recovered — reset the backoff
+            except Exception as e:  # noqa: BLE001
+                # Redis unreachable. This used to ``continue`` immediately, a
+                # tight loop that burned a full CPU inside the SSE request task.
+                # Back off (bounded, so recovery is prompt) and log with the job
+                # context instead of spinning silently.
+                logger.warning(
+                    "SSE event replay for job %s failed (%s); retrying in %.1fs",
+                    job_id, e, backoff,
+                )
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, _REPLAY_RETRY_MAX_DELAY)
+                continue
 
             if not entries:
                 continue

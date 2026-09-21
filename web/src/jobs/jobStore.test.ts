@@ -17,8 +17,10 @@ import {
   LEGACY_JOBS_STORAGE_KEY,
   activeJobs,
   isActiveJob,
+  jobProgress,
   readStoredJobs,
   reconcileJobs,
+  reduceStreamError,
   removeStoredJobs,
   showsCreditsUsed,
   storageKeyFor,
@@ -351,5 +353,63 @@ describe("queue vs history split", () => {
 
     expect(billed.map((j) => j.job_id)).toEqual(["done"]);
     expect(billed[0].credits_used).toBe(4);
+  });
+});
+
+describe("reduceStreamError", () => {
+  // A dropped SSE stream (proxy hiccup, redeploy, offline tab) used to be
+  // rendered as a FAILED job, inviting the user to re-run a conversion that was
+  // still running (double work, double credits), and the dead subscription was
+  // left registered so the row never updated again — not even after a refresh
+  // had restored the real server status.
+  it("keeps the last known status instead of inventing a failure", () => {
+    const running = job({ job_id: "running", status: "PROCESSING", progress: 61 });
+
+    const { job: next } = reduceStreamError(running);
+
+    expect(next.status).toBe("PROCESSING");
+    expect(next.status).not.toBe("FAILED");
+    expect(next.progress).toBe(61);
+  });
+
+  it("keeps a queued job queued", () => {
+    const queued = job({ job_id: "queued", status: "AWAITING_UPLOAD" });
+
+    expect(reduceStreamError(queued).job.status).toBe("AWAITING_UPLOAD");
+  });
+
+  it("releases the dead subscription so a refresh can re-subscribe", () => {
+    expect(reduceStreamError(job({ status: "PROCESSING" })).resubscribe).toBe(true);
+  });
+
+  it("never attaches a failure message to a job that did not fail", () => {
+    const running = job({ job_id: "running", status: "PROCESSING" });
+
+    const { job: next } = reduceStreamError(running);
+
+    expect(next.errorMessage).toBeUndefined();
+  });
+});
+
+describe("jobProgress", () => {
+  it("passes through the progress the server reported", () => {
+    expect(jobProgress({ status: "PROCESSING", progress: 42 })).toBe(42);
+    expect(jobProgress({ status: "PROCESSING", progress: 0 })).toBe(0);
+  });
+
+  it("returns null when there is no real value, so nothing is announced", () => {
+    // The pages used to render `progress ?? 45`, which `aria-valuenow` then
+    // reported to assistive tech as a fact the backend never sent.
+    expect(jobProgress({ status: "PROCESSING" })).toBeNull();
+    expect(jobProgress({ status: "PENDING" })).toBeNull();
+    expect(jobProgress({ status: "AWAITING_UPLOAD" })).toBeNull();
+  });
+
+  it("treats a completed job as genuinely 100%", () => {
+    expect(jobProgress({ status: "COMPLETED" })).toBe(100);
+  });
+
+  it("ignores a non-finite value", () => {
+    expect(jobProgress({ status: "PROCESSING", progress: Number.NaN })).toBeNull();
   });
 });

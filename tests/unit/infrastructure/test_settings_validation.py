@@ -76,3 +76,9 @@ def test_production_rejects_plaintext_object_storage() -> None:
 def test_development_allows_weak_secret() -> None:
     dev = _settings(ENVIRONMENT="development", SECRET_KEY="change-me-to-a-random-secret-key")
     dev.validate()  # should not raise
+
+
+def test_unknown_environment_fails_closed() -> None:
+    """SEC-8: a typo like 'prod' must not silently skip the production checks."""
+    with pytest.raises(RuntimeError, match="Unsupported ENVIRONMENT"):
+        _settings(ENVIRONMENT="prod", SECRET_KEY="change-me-to-a-random-secret-key").validate()

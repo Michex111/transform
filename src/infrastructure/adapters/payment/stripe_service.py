@@ -9,6 +9,7 @@ global ``stripe.api_key`` pattern) so that API version pinning and per-call
 configuration stay on a single client.
 """
 
+import asyncio
 import logging
 from typing import Any
 
@@ -114,7 +115,7 @@ class StripeService:
 
         try:
             client = self._get_client()
-            session = client.v1.checkout.sessions.create({
+            session = await asyncio.to_thread(client.v1.checkout.sessions.create, {
                 # NOTE: Omit `payment_method_types` so Stripe dynamically selects
                 # eligible payment methods from Dashboard settings.
                 "line_items": [{"price": price_id, "quantity": 1}],
@@ -173,7 +174,7 @@ class StripeService:
 
         try:
             client = self._get_client()
-            session = client.v1.checkout.sessions.create({
+            session = await asyncio.to_thread(client.v1.checkout.sessions.create, {
                 # Omit `payment_method_types` for dynamic payment methods.
                 "line_items": [{
                     "price_data": {
@@ -221,7 +222,11 @@ class StripeService:
 
         try:
             client = self._get_client()
-            client.v1.subscriptions.update(subscription_id, {"cancel_at_period_end": True})
+            await asyncio.to_thread(
+                client.v1.subscriptions.update,
+                subscription_id,
+                {"cancel_at_period_end": True},
+            )
             logger.info("Cancelled subscription at period end", extra={"subscription_id": subscription_id})
             return True
 
@@ -241,7 +246,9 @@ class StripeService:
 
         try:
             client = self._get_client()
-            subscription = client.v1.subscriptions.retrieve(subscription_id)
+            subscription = await asyncio.to_thread(
+                client.v1.subscriptions.retrieve, subscription_id
+            )
             return {
                 "status": subscription.status,
                 "current_period_start": getattr(subscription, "current_period_start", None),
@@ -269,7 +276,7 @@ class StripeService:
 
         try:
             client = self._get_client()
-            customer = client.v1.customers.create({
+            customer = await asyncio.to_thread(client.v1.customers.create, {
                 "email": email,
                 "name": name,
                 "metadata": {"user_id": user_id},
@@ -298,7 +305,7 @@ class StripeService:
 
         try:
             client = self._get_client()
-            session = client.v1.billing_portal.sessions.create({
+            session = await asyncio.to_thread(client.v1.billing_portal.sessions.create, {
                 "customer": customer_id,
                 "return_url": return_url,
             })

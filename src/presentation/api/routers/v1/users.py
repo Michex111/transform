@@ -1,5 +1,7 @@
 from typing import Annotated
 
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import or_, select
@@ -27,6 +29,14 @@ from src.presentation.schemas.auth import (
 
 router = APIRouter(prefix="/api/users", tags=["users"])
 
+# A valid Argon2 hash for a throwaway password. On a login attempt for a
+# non-existent username we still run one verification against this hash so the
+# response time does not reveal whether the account exists (user enumeration).
+_DUMMY_PASSWORD_HASH = (
+    "$argon2id$v=19$m=65536,t=3,p=4$2SAM5hX5kD0fhZyVF+L3/Q"
+    "$+x3jU3P9gEMIZVEGPutfCS3UmAEaZg31jFuFCwYvGgs"
+)
+
 
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
 async def register_user(
@@ -46,7 +56,7 @@ async def register_user(
     user = UserModel(
         username=payload.username,
         email=payload.email,
-        hashed_password=hash_password(payload.password),
+        hashed_password=await asyncio.to_thread(hash_password, payload.password),
         is_active=True,
     )
     db.add(user)
@@ -60,7 +70,8 @@ async def register_user(
             status_code=status.HTTP_409_CONFLICT,
             detail="Username or email already exists",
         ) from None
-    await db.refresh(user)
+    # ``expire_on_commit=False`` keeps every attribute populated after commit
+    # (id, created_at, ...) so no refresh round-trip is needed.
     return UserResponse.model_validate(user)
 
 
@@ -72,7 +83,18 @@ async def login_for_access_token(
     result = await db.execute(select(UserModel).where(UserModel.username == form_data.username))
     user = result.scalars().first()
 
-    if user is None or not verify_password(form_data.password, user.hashed_password):
+    # Argon2 is CPU-heavy, so run it off the event loop. When the user is
+    # missing we still verify against a dummy hash so both branches cost the
+    # same (prevents username enumeration via response timing).
+    if user is None:
+        await asyncio.to_thread(verify_password, form_data.password, _DUMMY_PASSWORD_HASH)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    if not await asyncio.to_thread(verify_password, form_data.password, user.hashed_password):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",

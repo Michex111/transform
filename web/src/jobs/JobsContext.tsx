@@ -9,10 +9,13 @@ import {
 } from "react";
 import { api } from "@/api/client";
 import { useAuth } from "@/auth/AuthContext";
+import { clearCachedFiles, dropCachedFile, releaseCachedFile } from "@/lib/fileCache";
 import {
   LEGACY_JOBS_STORAGE_KEY,
+  isActiveJob,
   readStoredJobs,
   reconcileJobs,
+  reduceStreamError,
   removeStoredJobs,
   storageKeyFor,
   type UiJob,
@@ -73,6 +76,12 @@ export function JobsProvider({ children }: { children: ReactNode }) {
 function JobsStore({ userId, children }: { userId: number | null; children: ReactNode }) {
   const [jobs, setJobs] = useState<UiJob[]>(() => readStoredJobs(userId, localStorage));
   const subs = useRef<Map<string, () => void>>(new Map());
+  // Bumped every time `refresh()` reconciles with the server. It gives the
+  // subscription effect a reason to re-run that is independent of `jobs`, which
+  // is what lets a subscription released by a transport error be re-established
+  // on the next refresh (the effect must not depend on `jobs` — that would
+  // re-subscribe on every SSE tick).
+  const [refreshEpoch, setRefreshEpoch] = useState(0);
   // Jobs started during this session. Only these may outlive a server refresh
   // while still in flight; anything else on screen is stale by definition.
   const sessionJobIds = useRef<Set<string>>(new Set());
@@ -89,12 +98,15 @@ function JobsStore({ userId, children }: { userId: number | null; children: Reac
   // Stable primitive key derived from the *set* of active job ids, so the
   // subscription effect only re-runs when the active set changes — not on every
   // SSE progress tick (which mutates `jobs` but not the active set).
-  const activeJobIds = jobs
-    .filter((j) => j.status === "PROCESSING" || j.status === "PENDING")
-    .map((j) => j.job_id);
+  // `isActiveJob` is the one shared predicate: it counts `AWAITING_UPLOAD` as
+  // active too, so a job the Queue lists as in flight is actually subscribed
+  // (previously it was never subscribed and so could never update live).
+  const activeJobIds = jobs.filter(isActiveJob).map((j) => j.job_id);
   const activeKey = activeJobIds.slice().sort().join("\u0001");
 
-  // Keep terminal-state jobs subscribed for live progress; drop subscriptions when done.
+  // Subscribe to live progress for the jobs currently in flight, so the Queue
+  // and History rows update as the worker reports. Released subscriptions are
+  // re-established here on the next active-set or refresh change.
   useEffect(() => {
     const ids = activeKey ? activeKey.split("\u0001") : [];
     for (const id of ids) {
@@ -127,14 +139,17 @@ function JobsStore({ userId, children }: { userId: number | null; children: Reac
             ),
           );
         },
-        onError: (msg) => {
+        onError: () => {
+          // A transport failure (dropped stream, proxy hiccup, redeploy) is not
+          // a job failure — the server's own terminal event is the only thing
+          // that may report one. Keep the last known status so the row tells
+          // the truth, and forget the dead subscription so a later refresh()
+          // can re-subscribe (leaving it registered froze the row forever).
           setJobs((prev) =>
-            prev.map((j) =>
-              j.job_id === id
-                ? { ...j, status: "FAILED", errorMessage: msg || "Conversion failed" }
-                : j,
-            ),
+            prev.map((j) => (j.job_id === id ? reduceStreamError(j).job : j)),
           );
+          subs.current.get(id)?.();
+          subs.current.delete(id);
         },
         onDone: () => {
           subs.current.delete(id);
@@ -142,21 +157,34 @@ function JobsStore({ userId, children }: { userId: number | null; children: Reac
       });
       subs.current.set(id, cleanup);
     }
-    // No teardown *here*: subscriptions self-terminate via `onDone` (the server
-    // closes the stream). Keying on `activeKey` means SSE ticks (which change
-    // `jobs` but not the active set) no longer tear down/recreate every
-    // subscription. Unmount teardown is handled by the effect below.
-  }, [activeKey]);
+    // No teardown *here*: a live subscription ends via `onDone` (the server
+    // closes the stream after a terminal event) or is released by `onError`
+    // when the stream breaks. Keying on `activeKey` (plus the refresh epoch)
+    // means SSE ticks — which change `jobs` but not the active set — no longer
+    // tear down/recreate every subscription. Unmount teardown is handled by the
+    // effect below.
+  }, [activeKey, refreshEpoch]);
+
+  // Release a cached source file once its job has succeeded. Only COMPLETED,
+  // never FAILED: History's retry re-uploads a failed job's cached input when
+  // the stored object is gone, which is the whole point of the cache.
+  useEffect(() => {
+    for (const job of jobs) {
+      if (releaseCachedFile(job.status)) dropCachedFile(job.job_id);
+    }
+  }, [jobs]);
 
   // This store is remounted whenever the signed-in identity changes, so it can
   // unmount while streams are still open. Close them, otherwise the previous
   // account's subscriptions linger and keep pushing their events into a store
-  // that no longer belongs to them.
+  // that no longer belongs to them. The cached source files go with them, so
+  // one account's documents are not retained for the next to sign in.
   useEffect(() => {
     const openSubscriptions = subs.current;
     return () => {
       for (const cleanup of openSubscriptions.values()) cleanup();
       openSubscriptions.clear();
+      clearCachedFiles();
     };
   }, []);
 
@@ -172,6 +200,8 @@ function JobsStore({ userId, children }: { userId: number | null; children: Reac
   const removeJob = useCallback((jobId: string) => {
     subs.current.get(jobId)?.();
     subs.current.delete(jobId);
+    // A removed job can never be retried from here, so its cached input goes too.
+    dropCachedFile(jobId);
     setJobs((prev) => prev.filter((j) => j.job_id !== jobId));
   }, []);
 
@@ -184,6 +214,10 @@ function JobsStore({ userId, children }: { userId: number | null; children: Reac
     } catch {
       // History endpoint unavailable — keep current local state.
       setJobs((prev) => [...prev]);
+    } finally {
+      // Let the subscription effect re-establish anything released by a
+      // transport error now that the server has answered.
+      setRefreshEpoch((n) => n + 1);
     }
   }, []);
 

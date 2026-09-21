@@ -98,7 +98,11 @@ def get_api_key_service(
     return APIKeyService(repository=repository)
 
 
+@lru_cache
 def get_stripe_service() -> StripeService:
+    # One client (and therefore one Stripe HTTP pool) per process instead of a
+    # fresh StripeClient per request. StripeService builds its StripeClient
+    # lazily and is stateless otherwise, so sharing it is safe.
     return StripeService()
 
 
@@ -138,6 +142,7 @@ def get_minio_download_adapter() -> MinioFileStorageAdapter:
     )
 
 
+@lru_cache
 def get_encryption_service() -> FileEncryptionService | None:
     """At-rest encryption service, or None when ENCRYPTION_MASTER_KEY is unset."""
     return _build_encryption_service()

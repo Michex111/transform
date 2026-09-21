@@ -3,7 +3,11 @@
 import asyncio
 from contextlib import contextmanager
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
+import pytest
+from fastapi import HTTPException
+from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from src.infrastructure.database.session import Base
@@ -127,3 +131,51 @@ def test_checkout_completed_grant_credit_purchase() -> None:
                 assert credit.remaining == EXPECTED_BALANCE
 
         asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
+# SEC-6 — unbounded body read on the unauthenticated webhook
+# ---------------------------------------------------------------------------
+
+def _configured_webhook_secret(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        webhooks,
+        "get_settings",
+        lambda: SimpleNamespace(STRIPE_WEBHOOK_SECRET=SecretStr("whsec_test")),
+    )
+
+
+def test_webhook_rejects_oversized_body_before_reading_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _configured_webhook_secret(monkeypatch)
+
+    class OversizedRequest:
+        headers = {"content-length": str(2 * 1024 * 1024)}
+
+        async def body(self) -> bytes:
+            raise AssertionError("the body must not be read for an oversized payload")
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(webhooks.handle_stripe_webhook(OversizedRequest(), db=None))  # type: ignore[arg-type]
+
+    assert exc.value.status_code == 413
+
+
+def test_webhook_without_content_length_is_not_pre_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Chunked clients send no Content-Length and must reach signature checks."""
+    _configured_webhook_secret(monkeypatch)
+
+    class ChunkedRequest:
+        headers: dict[str, str] = {}
+
+        async def body(self) -> bytes:
+            return b"{}"
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(webhooks.handle_stripe_webhook(ChunkedRequest(), db=None))  # type: ignore[arg-type]
+
+    # Fails signature verification (400), i.e. it was not blocked by the size gate.
+    assert exc.value.status_code == 400

@@ -140,34 +140,26 @@ def _make_recompress(source: str, target: str):
 
 
 def _simple_recompress(input_file: str, output_file: str, source: str, target: str) -> None:
-    """Decompress a single-file compressed format, then recompress to target."""
-    with open(input_file, "rb") as fh:
-        data = fh.read()
+    """Decompress a single-file compressed format, then recompress to target.
 
+    Streams through a fixed-size buffer rather than materialising the payload:
+    ``fh.read()`` held the compressed *and* the uncompressed bytes in RAM at
+    once, and the worker container has no memory limit, so a large (or
+    adversarially compressed) file could exhaust the process.
+    """
     import gzip
     import bz2
     import lzma
+    import shutil
 
-    if source == "gz":
-        decompressed = gzip.decompress(data)
-    elif source == "bz2":
-        decompressed = bz2.decompress(data)
-    elif source in ("xz", "lzma"):
-        decompressed = lzma.decompress(data)
-    else:
+    openers = {"gz": gzip.open, "bz2": bz2.open, "xz": lzma.open, "lzma": lzma.open}
+    if source not in openers:
         raise RuntimeError(f"Unsupported compression source: {source}")
-
-    if target == "gz":
-        out = gzip.compress(decompressed)
-    elif target == "bz2":
-        out = bz2.compress(decompressed)
-    elif target in ("xz", "lzma"):
-        out = lzma.compress(decompressed)
-    else:
+    if target not in openers:
         raise RuntimeError(f"Unsupported compression target: {target}")
 
-    with open(output_file, "wb") as fh:
-        fh.write(out)
+    with openers[source](input_file, "rb") as src, openers[target](output_file, "wb") as out:
+        shutil.copyfileobj(src, out)
 
 
 for _source in COMPRESSION_FORMATS:

@@ -4,12 +4,12 @@ from pydantic import BaseModel, Field
 class CreateConversionJobRequest(BaseModel):
     # ``source_format`` is required only for the upload flow. When ``file_id``
     # is provided, it is inferred from the library file's name instead.
-    source_format: str | None = None
+    source_format: str | None = Field(default=None, max_length=20)
     target_format: str = Field(min_length=1, max_length=20)
-    input_key: str | None = None
+    input_key: str | None = Field(default=None, max_length=1024)
     # When set, the job converts a file already stored in the user's library
     # (object storage) without re-uploading it.
-    file_id: str | None = None
+    file_id: str | None = Field(default=None, max_length=64)
     # Client-side (FENCR) encryption. The client encrypts the file in the
     # browser with a fresh per-file data key and uploads the FENCR blob. The
     # client may send the RAW data key (base64) here; the server wraps it

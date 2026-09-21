@@ -12,6 +12,22 @@ def hash_api_key(plaintext: str) -> str:
     return hashlib.sha256(plaintext.encode("utf-8")).hexdigest()
 
 
+# ``last_used_at`` is a coarse "last used" signal, not an audit-exact timestamp.
+# Refreshing it at most every 5 minutes keeps the meaning while avoiding an
+# UPDATE + COMMIT against a hot row on every single authenticated request.
+_LAST_USED_REFRESH_INTERVAL = timedelta(minutes=5)
+
+
+def _last_used_is_stale(last_used_at: datetime | None) -> bool:
+    """True when ``last_used_at`` is missing or older than the refresh window."""
+    if last_used_at is None:
+        return True
+    if last_used_at.tzinfo is None:
+        # SQLite (and some drivers) hand back naive datetimes.
+        last_used_at = last_used_at.replace(tzinfo=UTC)
+    return datetime.now(UTC) - last_used_at > _LAST_USED_REFRESH_INTERVAL
+
+
 class APIKeyService:
     """
     Application service for API key lifecycle management.
@@ -83,5 +99,6 @@ class APIKeyService:
         api_key = await self._repository.find_by_key(hash_api_key(plaintext_key))
         if api_key is None or not api_key.is_valid():
             return None
-        await self._repository.touch_last_used(api_key.id)
+        if _last_used_is_stale(api_key.last_used_at):
+            await self._repository.touch_last_used(api_key.id)
         return api_key

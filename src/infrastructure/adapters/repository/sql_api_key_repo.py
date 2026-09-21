@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.domain.security.enitities.api_key import APIKey
@@ -81,15 +81,11 @@ class SQLAPIKeyRepository:
 
     async def delete(self, api_key_id: str) -> bool:
         """Permanently remove an API key. Returns True if a row was removed."""
-        api_key = await self.get_by_id(api_key_id)
-        if api_key is None:
-            return False
-        row = await self._session.get(APIKeyModel, api_key_id)
-        if row is not None:
-            await self._session.delete(row)
-            await self._session.commit()
-            return True
-        return False
+        result = await self._session.execute(
+            delete(APIKeyModel).where(APIKeyModel.id == api_key_id)
+        )
+        await self._session.commit()
+        return result.rowcount > 0  # type: ignore[attr-defined]
 
     def _to_entity(self, model: APIKeyModel | None) -> APIKey | None:
         if model is None:

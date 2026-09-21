@@ -83,7 +83,12 @@ def pdf_to_docx(pdf_file: str, docx_file: str, logger_overide: logging.Logger | 
         ]
 
         result = subprocess.run(
-            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True,
+            timeout=600,
         )
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"Failed to convert PDF to DOCX: {e.stderr.strip()}") from e
@@ -122,7 +127,14 @@ def docx_to_pdf(docx_file: str, pdf_file: str) -> None:
             docx_path,
         ]
 
-        subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+        subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True,
+            timeout=600,
+        )
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"Failed to convert DOCX to PDF: {e.stderr.strip()}") from e
 

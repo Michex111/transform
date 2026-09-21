@@ -126,6 +126,19 @@ describe("QueuePage", () => {
   it("points at History when nothing is running", () => {
     expect(render()).not.toContain("Finished conversions appear in");
   });
+
+  it("never announces a fabricated progress percentage", () => {
+    const html = render();
+    // The bar used to fall back to a made-up 45% for a processing job with no
+    // value, which `aria-valuenow` then read out as fact.
+    expect(html).not.toContain('aria-valuenow="45"');
+    // The job that *did* report progress keeps its determinate bar.
+    expect(html).toContain('aria-valuenow="42"');
+    // The one without a value renders indeterminate: a progressbar with no
+    // valuenow at all, so nothing is announced.
+    expect(html).toContain('role="progressbar"');
+    expect((html.match(/aria-valuenow=/g) ?? []).length).toBe(1);
+  });
 });
 
 describe("QueuePage with nothing in flight", () => {

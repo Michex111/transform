@@ -2,6 +2,7 @@ import type { InputHTMLAttributes, ReactNode } from "react";
 import { motion, useReducedMotion, type HTMLMotionProps } from "motion/react";
 import { Coins } from "@phosphor-icons/react";
 import { formatMeta, statusMeta } from "@/lib/format";
+import { formatTint } from "@/lib/formatVisual";
 import { FormatThumb, type FormatThumbSize } from "@/components/FormatThumb";
 
 /* ---------------- Skeleton (loading) ---------------- */
@@ -145,7 +146,10 @@ export function Badge({
   return (
     <span
       className="inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-semibold"
-      style={{ color, backgroundColor: `${color}1a` }}
+      // `formatTint` (color-mix) rather than `${color}1a`: appending an alpha
+      // hex suffix to a `var(--token)` colour is invalid CSS and is dropped, so
+      // the pill lost its tinted fill entirely.
+      style={{ color, backgroundColor: formatTint(color, 10) }}
     >
       <span
         className="h-1.5 w-1.5 rounded-full"
@@ -299,13 +303,38 @@ export function ProgressBar({
   to,
   className = "",
 }: {
-  value: number;
+  /**
+   * Completed percentage, or `null` when the server has not reported one. A
+   * `null` renders an *indeterminate* bar: the worker does not always send a
+   * percentage, and inventing one means `aria-valuenow` announces a number that
+   * never came from the backend (the pages used to pass a made-up `45`).
+   */
+  value: number | null;
   from?: string;
   to?: string;
   className?: string;
 }) {
-  const clamp = Math.max(0, Math.min(100, value));
   const end = to ?? from;
+  const background = `linear-gradient(90deg, ${from}, ${end})`;
+
+  if (value === null) {
+    return (
+      <div
+        className={`h-1.5 w-full overflow-hidden rounded-full bg-outline ${className}`}
+        role="progressbar"
+      >
+        {/* An animated sweep, so a running job still reads as "moving". */}
+        <motion.div
+          className="h-full w-1/3 rounded-full"
+          animate={{ x: ["-100%", "300%"] }}
+          transition={{ duration: 1.4, repeat: Infinity, ease: "easeInOut" }}
+          style={{ background }}
+        />
+      </div>
+    );
+  }
+
+  const clamp = Math.max(0, Math.min(100, value));
   return (
     <div className={`h-1.5 w-full overflow-hidden rounded-full bg-outline ${className}`} role="progressbar" aria-valuenow={clamp} aria-valuemin={0} aria-valuemax={100}>
       <motion.div
@@ -313,9 +342,7 @@ export function ProgressBar({
         initial={{ width: 0 }}
         animate={{ width: `${clamp}%` }}
         transition={{ type: "spring", stiffness: 120, damping: 22 }}
-        style={{
-          background: `linear-gradient(90deg, ${from}, ${end})`,
-        }}
+        style={{ background }}
       />
     </div>
   );

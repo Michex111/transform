@@ -81,8 +81,10 @@ export function LoginPage() {
         </form>
 
         <p className="mt-4 text-center text-sm">
+          {/* This affordance links to the registration form, so it must say so:
+              "Forgot password?" promised a recovery flow that does not exist. */}
           <Link to="/register" className="text-primary hover:underline">
-            Forgot password?
+            Create an account
           </Link>
         </p>
 

@@ -3,6 +3,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import SecretStr
 
 
+# The only environment names the application supports (see .env.example and
+# README). Any other value is rejected at boot so a typo like ``prod`` cannot
+# silently disable the production safety checks.
+_SUPPORTED_ENVIRONMENTS = frozenset({"development", "production"})
+
+
 class Settings(BaseSettings):
 
     # Environment: "development" | "production"
@@ -134,6 +140,13 @@ class Settings(BaseSettings):
     def validate(self) -> None:
         """Fail fast at startup when the configuration is unsafe for production."""
         environment = self.ENVIRONMENT.strip().lower()
+        if environment not in _SUPPORTED_ENVIRONMENTS:
+            # Fail closed: an unrecognised value (e.g. "prod") must not silently
+            # skip the production checks below.
+            raise RuntimeError(
+                f"Unsupported ENVIRONMENT {self.ENVIRONMENT!r}; expected one of "
+                f"{sorted(_SUPPORTED_ENVIRONMENTS)}."
+            )
         if environment == "production":
             secret = self.SECRET_KEY.get_secret_value()
             if secret in self._INSECURE_SECRETS or len(secret) < 32:
