@@ -68,7 +68,29 @@ def run_migrations_offline() -> None:
 
 
 def do_run_migrations(connection: Connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata, compare_type=True)
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        compare_type=True,
+        # Commit each migration separately instead of wrapping the whole chain
+        # (0001 -> head) in one transaction.
+        #
+        # Required for the enum data migrations: PostgreSQL refuses to use an
+        # enum value added by ``ALTER TYPE ... ADD VALUE`` until the transaction
+        # that added it has committed ("unsafe use of new value"). 0009 adds
+        # PRO/PRO_PLUS/ENTERPRISE and 0010 uses PRO, which is why 0009's
+        # docstring says the data migration lives in a separate revision so the
+        # values are committed first — but with the default (single transaction
+        # for the whole run) both statements land in the SAME transaction, so
+        # that separation never actually took effect. It only appeared to work
+        # because every existing database already had the paid tiers from a
+        # previous run, making 0009's ALTER a no-op.
+        #
+        # A database whose ``subscriptiontier`` type predates PRO (e.g. a fresh
+        # branch whose enum types outlived a DROP TABLE) hits the error and the
+        # API cannot boot at all.
+        transaction_per_migration=True,
+    )
 
     with context.begin_transaction():
         context.run_migrations()
