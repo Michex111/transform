@@ -67,6 +67,19 @@ async def lifespan(_: FastAPI):
     else:
         logger.info("Skipping database migrations (RUN_MIGRATIONS=false)")
 
+    # Announce how verification email is being delivered. `Settings.validate()`
+    # already logs an ERROR when no transport is configured; this line names the
+    # resolved transport on every boot so "are we actually sending?" is
+    # answerable from the log alone, instead of by registering a test account.
+    logger.warning(
+        "Email transport: %s (verification gate %s)",
+        settings._resolve_email_backend(),
+        "enforced"
+        if settings.EMAIL_VERIFICATION_REQUIRED
+        and settings._resolve_email_backend() != "console"
+        else "SUSPENDED — see Settings.validate()",
+    )
+
     # Ensure the object-storage bucket allows browser uploads from the SPA
     # origin(s). Failures are non-fatal (logged) but configured origins are
     # honoured so direct uploads are not blocked by bucket CORS.

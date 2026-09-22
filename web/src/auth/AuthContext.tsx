@@ -15,11 +15,18 @@ interface AuthContextValue {
   isLoading: boolean;
   isAuthenticated: boolean;
   login: (username: string, password: string) => Promise<void>;
+  /**
+   * Create an account. Resolves with the created (unverified) user.
+   *
+   * It resolves rather than throwing on success even though it does NOT sign
+   * the user in — see the implementation. Callers must show the "check your
+   * inbox" state; the user is not authenticated afterwards.
+   */
   register: (data: {
     username: string;
     email: string;
     password: string;
-  }) => Promise<void>;
+  }) => Promise<UserResponse>;
   logout: () => void;
   api: typeof api;
 }
@@ -68,11 +75,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const register = useCallback(
-    async (data: { username: string; email: string; password: string }) => {
-      await api.register(data);
-      await api.login(data.username, data.password);
-      const me = await api.me();
-      setUser(me);
+    async (data: {
+      username: string;
+      email: string;
+      password: string;
+    }): Promise<UserResponse> => {
+      // Intentionally does NOT sign the user in. Sign-in is refused until the
+      // address is verified (403 EMAIL_NOT_VERIFIED), so chaining a login here
+      // would throw and make a *successful* registration look like a failure —
+      // and the user would land on a sign-in page they cannot pass. The caller
+      // shows the "check your inbox" state instead.
+      return api.register(data);
     },
     [],
   );

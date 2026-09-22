@@ -22,6 +22,7 @@ import {
   normalizeGuestJob,
   normalizePortal,
   normalizePresignedUrls,
+  normalizeResendVerification,
   normalizeSubscriptionPlans,
   normalizeSubscriptionStatus,
   normalizeSupportedConversions,
@@ -29,6 +30,7 @@ import {
   normalizeUploadResponse,
   normalizeUploadSession,
   normalizeUser,
+  normalizeVerifyEmail,
 } from './normalize'
 import type {
   APIKeyCreateRequest,
@@ -111,6 +113,87 @@ export function resolveServerPath(path: string): string {
   return `${API_BASE}${withoutApi.startsWith('/') ? withoutApi : `/${withoutApi}`}`
 }
 
+/**
+ * An error thrown by {@link ApiClient}, carrying the HTTP status and — when the
+ * API sends one — a machine-readable code.
+ *
+ * The code exists because a status alone is not enough to choose a recovery
+ * path: a 403 from `POST /users/token` can mean several things, and only the
+ * `EMAIL_NOT_VERIFIED` case should show "check your inbox / resend" rather than
+ * a generic failure. `instanceof Error` still holds, so every existing
+ * `err instanceof Error` call site keeps working unchanged.
+ */
+export class ApiError extends Error {
+  readonly status: number
+  readonly code?: string
+  /**
+   * The full structured `detail` object, for fields beyond `code`/`message`.
+   *
+   * The unverified-sign-in response carries the account's own address
+   * alongside the code so the sign-in page can offer a working "resend" button
+   * without asking the user to retype it. That is not a disclosure: the branch
+   * is only reachable with a correct username *and* password.
+   */
+  readonly details?: Record<string, unknown>
+
+  constructor(message: string, status: number, code?: string, details?: Record<string, unknown>) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+    this.code = code
+    this.details = details
+  }
+}
+
+/**
+ * Extract a human-readable message (and optional code) from an error response.
+ *
+ * FastAPI serialises an `HTTPException`'s `detail` verbatim, and this API uses
+ * more than one shape:
+ *
+ *   - a plain string for most errors,
+ *   - `{ code, message }` where the client must branch
+ *     (e.g. `EMAIL_NOT_VERIFIED` on an unverified sign-in),
+ *   - an array of `{ msg }` objects for 422 request-validation failures.
+ *
+ * Reading only the string shape turned the structured case into the literal
+ * text `"[object Object]"`, which is how this was found.
+ */
+async function readErrorBody(
+  response: Response,
+  fallback: string,
+): Promise<{ detail: string; code?: string; details?: Record<string, unknown> }> {
+  let body: unknown
+  try {
+    body = await response.json()
+  } catch {
+    // A non-JSON error body (a proxy's HTML 502, an empty 500) must not throw a
+    // parse error on top of the real failure.
+    return { detail: response.statusText || fallback }
+  }
+
+  const detail = (body as { detail?: unknown } | null)?.detail
+
+  if (typeof detail === 'string' && detail) return { detail }
+
+  if (Array.isArray(detail)) {
+    const messages = detail
+      .map((entry) => (entry as { msg?: unknown } | null)?.msg)
+      .filter((msg): msg is string => typeof msg === 'string')
+    if (messages.length) return { detail: messages.join(', ') }
+  }
+
+  if (detail && typeof detail === 'object' && !Array.isArray(detail)) {
+    const structured = detail as Record<string, unknown>
+    const code = typeof structured.code === 'string' ? structured.code : undefined
+    const message = typeof structured.message === 'string' ? structured.message : undefined
+    if (message) return { detail: message, code, details: structured }
+    if (code) return { detail: code, code, details: structured }
+  }
+
+  return { detail: response.statusText || fallback }
+}
+
 class ApiClient {
   private get token() {
     return localStorage.getItem(TOKEN_KEY)
@@ -180,14 +263,8 @@ class ApiClient {
     }
 
     if (!res.ok) {
-      let detail = res.statusText
-      try {
-        const body = await res.json()
-        detail = Array.isArray(body.detail) ? body.detail.map((d: unknown) => String((d as { msg?: string }).msg ?? d)).join(', ') : (body.detail ?? detail)
-      } catch {
-        /* ignore */
-      }
-      throw new Error(detail)
+      const { detail, code, details } = await readErrorBody(res, res.statusText)
+      throw new ApiError(detail, res.status, code, details)
     }
 
     if (res.status === 204) return undefined as T
@@ -200,6 +277,29 @@ class ApiClient {
       normalizeUser,
     )
 
+  /**
+   * Consume an email-verification token.
+   *
+   * A 400 is expected and meaningful here (the link was already used, or it
+   * expired), so the caller must surface the message rather than treat every
+   * failure as a network fault.
+   */
+  verifyEmail = (token: string) =>
+    this.request<unknown>('/users/verify-email', {
+      method: 'POST',
+      body: JSON.stringify({ token }),
+    }).then(normalizeVerifyEmail)
+
+  /**
+   * Ask for a fresh verification link. Answers 202 regardless of whether the
+   * address exists, so the caller must show the same confirmation either way.
+   */
+  resendVerification = (email: string) =>
+    this.request<unknown>('/users/resend-verification', {
+      method: 'POST',
+      body: JSON.stringify({ email }),
+    }).then(normalizeResendVerification)
+
   login = async (username: string, password: string) => {
     const form = new URLSearchParams({ username, password })
     const res = await fetch(`${API_BASE}/users/token`, {
@@ -208,8 +308,11 @@ class ApiClient {
       body: form.toString(),
     })
     if (!res.ok) {
-      const body = await res.json().catch(() => ({}))
-      throw new Error(body.detail ?? 'Invalid credentials')
+      // Shares the response reader with `request` so a structured detail
+      // (EMAIL_NOT_VERIFIED) survives here too — this path does not throw a
+      // plain Error string, and the sign-in page branches on the code.
+      const { detail, code, details } = await readErrorBody(res, 'Invalid credentials')
+      throw new ApiError(detail, res.status, code, details)
     }
     const data = normalizeTokenResponse(await res.json())
     // Persist tokens immediately so subsequent calls are authenticated.

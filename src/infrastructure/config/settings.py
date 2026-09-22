@@ -1,6 +1,11 @@
 from functools import lru_cache
+import logging
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import SecretStr
+
+
+logger = logging.getLogger(__name__)
 
 
 # The only environment names the application supports (see .env.example and
@@ -80,6 +85,75 @@ class Settings(BaseSettings):
     # Monitoring
     SENTRY_DSN: SecretStr | None = None
 
+    # ------------------------------------------------------------------
+    # Transactional email
+    # ------------------------------------------------------------------
+    # How verification emails leave the process. ``auto`` (the default) picks a
+    # real transport as soon as one is configured — Resend when RESEND_API_KEY
+    # is set, SMTP when SMTP_HOST is set — and otherwise falls back to the
+    # console transport, which logs the message instead of sending it. ``auto``
+    # means the feature works out of the box in local development and starts
+    # really sending the moment credentials are added, with no extra switch to
+    # remember.
+    #
+    # Accepted values: auto | console | smtp | resend. A value that names a
+    # transport whose credentials are missing is a configuration error and is
+    # rejected in ``validate()`` rather than silently degrading — an explicit
+    # choice must not be quietly ignored. ``auto`` is never rejected, because
+    # its whole purpose is to resolve to whatever is available.
+    EMAIL_BACKEND: str = "auto"
+
+    # Envelope sender. Must be a domain you control and have verified with your
+    # provider, or the provider will reject the send and (for Gmail-class
+    # mailboxes) the message lands in spam.
+    EMAIL_FROM_ADDRESS: str = "no-reply@example.com"
+    EMAIL_FROM_NAME: str = "Transform"
+    # Optional Reply-To. Left unset by default: a no-reply sender with a
+    # monitored reply-to is a common deliverability pattern, but pointing it at
+    # an unmonitored address is worse than omitting it.
+    EMAIL_REPLY_TO: str | None = None
+
+    # SMTP transport (EMAIL_BACKEND=smtp). Works with any provider that speaks
+    # SMTP — SendGrid, Postmark, Mailgun, Amazon SES, Google Workspace.
+    SMTP_HOST: str | None = None
+    SMTP_PORT: int = 587
+    SMTP_USERNAME: str | None = None
+    SMTP_PASSWORD: SecretStr | None = None
+    # STARTTLS (upgrade a plaintext connection, port 587) vs implicit TLS
+    # (port 465). Exactly one of the two is normally enabled.
+    SMTP_USE_STARTTLS: bool = True
+    SMTP_USE_SSL: bool = False
+    # Bounds a stalled provider so a slow SMTP host cannot pin a request thread.
+    SMTP_TIMEOUT_SECONDS: int = 15
+
+    # Resend transport (EMAIL_BACKEND=resend).
+    RESEND_API_KEY: SecretStr | None = None
+    RESEND_API_URL: str = "https://api.resend.com/emails"
+    EMAIL_HTTP_TIMEOUT_SECONDS: int = 15
+
+    # Public origin of the SPA, used to build the links in outbound email
+    # (e.g. ``https://transform-web.onrender.com``). Must NOT include a
+    # trailing slash or the `/app` suffix — it is joined with a route path.
+    APP_BASE_URL: str = "http://localhost:5173"
+
+    # How long a verification link stays valid. Bounded on the low side by how
+    # long a user realistically takes to open their inbox, and on the high side
+    # by how long a leaked mailbox/URL stays exploitable.
+    EMAIL_VERIFICATION_TTL_HOURS: int = 24
+
+    # Minimum gap between two verification emails for the same account. Stops
+    # the resend endpoint from being usable as a mail-bomb against a third
+    # party's inbox (and from burning the provider's sending quota).
+    EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS: int = 60
+
+    # Master switch for the verification gate. When true an unverified account
+    # cannot sign in. This exists as an operational safety valve: if the email
+    # provider is down or misconfigured, turning this off restores sign-in for
+    # a backlog of legitimately-registered users immediately (an env change plus
+    # a restart) instead of leaving every new signup locked out until the
+    # provider is fixed. Accounts that later verify are unaffected either way.
+    EMAIL_VERIFICATION_REQUIRED: bool = True
+
     # Frontend (SPA) static serving
     # DEPRECATED / NO-OP: the API no longer serves the SPA. The React app is
     # built and hosted as a separate static site (Render static site
@@ -153,9 +227,52 @@ class Settings(BaseSettings):
         "your-secret-key",
     }
 
+    _SUPPORTED_EMAIL_BACKENDS = frozenset({"auto", "console", "smtp", "resend"})
+
+    def _resolve_email_backend(self) -> str:
+        """The concrete email transport to use: console | smtp | resend.
+
+        ``auto`` prefers a real transport over a discard transport, checking
+        Resend first (an API key is a deliberate, single-purpose credential)
+        before SMTP. Callers should use this rather than reading
+        ``EMAIL_BACKEND`` directly so the resolution rule lives in one place.
+        """
+        configured = self.EMAIL_BACKEND.strip().lower()
+        if configured != "auto":
+            return configured
+        if self.RESEND_API_KEY is not None:
+            return "resend"
+        if self.SMTP_HOST:
+            return "smtp"
+        return "console"
+
     def validate(self) -> None:
         """Fail fast at startup when the configuration is unsafe for production."""
         environment = self.ENVIRONMENT.strip().lower()
+
+        # Email transport. An explicit choice is honoured or rejected — never
+        # silently downgraded to the console sink, because that would drop real
+        # verification emails for real users while every health check stayed
+        # green. ``auto`` is exempt: it exists precisely to fall back.
+        email_backend = self.EMAIL_BACKEND.strip().lower()
+        if email_backend not in self._SUPPORTED_EMAIL_BACKENDS:
+            raise RuntimeError(
+                f"Unsupported EMAIL_BACKEND {self.EMAIL_BACKEND!r}; expected one of "
+                f"{sorted(self._SUPPORTED_EMAIL_BACKENDS)}."
+            )
+        if email_backend == "resend" and self.RESEND_API_KEY is None:
+            raise RuntimeError("EMAIL_BACKEND=resend requires RESEND_API_KEY.")
+        if email_backend == "smtp" and not self.SMTP_HOST:
+            raise RuntimeError("EMAIL_BACKEND=smtp requires SMTP_HOST.")
+        if self.SMTP_USE_SSL and self.SMTP_USE_STARTTLS:
+            # Both at once means "connect with TLS, then upgrade to TLS".
+            raise RuntimeError(
+                "SMTP_USE_SSL and SMTP_USE_STARTTLS are mutually exclusive; "
+                "use SMTP_USE_SSL for port 465 or SMTP_USE_STARTTLS for port 587."
+            )
+        if self.EMAIL_VERIFICATION_TTL_HOURS <= 0:
+            raise RuntimeError("EMAIL_VERIFICATION_TTL_HOURS must be positive.")
+
         if environment not in _SUPPORTED_ENVIRONMENTS:
             # Fail closed: an unrecognised value (e.g. "prod") must not silently
             # skip the production checks below.
@@ -185,6 +302,61 @@ class Settings(BaseSettings):
                     "ENCRYPTION_MASTER_KEY must be configured in production to "
                     "encrypt files at rest."
                 )
+
+        self._warn_on_degraded_email_delivery()
+
+    def _warn_on_degraded_email_delivery(self) -> None:
+        """Log loudly when verification email cannot actually be delivered.
+
+        Deliberately a WARNING rather than a startup failure. A hard failure
+        here would turn "credentials not added yet" into a total API outage
+        (``RUN_MIGRATIONS``-style startup abort), which is a far worse outcome
+        than a degraded feature — and the fix is an env var, which the operator
+        may not be able to set at the moment the deploy lands.
+
+        The consequence of the degraded mode is bounded and self-healing:
+        ``register_user`` suspends the verification gate while no real transport
+        is configured, so registration and sign-in keep working exactly as they
+        did before this feature existed, and full enforcement switches on by
+        itself as soon as a transport is configured. Nothing is ever silently
+        half-enforced.
+        """
+        if self._resolve_email_backend() != "console":
+            if "localhost" in self.APP_BASE_URL or "127.0.0.1" in self.APP_BASE_URL:
+                # Checked regardless of transport: a localhost link is broken
+                # whether it is sent by Resend, SMTP, or nobody at all.
+                logger.error(
+                    "APP_BASE_URL is %r, so verification links would point at the "
+                    "developer's machine and be unusable for real users. Set it to "
+                    "the public SPA origin (e.g. https://transform-web.onrender.com).",
+                    self.APP_BASE_URL,
+                )
+            return
+
+        if self.EMAIL_VERIFICATION_REQUIRED:
+            logger.error(
+                "Email delivery is not configured (EMAIL_BACKEND=%s), so email "
+                "verification is SUSPENDED: new accounts are still marked "
+                "unverified and no verification email can be sent, but sign-in is "
+                "NOT blocked, because blocking it would lock out every new signup "
+                "with no way to recover. Set RESEND_API_KEY (or SMTP_HOST + SMTP_* "
+                "/ EMAIL_BACKEND=smtp) to enable real delivery and enforcement.",
+                self.EMAIL_BACKEND,
+            )
+        else:
+            logger.warning(
+                "Email delivery is not configured (EMAIL_BACKEND=%s); verification "
+                "emails will be logged, not sent.",
+                self.EMAIL_BACKEND,
+            )
+
+        if "localhost" in self.APP_BASE_URL or "127.0.0.1" in self.APP_BASE_URL:
+            logger.error(
+                "APP_BASE_URL is %r, so verification links would point at the "
+                "developer's machine and be unusable for real users. Set it to the "
+                "public SPA origin (e.g. https://transform-web.onrender.com).",
+                self.APP_BASE_URL,
+            )
 
 
 @lru_cache

@@ -11,6 +11,39 @@ export interface UserResponse {
   email: string
   is_active: boolean
   created_at: string
+  /**
+   * False until the address is confirmed through the emailed link.
+   *
+   * Optional because the API and the SPA deploy independently (auto-deploy is
+   * off), so a new bundle can briefly talk to an older API that does not send
+   * it. An absent value is normalised to `true` — treating "the API didn't say"
+   * as "unverified" would show every user of that API a warning they cannot
+   * clear. Read it through `normalizeUser`, not directly.
+   */
+  email_verified?: boolean
+}
+
+/**
+ * Machine-readable code the API returns on a 403 when sign-in is refused only
+ * because the address is unverified. The credentials were correct, so the SPA
+ * must offer a recovery path instead of discarding them.
+ */
+export const EMAIL_NOT_VERIFIED = "EMAIL_NOT_VERIFIED"
+
+export interface VerifyEmailRequest {
+  token: string
+}
+
+export interface VerifyEmailResponse {
+  ok: boolean
+  /** True when the account was already verified before this attempt. */
+  already_verified: boolean
+  username: string | null
+  message: string
+}
+
+export interface ResendVerificationResponse {
+  message: string
 }
 
 export interface TokenResponse {
