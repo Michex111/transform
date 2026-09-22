@@ -5,27 +5,16 @@ import { MagnifyingGlass, CaretDown, CaretRight, Check } from "@phosphor-icons/r
 import { FORMAT_CATEGORIES } from "@/lib/formatCatalog";
 import { formatTint, formatVisual } from "@/lib/formatVisual";
 import { isPickableFormat, restrictFormatCategories } from "@/lib/formatPickerOptions";
+import { useMediaQuery } from "@/lib/useMediaQuery";
 
 /**
  * True when the viewport is too small for the anchored popover: phone width, or
  * too short for the panel to hang below the trigger (a landscape phone measures
- * 740x360). Subscribes to changes so rotating the device re-lays it out.
+ * 740x360). `useMediaQuery` subscribes to changes, so rotating the device
+ * re-lays it out.
  */
 function useCompactViewport(): boolean {
-  const query = "(max-width: 639px), (max-height: 32rem)";
-  const [compact, setCompact] = useState(
-    () => typeof window !== "undefined" && window.matchMedia(query).matches,
-  );
-
-  useEffect(() => {
-    const mql = window.matchMedia(query);
-    const onChange = () => setCompact(mql.matches);
-    onChange();
-    mql.addEventListener("change", onChange);
-    return () => mql.removeEventListener("change", onChange);
-  }, []);
-
-  return compact;
+  return useMediaQuery("(max-width: 639px), (max-height: 32rem)");
 }
 
 /**

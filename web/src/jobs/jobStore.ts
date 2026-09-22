@@ -157,6 +157,23 @@ export function showsCreditsUsed(
 }
 
 /**
+ * When a job was created, from whichever source actually has it.
+ *
+ * Two sources, and a row can have either: `createdAt` is stamped by this
+ * browser when a conversion is started here, while `created_at` is the server's
+ * row timestamp and is what a history list loaded from the API carries. Every
+ * date display and date sort goes through here, because reading only the
+ * client-side one is what made the Created column show "—" for every row
+ * restored from the server.
+ */
+export function jobCreatedAt(job: {
+  createdAt?: string;
+  created_at?: string | null;
+}): string | undefined {
+  return job.createdAt ?? job.created_at ?? undefined;
+}
+
+/**
  * Reconcile the on-screen list against the server's history for this identity.
  *
  * The server is authoritative, so anything it does not return is dropped —

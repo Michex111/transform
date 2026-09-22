@@ -11,6 +11,10 @@ class EventContext:
     message: str | None = None
     compute_duration_ms: int = 0
     credits_used: int = 0
+    # Plaintext bytes moved, measured on disk. 0 means "not measured"; only the
+    # terminal event carries a real value.
+    input_size_bytes: int = 0
+    output_size_bytes: int = 0
 
     def downloading(self):
         self.status = JobStatus.PROCESSING
@@ -30,12 +34,20 @@ class EventContext:
         self.message = "uploading file"
         return self
 
-    def completed(self, compute_duration_ms: int = 0, credits_used: int = 0):
+    def completed(
+        self,
+        compute_duration_ms: int = 0,
+        credits_used: int = 0,
+        input_size_bytes: int = 0,
+        output_size_bytes: int = 0,
+    ):
         self.status = JobStatus.COMPLETED
         self.progress = 100
         self.message = "conversion completed"
         self.compute_duration_ms = compute_duration_ms
         self.credits_used = credits_used
+        self.input_size_bytes = input_size_bytes
+        self.output_size_bytes = output_size_bytes
         return self
 
     def failed(self, error_message: str):

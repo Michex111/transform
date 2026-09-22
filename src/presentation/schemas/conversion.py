@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from pydantic import BaseModel, Field
 
 
@@ -31,6 +33,17 @@ class ConversionJobResponse(BaseModel):
     error_message: str | None = None
     credits_used: int = 0
     compute_duration_ms: int = 0
+    # Plaintext bytes moved, measured by the worker. 0 means "not measured"
+    # (a job that has not run yet), and the SPA renders that as no size line at
+    # all rather than as a zero-byte file.
+    input_size_bytes: int = 0
+    output_size_bytes: int = 0
+    # When the job row was created, so a history list can show *when* a
+    # conversion happened. Optional (not merely nullable) because the SPA and
+    # the API deploy independently: a new bundle can talk to an older API that
+    # does not send it yet, and the UI omits the field rather than showing a
+    # placeholder.
+    created_at: datetime | None = None
     # Client-side encryption metadata echoed back so the client can confirm its
     # FENCR blob was registered (and see the wrapped key is stored, not raw).
     data_key_wrapped: str | None = None

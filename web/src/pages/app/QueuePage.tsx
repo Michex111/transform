@@ -2,7 +2,7 @@ import { memo, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { LayoutGroup, motion } from "motion/react";
 import { useJobs, type UiJob } from "@/jobs/JobsContext";
-import { activeJobs, jobProgress } from "@/jobs/jobStore";
+import { activeJobs, jobCreatedAt, jobProgress } from "@/jobs/jobStore";
 import { Dropdown } from "@/components/Dropdown";
 import { Card, FormatChip, ProgressBar, StatusBadge } from "@/components/ui";
 import { formatDateTime } from "@/lib/format";
@@ -61,7 +61,7 @@ const QueueRow = memo(function QueueRow({ job }: QueueRowProps) {
         />
       </div>
       <span className="hidden justify-self-end font-mono text-xs text-muted lg:block">
-        {formatDateTime(job.createdAt)}
+        {formatDateTime(jobCreatedAt(job))}
       </span>
     </motion.li>
   );
@@ -85,9 +85,12 @@ export function QueuePage() {
     const arr = [...active];
     switch (sort) {
       case "newest":
-        return arr.sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? ""));
+        // `jobCreatedAt`, not `createdAt`: rows listed from the server carry the
+        // API's `created_at`, so sorting on the client-only field alone left
+        // those rows in arbitrary order.
+        return arr.sort((a, b) => (jobCreatedAt(b) ?? "").localeCompare(jobCreatedAt(a) ?? ""));
       case "oldest":
-        return arr.sort((a, b) => (a.createdAt ?? "").localeCompare(b.createdAt ?? ""));
+        return arr.sort((a, b) => (jobCreatedAt(a) ?? "").localeCompare(jobCreatedAt(b) ?? ""));
       case "status":
         return arr.sort((a, b) => (STATUS_ORDER[a.status] ?? 9) - (STATUS_ORDER[b.status] ?? 9));
       case "format":

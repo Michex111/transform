@@ -1,17 +1,20 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
-import { motion } from "motion/react";
-import { ArrowRight, Download, Gauge, Coins, HardDrives } from "@phosphor-icons/react";
+import { motion, useReducedMotion } from "motion/react";
+import { ArrowRight, CaretDown, Download, Gauge, Coins, HardDrives } from "@phosphor-icons/react";
 import { api } from "@/api/client";
 import { useAuth } from "@/auth/AuthContext";
 import { useToast } from "@/auth/ToastContext";
 import { useJobs } from "@/jobs/JobsContext";
+import { jobCreatedAt } from "@/jobs/jobStore";
 import { Button, Card, FormatMorph, ProgressBar, StatusBadge, StatCardSkeleton, Skeleton } from "@/components/ui";
 import { ErrorButton } from "@/components/ErrorButton";
+import { JobDetailsPanel } from "@/components/JobDetailsPanel";
 import { StorageBreakdownBar } from "@/components/StorageBreakdownBar";
 import { Stagger, Item } from "@/lib/motion";
 import { formatBytes, formatDateTime, formatDateOrNull } from "@/lib/format";
 import { DASHBOARD_ROW_GRID } from "@/lib/tableColumns";
+import { useNarrowViewport } from "@/lib/useMediaQuery";
 import type { DashboardResponse } from "@/api/types";
 
 export function DashboardPage() {
@@ -20,6 +23,14 @@ export function DashboardPage() {
   const { error } = useToast();
   const [stats, setStats] = useState<DashboardResponse | null>(null);
   const [loading, setLoading] = useState(true);
+  // One expanded row at a time; see HistoryPage for why the accordion is
+  // single-open. The recent list uses the same row shape as History's, so the
+  // two behave identically however wide the viewport is.
+  const [openJobId, setOpenJobId] = useState<string | null>(null);
+  // Only used to decide whether the panel must supply Delete/Retry: the row has
+  // no inline actions below `md`. Expansion itself is unconditional.
+  const compact = useNarrowViewport();
+  const reduce = useReducedMotion();
 
   // Pull the server history so the "recent" list isn't empty on a fresh login.
   useEffect(() => {
@@ -169,36 +180,81 @@ export function DashboardPage() {
           </div>
         ) : (
           <ul className="divide-y divide-outline">
-            {recent.map((job, i) => (
-              <motion.li
-                key={job.job_id}
-                className={DASHBOARD_ROW_GRID}
-                initial={{ opacity: 0, x: -12 }}
-                animate={{ opacity: 1, x: 0 }}
-                transition={{ delay: 0.1 + i * 0.05, duration: 0.3 }}
-              >
-                <span className="min-w-0 truncate text-sm text-on-background">
-                  {job.fileName ?? job.input_file}
-                </span>
-                <FormatMorph from={job.source_format} to={job.target_format} size="sm" />
-                <StatusBadge status={job.status} />
-                <span className="hidden text-right font-mono text-xs text-muted sm:block">
-                  {formatDateTime(job.createdAt)}
-                </span>
-                <div className="flex items-center justify-end">
-                  {job.status === "COMPLETED" && (
-                    <button
-                      onClick={() => handleDownload(job.job_id)}
-                      className="text-muted transition-colors hover:scale-110 hover:text-primary"
-                      aria-label="Download"
+            {recent.map((job, i) => {
+              const open = openJobId === job.job_id;
+              const fileName = job.fileName ?? job.input_file;
+              return (
+                <motion.li
+                  key={job.job_id}
+                  className={DASHBOARD_ROW_GRID}
+                  initial={{ opacity: 0, x: -12 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  transition={{ delay: 0.1 + i * 0.05, duration: 0.3 }}
+                  // One toggle path for mouse, keyboard and assistive tech: the
+                  // disclosure button below has no handler of its own, and its
+                  // click bubbles here. The panel's buttons stop propagation.
+                  onClick={() =>
+                    setOpenJobId((prev) => (prev === job.job_id ? null : job.job_id))
+                  }
+                >
+                  <button
+                    type="button"
+                    aria-expanded={open}
+                    aria-controls={`dashboard-details-${job.job_id}`}
+                    className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                  >
+                    <span className="min-w-0 truncate text-sm text-on-background">{fileName}</span>
+                    <motion.span
+                      aria-hidden
+                      className="shrink-0 text-muted"
+                      animate={reduce ? undefined : { rotate: open ? 180 : 0 }}
+                      transition={{ type: "spring", stiffness: 420, damping: 30 }}
                     >
-                      <Download size={18} />
-                    </button>
-                  )}
-                  {job.status === "FAILED" && <ErrorButton message={job.errorMessage} />}
-                </div>
-              </motion.li>
-            ))}
+                      <CaretDown size={14} weight="bold" />
+                    </motion.span>
+                  </button>
+                  {/* The morph was visible on a phone, which is what squeezed the
+                      filename to 0px: it needs a 150px track of its own. */}
+                  <span className="hidden md:flex">
+                    <FormatMorph from={job.source_format} to={job.target_format} size="sm" />
+                  </span>
+                  <span className="flex shrink-0 items-center">
+                    <StatusBadge status={job.status} />
+                  </span>
+                  <span className="hidden text-right font-mono text-xs text-muted md:block">
+                    {formatDateTime(jobCreatedAt(job))}
+                  </span>
+                  <div className="flex shrink-0 items-center justify-end">
+                    {job.status === "COMPLETED" && (
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleDownload(job.job_id);
+                        }}
+                        className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-full text-muted transition-transform hover:text-primary active:scale-90 md:h-auto md:w-auto md:hover:scale-110"
+                        aria-label="Download"
+                      >
+                        <Download size={18} />
+                      </button>
+                    )}
+                    {/* Failed rows get the message as text in the panel on a
+                        phone; the hover popover is desktop-only. */}
+                    {job.status === "FAILED" && (
+                      <span className="hidden md:inline-flex">
+                        <ErrorButton message={job.errorMessage} />
+                      </span>
+                    )}
+                  </div>
+                  <JobDetailsPanel
+                    open={open}
+                    job={job}
+                    id={`dashboard-details-${job.job_id}`}
+                    compact={compact}
+                  />
+                </motion.li>
+              );
+            })}
           </ul>
         )}
       </Card>
