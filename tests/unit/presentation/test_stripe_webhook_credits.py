@@ -134,6 +134,170 @@ def test_checkout_completed_grant_credit_purchase() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Re-applying a plan must NEVER destroy purchased credits.
+#
+# Purchased credits share the bucket with the plan grant, so after a purchase the
+# stored allowance is LARGER than the tier's monthly grant. The old code clamped
+# both fields down to the tier grant in that case, which wiped the purchase:
+# 500 plan + 1000 bought = 1500, and re-applying PRO dropped it to 500.
+#
+# This is not a corner case. Stripe retries webhook deliveries, and
+# ``invoice.payment_succeeded`` re-applies the tier on every monthly renewal, so
+# the bug would silently destroy purchased credits once a month.
+# ---------------------------------------------------------------------------
+
+PLAN_PRO = 500  # TierPolicy(PRO).monthly_conversion_credits
+PURCHASED_CREDITS = 1000
+
+
+def test_purchased_credits_survive_subscription_reactivation() -> None:
+    """The exact production failure: 500 plan + 1000 bought must stay 1500."""
+    with sqlite_session_factory() as factory:
+
+        async def _run() -> None:
+            async with factory() as session:
+                # Arrange: activate PRO, then buy 1000 credits on top.
+                await webhooks._activate_subscription(
+                    session,
+                    user_id="42",
+                    tier_name="pro",
+                    stripe_customer_id="cus_mock",
+                    stripe_subscription_id="sub_mock",
+                )
+                await webhooks._grant_purchased_credits(
+                    session, user_id="42", credits=PURCHASED_CREDITS, reference_id="cs_buy_1"
+                )
+
+                from src.infrastructure.adapters.repository.sql_credit_repo import SQLCreditRepository
+                repo = SQLCreditRepository(session)
+                before = await repo.get_credit("42", _period_key())
+                assert before is not None
+                assert before.allowance == PLAN_PRO + PURCHASED_CREDITS
+
+                # Act: re-apply the SAME plan — a Stripe retry, or the
+                # invoice.payment_succeeded sent on the monthly renewal.
+                await webhooks._activate_subscription(
+                    session,
+                    user_id="42",
+                    tier_name="pro",
+                    stripe_customer_id="cus_mock",
+                    stripe_subscription_id="sub_mock",
+                )
+
+                # Assert: the purchased credits are intact.
+                after = await repo.get_credit("42", _period_key())
+                assert after is not None
+                assert after.allowance == PLAN_PRO + PURCHASED_CREDITS
+                assert after.remaining == before.remaining
+
+        asyncio.run(_run())
+
+
+def test_reactivating_a_plan_is_idempotent() -> None:
+    """Applying the same tier repeatedly must not change the bucket."""
+    with sqlite_session_factory() as factory:
+
+        async def _run() -> None:
+            async with factory() as session:
+                from src.infrastructure.adapters.repository.sql_credit_repo import SQLCreditRepository
+
+                for _ in range(3):
+                    await webhooks._activate_subscription(
+                        session,
+                        user_id="7",
+                        tier_name="pro",
+                        stripe_customer_id="cus_x",
+                        stripe_subscription_id="sub_x",
+                    )
+
+                repo = SQLCreditRepository(session)
+                credit = await repo.get_credit("7", _period_key())
+                assert credit is not None
+                assert credit.allowance == PLAN_PRO
+                assert credit.remaining == PLAN_PRO
+
+        asyncio.run(_run())
+
+
+def test_applying_a_smaller_plan_does_not_claw_back_purchased_credits() -> None:
+    """A downgrade must not confiscate credits the user paid for."""
+    with sqlite_session_factory() as factory:
+
+        async def _run() -> None:
+            async with factory() as session:
+                from src.infrastructure.adapters.repository.sql_credit_repo import SQLCreditRepository
+
+                await webhooks._activate_subscription(
+                    session,
+                    user_id="9",
+                    tier_name="pro_plus",
+                    stripe_customer_id=None,
+                    stripe_subscription_id=None,
+                )
+                await webhooks._grant_purchased_credits(
+                    session, user_id="9", credits=PURCHASED_CREDITS, reference_id="cs_buy_2"
+                )
+                repo = SQLCreditRepository(session)
+                before = await repo.get_credit("9", _period_key())
+                assert before is not None
+
+                # Downgrade to the cheaper plan.
+                await webhooks._activate_subscription(
+                    session,
+                    user_id="9",
+                    tier_name="pro",
+                    stripe_customer_id=None,
+                    stripe_subscription_id=None,
+                )
+
+                after = await repo.get_credit("9", _period_key())
+                assert after is not None
+                # Never below what the user bought plus the new plan grant.
+                assert after.allowance >= PURCHASED_CREDITS
+                assert after.remaining == before.remaining
+                assert after.remaining <= after.allowance
+
+        asyncio.run(_run())
+
+
+def test_upgrading_a_plan_raises_the_allowance_and_keeps_unspent_credits() -> None:
+    """The legitimate case must still work: raise the grant, carry the balance."""
+    with sqlite_session_factory() as factory:
+
+        async def _run() -> None:
+            async with factory() as session:
+                from src.infrastructure.adapters.repository.sql_credit_repo import SQLCreditRepository
+
+                # FREE bucket at 50, with some already spent.
+                repo = SQLCreditRepository(session)
+                from src.domain.subscriptions.entities.credit import Credit
+                from src.domain.subscriptions.value_object.tier import SubscriptionTier
+                await repo.save_credit(
+                    Credit.from_tier(owner_id="11", period_key=_period_key(), tier=SubscriptionTier.FREE)
+                )
+                seeded = await repo.get_credit("11", _period_key())
+                assert seeded is not None
+                seeded.remaining = 20
+                await repo.save_credit(seeded)
+
+                await webhooks._activate_subscription(
+                    session,
+                    user_id="11",
+                    tier_name="pro",
+                    stripe_customer_id=None,
+                    stripe_subscription_id=None,
+                )
+
+                upgraded = await repo.get_credit("11", _period_key())
+                assert upgraded is not None
+                assert upgraded.allowance == PLAN_PRO
+                # 20 unspent + (500 - 50) added by the upgrade.
+                assert upgraded.remaining == 20 + (PLAN_PRO - 50)
+
+        asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
 # SEC-6 — unbounded body read on the unauthenticated webhook
 # ---------------------------------------------------------------------------
 

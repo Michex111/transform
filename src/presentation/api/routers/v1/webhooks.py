@@ -72,17 +72,35 @@ async def _activate_subscription(
         credit_repo = SQLCreditRepository(db)
         existing = await credit_repo.get_credit(user_id, period_key)
         if existing is not None:
-            # Do NOT reset `remaining` to the full allowance — that would wipe
-            # any credits the user purchased on top. Instead raise the allowance
-            # by the delta and carry the remaining balance forward, clamped so it
-            # never exceeds the new allowance.
+            # Raise the bucket to this tier's monthly grant, carrying the
+            # unspent balance forward. Purchased credits share this bucket (the
+            # purchase path adds to ``allowance``), so a stored allowance
+            # LARGER than the tier grant is normal — it means the user bought
+            # extra credits on top of their plan.
+            #
+            # Never reduce ``allowance``/``remaining`` here. The previous code
+            # clamped both down to the tier grant whenever the stored value was
+            # larger, which silently DESTROYED purchased credits: 500 plan
+            # credits + 1000 bought = 1500, and re-applying the PRO plan dropped
+            # it to 500. That is not a rare path — Stripe retries deliveries,
+            # and ``invoice.payment_succeeded`` re-applies the tier on every
+            # monthly renewal, so the credits would vanish once a month.
+            #
+            # Because re-applying a tier the user already has is now a no-op,
+            # this handler is idempotent for subscription events.
+            #
+            # The principled long-term fix is to track the plan grant and the
+            # purchased total separately (the ``credit_transactions`` ledger
+            # already records every purchase) so a genuine DOWNGRADE can reclaim
+            # the unused plan portion without touching credits the user paid
+            # for. Until then, deliberately erring towards keeping credits:
+            # destroying something a user paid for is far worse than leaving a
+            # downgraded account holding a few extra.
             delta = allowance - existing.allowance
-            existing.allowance = allowance
             if delta > 0:
+                existing.allowance = allowance
                 existing.remaining = min(existing.remaining + delta, allowance)
-            elif existing.remaining > allowance:
-                existing.remaining = allowance
-            await credit_repo.save_credit(existing)
+                await credit_repo.save_credit(existing)
         else:
             await credit_repo.save_credit(
                 Credit.from_tier(
