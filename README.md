@@ -78,6 +78,41 @@ setup is needed for development.
 - Pro Plus tier (100GB, 2000 conversions)
 - Enterprise tier (custom limits)
 - API key authentication
+- **Email verification on sign-up** — see below
+
+### Email Verification on Sign-up
+
+Registering creates an **unverified** account and emails a single-use
+activation link. An unverified account is refused at sign-in with
+`403 {"detail": {"code": "EMAIL_NOT_VERIFIED", "email": "…", "message": "…"}}`.
+The SPA turns that into a "check your inbox" screen with a resend button rather
+than a generic credentials error.
+
+Flow: `POST /api/users/register` → email → user clicks
+`{APP_BASE_URL}/verify-email?token=…` → `POST /api/users/verify-email`
+(`{"token": "…"}` → `{ok, already_verified, username, message}`) →
+sign-in succeeds. `POST /api/users/resend-verification` (`{"email": "…"}`)
+issues a new link and always answers `202` so it cannot be used to enumerate
+accounts — as does verification itself, whose error message is deliberately
+identical for a forged, expired, and already-used token.
+
+Token handling: 32 CSPRNG bytes (`secrets.token_urlsafe`), stored **only** as a
+SHA-256 digest (a database leak cannot be replayed to verify accounts),
+single-use (cleared on success), and expiring after
+`EMAIL_VERIFICATION_TTL_HOURS`. Resends are throttled by
+`EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS` and both endpoints share the strict
+auth rate-limit bucket.
+
+**Delivery is required for enforcement to apply.** With no transport configured
+(`EMAIL_BACKEND` resolving to `console`) the API logs an ERROR at boot and the
+sign-in gate stays **open**: refusing sign-in for a link that can never arrive
+would lock out every new sign-up permanently. Accounts are still created
+unverified, so enforcement switches on by itself as soon as `RESEND_API_KEY` (or
+`SMTP_HOST`) is set. `EMAIL_VERIFICATION_REQUIRED=false` disables the gate
+explicitly, as an operational escape hatch if delivery breaks.
+
+Accounts that existed before this feature were **grandfathered to verified** by
+migration `0015_email_verification`, so no pre-existing user is locked out.
 
 ### File Library
 - **Folders**: signed-in users can create nested folders, rename them, move
@@ -203,8 +238,10 @@ Full OpenAPI documentation is available at `/docs` when the server is running.
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| POST | `/api/users/register` | Register new user |
-| POST | `/api/users/token` | Login (get JWT + refresh token) |
+| POST | `/api/users/register` | Register new user (unverified) and email a verification link |
+| POST | `/api/users/verify-email` | Consume a verification token and activate the account |
+| POST | `/api/users/resend-verification` | Email a fresh verification link (always `202`) |
+| POST | `/api/users/token` | Login (get JWT + refresh token); `403 EMAIL_NOT_VERIFIED` while unverified |
 | POST | `/api/users/refresh` | Exchange refresh token for a new access token |
 | GET | `/api/users/me` | Get current user |
 | GET | `/api/conversions/supported` | List supported conversions |
@@ -261,6 +298,15 @@ All configuration is via environment variables (see `.env.example`):
 | `S3_CORS_ALLOWED_ORIGINS` | Yes when uploading from a browser | JSON list of origins allowed to `PUT`/`GET` directly against object storage. Must include the SPA origin |
 | `FRONTEND_DIST_DIR` | No | **Deprecated / no-op.** The API no longer serves the SPA; the value is never read. Retained only so an environment that still sets it does not fail boot |
 | `ENCRYPTION_MASTER_KEY` | No | Fernet key for file encryption |
+| `EMAIL_BACKEND` | No | `auto` (default) / `console` / `smtp` / `resend`. `auto` picks Resend when `RESEND_API_KEY` is set, else SMTP when `SMTP_HOST` is set, else the log-only `console` transport. Naming a transport whose credentials are missing is a startup error |
+| `EMAIL_FROM_ADDRESS` / `EMAIL_FROM_NAME` | No | Envelope sender. The address must be on a domain verified with your provider |
+| `EMAIL_REPLY_TO` | No | Optional monitored Reply-To (left unset rather than pointed at an unread mailbox) |
+| `RESEND_API_KEY` | No | Resend API key (enables `resend`) |
+| `SMTP_HOST` / `SMTP_PORT` / `SMTP_USERNAME` / `SMTP_PASSWORD` | No | Any SMTP relay — SendGrid, Postmark, Mailgun, SES, Google Workspace. `SMTP_USE_STARTTLS` (587) and `SMTP_USE_SSL` (465) are mutually exclusive |
+| `APP_BASE_URL` | Yes in production | Public SPA origin used to build verification links. A `localhost` value is logged as an ERROR in production because the links would be unusable |
+| `EMAIL_VERIFICATION_TTL_HOURS` | No | Verification link lifetime (default 24) |
+| `EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS` | No | Minimum gap between resends for one account (default 60) |
+| `EMAIL_VERIFICATION_REQUIRED` | No | `true` (default) blocks unverified sign-in *when a transport is configured*; `false` disables the gate entirely |
 
 ### Frontend Configuration (`web/`)
 
@@ -283,6 +329,13 @@ host's build environment variable always wins over it.
   from the deployed UI fails the CORS preflight (and direct uploads are blocked).
 - Point all `STRIPE_*_URL` settings at the SPA origin, e.g.
   `https://transform-web.onrender.com/app/billing?checkout=success`.
+- **Configure email delivery and `APP_BASE_URL`, or email verification stays
+  suspended.** Set `RESEND_API_KEY` (or `SMTP_HOST` + the `SMTP_*` settings) and
+  `APP_BASE_URL=https://transform-web.onrender.com`. Until then the API logs an
+  ERROR at boot and *allows* unverified sign-in, so new accounts work but are
+  never actually verified. `EMAIL_FROM_ADDRESS` must be on a domain verified
+  with your provider or the send is rejected. Confirm what took effect from the
+  boot log line `Email transport: <backend> (verification gate <state>)`.
 - Set `BACKBLAZE_USE_SSL=true` with an HTTPS storage endpoint.
 - Run migrations as a one-shot step (`RUN_MIGRATIONS=false` on replicas), or
   rely on the startup migration with a single API replica.

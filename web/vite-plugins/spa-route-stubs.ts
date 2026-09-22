@@ -43,6 +43,9 @@ export const SPA_ROUTES = [
   // Auth routes
   "/login",
   "/register",
+  // Landing page for the link in the verification email. Reached by a hard load
+  // from a mail client, so it MUST have a stub or the link 404s at the CDN.
+  "/verify-email",
   // Authenticated app routes
   "/app/dashboard",
   "/app/convert",

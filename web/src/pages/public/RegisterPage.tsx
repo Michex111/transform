@@ -3,6 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { motion } from "motion/react";
 import { useAuth } from "@/auth/AuthContext";
 import { useToast } from "@/auth/ToastContext";
+import { VerificationNotice } from "@/auth/VerificationNotice";
 import { Button, Field, Logo } from "@/components/ui";
 
 export function RegisterPage() {
@@ -14,6 +15,13 @@ export function RegisterPage() {
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [busy, setBusy] = useState(false);
+  /**
+   * Set once the account exists but its email is unverified. The user is NOT
+   * signed in at this point, so navigating to the app would bounce straight
+   * back through `ProtectedRoute` — the flow ends here until they click the
+   * link in their inbox.
+   */
+  const [pendingEmail, setPendingEmail] = useState<string | null>(null);
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
@@ -23,13 +31,26 @@ export function RegisterPage() {
     }
     setBusy(true);
     try {
-      await register({ username, email, password });
-      navigate("/app/dashboard", { replace: true });
+      const created = await register({ username, email, password });
+      setPendingEmail(created.email || email);
     } catch (err) {
       error(err instanceof Error ? err.message : "Registration failed");
     } finally {
       setBusy(false);
     }
+  }
+
+  if (pendingEmail) {
+    return (
+      <div className="format-glyph-field flex min-h-[70vh] items-center justify-center px-4 py-12">
+        <VerificationNotice
+          email={pendingEmail}
+          heading="Check your inbox"
+          intro="Your account is created. We sent a verification link to"
+          onBack={() => navigate("/login", { replace: true })}
+        />
+      </div>
+    );
   }
 
   return (

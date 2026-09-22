@@ -2,7 +2,7 @@
 
 **ISO 27001:2022 A.5.15–A.5.18, A.8.2–A.8.5 · Transform (File Conversion SaaS)**
 **Document owner:** CISO / InfoSec Lead · **Classification:** Internal — Confidential
-**Last updated:** 2026-08-22
+**Last updated:** 2026-09-22
 
 This policy details the authentication (AuthN) and authorization (AuthZ)
 mechanisms, token and API-key lifecycle, tier-based limits, ownership checks,
@@ -29,6 +29,49 @@ paths resolve to an active `UserModel`, then call
 > both, the API key decides the identity & limit. This is intentional for
 > per-key rate limiting, but operators should document it (a mis-set header can
 > authenticate as the key owner rather than the JWT subject).
+
+### Email address verification (sign-up)
+
+Before either method above can be used, the account must prove it controls its
+email address. Implementation: `src/domain/security/enitities/email_verification.py`,
+`src/application/services/email_templates.py`,
+`src/infrastructure/adapters/email/`, and
+`src/presentation/api/routers/v1/users.py`.
+
+| Step | Endpoint | Behaviour |
+|---|---|---|
+| Register | `POST /api/users/register` | Creates the user with `email_verified = false` and emails a single-use activation link. |
+| Activate | `POST /api/users/verify-email` | Consumes the token and returns `{ok, already_verified, username, message}`. |
+| Resend | `POST /api/users/resend-verification` | Issues a fresh link; **always** `202`, whether or not the address exists, so the endpoint cannot be used to enumerate accounts. |
+| Sign in | `POST /api/users/token` | `403` `{"detail": {"code": "EMAIL_NOT_VERIFIED", …}}` while unverified — evaluated *after* the password check, so it cannot be used to discover which usernames exist. |
+
+Token properties:
+
+- 32 bytes of CSPRNG entropy (`secrets.token_urlsafe`), persisted **only** as a
+  SHA-256 digest. A leaked database (backup, replica, log dump) therefore cannot
+  be replayed to verify — and thus take over — arbitrary accounts. SHA-256 rather
+  than argon2 is deliberate: the token is high-entropy random rather than
+  attacker-guessable, and verification is an indexed digest lookup.
+- Single-use (the digest is cleared on success) and time-boxed by
+  `EMAIL_VERIFICATION_TTL_HOURS` (default 24). Activation is a single conditional
+  `UPDATE … RETURNING` matching only an unexpired, still-stored digest, so two
+  concurrent clicks cannot both succeed and a missing expiry fails closed.
+- Resends are throttled by `EMAIL_VERIFICATION_RESEND_COOLDOWN_SECONDS` (default
+  60), which also stops the endpoint being used as a mail-bomb against a third
+  party's inbox.
+- `verify-email` and `resend-verification` are both unauthenticated and act on a
+  secret or trigger a send, so they share the strict auth bucket
+  (`RATE_LIMIT_AUTH=10`, `rate_limit.py`).
+- Verification failures return one generic message for forged, expired, and
+  already-used tokens, so probing cannot distinguish the three cases.
+
+> **Deployment caveat (G11).** The gate is enforced only when a real email
+> transport is configured (`EMAIL_BACKEND` resolving to `resend` or `smtp`).
+> With no transport the API fails **open**: it logs an ERROR at boot and permits
+> unverified sign-in. This is intentional — refusing sign-in for a link that can
+> never be delivered would permanently lock out every new registration — and it
+> self-heals once a transport is configured. `EMAIL_VERIFICATION_REQUIRED=false`
+> disables the gate explicitly as an operational escape hatch.
 
 ---
 
@@ -187,3 +230,9 @@ events via `src/infrastructure/logging/audit.py`:
   unit-tested, not only in the router.
 - This policy is reviewed at least annually; changes to auth model (new token
   type, new auth provider) require ISMS risk reassessment.
+- **Open action:** the sign-up email-verification control above added both a new
+  auth step and a new out-of-scope supplier (the email relay). `risk-assessment.md`
+  has not yet been re-scored for it — the register needs a risk entry covering
+  account-identity impersonation (registering an address the user does not
+  control) and abuse of the sign-up/resend path as a mail vector, with G11 as its
+  residual. Tracked here rather than silently assumed.

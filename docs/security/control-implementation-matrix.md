@@ -2,7 +2,7 @@
 
 **ISO 27001:2022 · Transform (File Conversion SaaS) — "How do we prove it"**
 **Document owner:** AppSec Engineer · **Classification:** Internal — Confidential
-**Last updated:** 2026-08-22
+**Last updated:** 2026-09-22
 
 This matrix maps every assessed ISO control to the concrete repository artifact
 (file path / config / Dockerfile / middleware / service) that a TÜV Süd auditor
@@ -34,10 +34,10 @@ for full rationale & gaps).
 | A.5.13 Labelling | N/A | No physical media. |
 | A.5.14 Information transfer | I | `src/application/services/file_transfer_service.py`; `src/infrastructure/adapters/security/encryption.py`; `src/infrastructure/adapters/storage/sanitize.py`. |
 | A.5.15 Access control | I | `docs/security/access-control-policy.md`; `src/presentation/api/dependencies/auth_dependencies.py`. |
-| A.5.16 Identity mgmt | I | `src/infrastructure/database/migrations/versions/0002_create_users.py`; `user.is_active` check in `auth_dependencies.py`. |
-| A.5.17 Authentication info | I | `jwt_provider.py` (argon2 via `pwdlib`); `api_key_service.py` (SHA-256 hash, show-once). |
+| A.5.16 Identity mgmt | I | `src/infrastructure/database/migrations/versions/0002_create_users.py`; `user.is_active` check in `auth_dependencies.py`. **Verified email ownership:** `0015_email_verification.py` (`users.email_verified` + hashed token columns, existing accounts grandfathered); sign-in refuses an unverified address (`src/presentation/api/routers/v1/users.py`). |
+| A.5.17 Authentication info | I | `jwt_provider.py` (argon2 via `pwdlib`); `api_key_service.py` (SHA-256 hash, show-once). Email-verification tokens: 32-byte CSPRNG values stored **only** as a SHA-256 digest, single-use, time-boxed (`src/domain/security/enitities/email_verification.py`). |
 | A.5.18 Access rights | I | `file_service.py`, `conversions.py:236,294`, `events.py:47`, `upload.py:56,75,110`, `api_key_service.py:67,77`. |
-| A.5.19 Supplier relationships | P | `deployment/docker/compose.yaml` (managed providers); `docs/security/isms-overview.md` §3.2. |
+| A.5.19 Supplier relationships | P | `deployment/docker/compose.yaml` (managed providers); `docs/security/isms-overview.md` §3.2. Includes the transactional-email relay once `RESEND_API_KEY`/`SMTP_HOST` is configured. |
 | A.5.20 Supplier agreements | PL | No DPA/SLA artifact in-repo. |
 | A.5.21 ICT supply chain | P | `pyproject.toml` + `uv.lock`; `worker.Dockerfile` (frozen deps). |
 | A.5.22 Monitor/review suppliers | P | `/health`, `/ready` (`main.py`); provider dashboards. |
@@ -90,7 +90,7 @@ for full rationale & gaps).
 | A.8.2 Privileged access rights | I | `CurrentUser` dependency; ownership checks; API-key per-tier limits. |
 | A.8.3 Information access restriction | I | `file_service.py`, `conversions.py`, `events.py`, `upload.py`, `api_keys.py`. |
 | A.8.4 Source code access | P | Repo branch protections (assumed). |
-| A.8.5 Secure authentication | I | `src/infrastructure/auth/jwt_provider.py`; `api_key_service.py`; token `type` claim enforcement. |
+| A.8.5 Secure authentication | I | `src/infrastructure/auth/jwt_provider.py`; `api_key_service.py`; token `type` claim enforcement. Sign-up requires a **verified email address** before credentials are accepted (see A.5.16; deployment caveat G11). |
 | A.8.6 Capacity mgmt | I | `settings.py` tier size/rate limits; worker consumer group (`WORKER_CONSUMER_GROUP`) + `WORKER_CONVERSION_TIMEOUT` (the per-read batch size `WORKER_BATCH_SIZE` is defined but **not yet wired** into the consumer — see the worker note below); `nginx.conf` `client_max_body_size 1024M`. |
 | A.8.7 Malware protection | P | Non-root container + frozen deps; **no AV scan** (G4). |
 | A.8.8 Technical vulnerabilities | P | Pinned deps + boot validation; **no SAST/DAST/CVE gate** (G8). |
@@ -134,6 +134,7 @@ for full rationale & gaps).
 | At-rest encryption | `src/infrastructure/adapters/security/encryption.py` |
 | Object-key path-traversal guard | `src/infrastructure/adapters/storage/sanitize.py` |
 | AuthN (JWT, password hashing) | `src/infrastructure/auth/jwt_provider.py` |
+| Email verification (token lifecycle + delivery) | `src/domain/security/enitities/email_verification.py`; `src/infrastructure/adapters/email/*`; `src/application/services/email_templates.py` |
 | AuthZ / ownership | `src/presentation/api/dependencies/auth_dependencies.py`; `src/application/services/*.py` |
 | API-key hashing & lifecycle | `src/application/services/api_key_service.py` |
 | Stripe webhook verification | `src/presentation/api/routers/v1/webhooks.py` |
@@ -171,3 +172,8 @@ Use this to locate each control's proof during a walkthrough:
    is ciphertext and the API streams a decrypted download (G1 caveat: unset
    master key = plaintext).
 9. **Review retention** — show the cleanup worker config & deletion logic.
+10. **Prove email verification** — register an account, show the delivered
+    activation link (`EMAIL_BACKEND=console` logs it locally, so no provider is
+    needed for the demo), attempt sign-in *before* activating and show the `403
+    EMAIL_NOT_VERIFIED` gate, activate, confirm sign-in now succeeds, then show
+    the same link replayed is rejected (single-use).

@@ -3,6 +3,9 @@ import { Link, useLocation, useNavigate } from "react-router-dom";
 import { motion } from "motion/react";
 import { useAuth } from "@/auth/AuthContext";
 import { useToast } from "@/auth/ToastContext";
+import { VerificationNotice } from "@/auth/VerificationNotice";
+import { ApiError } from "@/api/client";
+import { EMAIL_NOT_VERIFIED } from "@/api/types";
 import { Button, Field, Logo } from "@/components/ui";
 
 export function LoginPage() {
@@ -10,9 +13,19 @@ export function LoginPage() {
   const { error } = useToast();
   const navigate = useNavigate();
   const location = useLocation();
-  const [username, setUsername] = useState("");
+  const [username, setUsername] = useState(
+    () => (location.state as { username?: string } | null)?.username ?? "",
+  );
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
+  /**
+   * Set when the API refuses sign-in solely because the address is unverified.
+   *
+   * This must NOT be treated like a bad password: the credentials were correct,
+   * so clearing them and showing a generic error would leave the user with no
+   * idea that a link is sitting in their inbox.
+   */
+  const [unverifiedEmail, setUnverifiedEmail] = useState<string | null>(null);
 
   const from = (location.state as { from?: string } | null)?.from ?? "/app/dashboard";
 
@@ -23,10 +36,38 @@ export function LoginPage() {
       await login(username, password);
       navigate(from, { replace: true });
     } catch (err) {
-      error(err instanceof Error ? err.message : "Sign in failed");
+      if (err instanceof ApiError && err.code === EMAIL_NOT_VERIFIED) {
+        // The API includes the account's own address on this response (it is
+        // only reachable with a correct username *and* password), which is what
+        // makes the "resend" button work when the user signed in by username.
+        const address = err.details?.email;
+        if (typeof address === "string" && address) {
+          setUnverifiedEmail(address);
+        } else {
+          // Should be unreachable. Rather than render a panel with no address
+          // to resend to, surface the API's explanation and leave the form
+          // usable.
+          error(err.message);
+        }
+      } else {
+        error(err instanceof Error ? err.message : "Sign in failed");
+      }
     } finally {
       setBusy(false);
     }
+  }
+
+  if (unverifiedEmail) {
+    return (
+      <div className="format-glyph-field flex min-h-[70vh] items-center justify-center px-4 py-12">
+        <VerificationNotice
+          email={unverifiedEmail}
+          heading="Verify your email"
+          intro="Your account is not activated yet. We sent a verification link to"
+          onBack={() => setUnverifiedEmail(null)}
+        />
+      </div>
+    );
   }
 
   return (

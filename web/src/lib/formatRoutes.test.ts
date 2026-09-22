@@ -64,7 +64,7 @@ describe("parseFormatSlug", () => {
 
   // Even in the impossible case where a static path reached the dynamic route,
   // it must not be mistaken for a format page.
-  it.each(["pricing", "security", "convert", "login", "register"])(
+  it.each(["pricing", "security", "convert", "login", "register", "verify-email"])(
     "does not treat the static path %o as a format",
     (slug) => {
       expect(parseFormatSlug(slug).kind).toBe("not-found");
@@ -84,6 +84,9 @@ describe("public route ranking", () => {
     { path: "/convert" },
     { path: "/login" },
     { path: "/register" },
+    // Reached by a hard load from the verification email, so a mis-ranking
+    // here would break the sign-up flow for every user.
+    { path: "/verify-email" },
   ];
 
   // `Array.prototype.at` is not in the configured ES2020 lib, so index manually.
@@ -92,7 +95,7 @@ describe("public route ranking", () => {
     return matches?.[matches.length - 1]?.route.path;
   };
 
-  it.each(["/pricing", "/security", "/convert", "/login", "/register"])(
+  it.each(["/pricing", "/security", "/convert", "/login", "/register", "/verify-email"])(
     "resolves %s to its own static route, not /:slug",
     (path) => {
       expect(lastMatchedPath(path)).toBe(path);

@@ -21,3 +21,35 @@ class UserModel(Base):
         nullable=False,
         default=lambda: datetime.now(UTC),
     )
+
+    # ------------------------------------------------------------------
+    # Email verification
+    # ------------------------------------------------------------------
+    # Whether the address has been proven to belong to the account holder.
+    # ``server_default=false`` matters: it is what makes the column safe to add
+    # to a live table (existing rows must not need a rewrite to be readable),
+    # and it is what the migration's backfill then flips for pre-existing users.
+    email_verified: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default="false",
+    )
+    email_verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    # SHA-256 digest of the outstanding verification token — never the token
+    # itself (see domain/security/enitities/email_verification.py). Indexed
+    # because verification looks the row up by digest rather than by user.
+    # NULL once the token is consumed, which is what makes it single-use.
+    email_verification_token_hash: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True
+    )
+    # When the last verification email was sent, used to rate-limit resends.
+    email_verification_sent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    email_verification_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
