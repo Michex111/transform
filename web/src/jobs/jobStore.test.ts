@@ -17,6 +17,7 @@ import {
   LEGACY_JOBS_STORAGE_KEY,
   activeJobs,
   isActiveJob,
+  jobCreatedAt,
   jobProgress,
   readStoredJobs,
   reconcileJobs,
@@ -388,6 +389,28 @@ describe("reduceStreamError", () => {
     const { job: next } = reduceStreamError(running);
 
     expect(next.errorMessage).toBeUndefined();
+  });
+});
+
+describe("jobCreatedAt", () => {
+  it("prefers the client-side stamp when this browser set one", () => {
+    expect(
+      jobCreatedAt({ createdAt: "2026-09-21T10:00:00Z", created_at: "2026-09-21T09:00:00Z" }),
+    ).toBe("2026-09-21T10:00:00Z");
+  });
+
+  it("falls back to the server's row timestamp", () => {
+    // This is the case every row loaded from the history endpoint lands in: the
+    // client-side field only exists for jobs started in this browser, which is
+    // why the Created column used to read "—" for a restored history.
+    expect(jobCreatedAt({ created_at: "2026-09-21T09:00:00Z" })).toBe("2026-09-21T09:00:00Z");
+  });
+
+  it("normalises a null server timestamp to undefined, not null", () => {
+    // `formatDateTime`/`formatDateTimeOrNull` distinguish them, and a `null`
+    // leaking through would read as "present but unparseable".
+    expect(jobCreatedAt({ created_at: null })).toBeUndefined();
+    expect(jobCreatedAt({})).toBeUndefined();
   });
 });
 

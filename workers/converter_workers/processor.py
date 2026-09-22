@@ -156,6 +156,25 @@ async def _convert_file(context: WorkerContext, job: ConversionJob, input_file: 
     )
     return elapsed_ms
 
+
+def _measure_file_sizes(input_file: Path, output_file: Path) -> tuple[int, int]:
+    """Byte sizes of the plaintext input and the converted output.
+
+    Reports ``0`` for a path that cannot be measured rather than raising: the
+    conversion has already succeeded and its output is on disk, so a stat
+    failure must not fail the job. The API and the UI read 0 as "not measured"
+    and omit the line, so an unreadable size degrades to a missing detail
+    instead of a wrong one.
+    """
+    def _size(path: Path) -> int:
+        try:
+            return max(0, path.stat().st_size)
+        except OSError as e:  # pragma: no cover - defensive
+            worker_logger.warning(f"Could not measure {path}: {e}")
+            return 0
+
+    return _size(input_file), _size(output_file)
+
 @retry_on_exception(logger=worker_logger)
 async def _upload_output_file(context: WorkerContext, job: ConversionJob, output_file: Path) -> str:
     """
@@ -286,6 +305,10 @@ async def process_job(context: WorkerContext, job: ConversionJob) -> None:
             message="conversion completed",
             compute_duration_ms=persisted.compute_duration_ms,
             credits_used=persisted.credits_used,
+            # Replay the stored sizes too: a client that missed the original
+            # terminal event would otherwise never learn them.
+            input_size_bytes=persisted.input_size_bytes,
+            output_size_bytes=persisted.output_size_bytes,
         )
         return
 
@@ -371,7 +394,18 @@ async def process_job(context: WorkerContext, job: ConversionJob) -> None:
                 target_format=job.conversion.target_format,
                 tier=tier,
             )
-            job.set_compute_result(duration_ms=compute_duration_ms, credits=credits_used)
+            # Measure both plaintext files now that they both exist: `plain_input`
+            # is the decrypted input for an encrypted job, so this reports the
+            # size of the file the user handed us rather than of the stored
+            # ciphertext. Best-effort — an unreadable size must not fail a
+            # conversion whose output is already on disk and correct.
+            input_size_bytes, output_size_bytes = _measure_file_sizes(plain_input, output_file)
+            job.set_compute_result(
+                duration_ms=compute_duration_ms,
+                credits=credits_used,
+                input_size_bytes=input_size_bytes,
+                output_size_bytes=output_size_bytes,
+            )
 
             # Upload the output file
             await context.event_port.publish(**event.uploading().to_dict())
@@ -381,7 +415,8 @@ async def process_job(context: WorkerContext, job: ConversionJob) -> None:
             job.complete(output_dest)
             worker_logger.debug(
                 f"Conversion completed for job {job.job_id}, output at {output_file}, "
-                f"compute_time={compute_duration_ms}ms, credits={credits_used}",
+                f"compute_time={compute_duration_ms}ms, credits={credits_used}, "
+                f"input_bytes={input_size_bytes}, output_bytes={output_size_bytes}",
                 extra=log_context,
             )
 
@@ -401,6 +436,8 @@ async def process_job(context: WorkerContext, job: ConversionJob) -> None:
             completed_fields = event.completed(
                 compute_duration_ms=compute_duration_ms,
                 credits_used=credits_used,
+                input_size_bytes=input_size_bytes,
+                output_size_bytes=output_size_bytes,
             ).to_dict()
             if credits_remaining is not None:
                 completed_fields["credits_remaining"] = credits_remaining

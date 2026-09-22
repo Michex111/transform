@@ -67,6 +67,20 @@ def test_conversion_job_repo_roundtrip() -> None:
                 assert fetched is not None
                 assert fetched.status == JobStatus.AWAITING_UPLOAD
                 assert fetched.user_id == user.id
+                # The creation instant survives the round-trip. It is the value
+                # the API returns as `created_at`, which is how a history row
+                # reports when its conversion happened.
+                assert fetched.created_at is not None
+
+                # …as do the measured byte sizes, which the detail panel shows.
+                job.set_compute_result(
+                    duration_ms=800, credits=2, input_size_bytes=3000, output_size_bytes=1200
+                )
+                await repo.update_conversion_job(job)
+                sized = await repo.get_conversion_job("job-1")
+                assert sized is not None
+                assert sized.input_size_bytes == 3000
+                assert sized.output_size_bytes == 1200
 
                 # status transition persists
                 job.pending_processing()
@@ -79,6 +93,7 @@ def test_conversion_job_repo_roundtrip() -> None:
                 history, total = await repo.list_user_history(user.id, offset=0, limit=10)
                 assert total == 1
                 assert history[0].job_id == "job-1"
+                assert history[0].created_at is not None
 
                 counts = await repo.count_by_status(user.id)
                 assert counts["TOTAL"] == 1

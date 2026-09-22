@@ -1,17 +1,20 @@
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { Download, ArrowCounterClockwise, Trash } from "@phosphor-icons/react";
+import { motion, useReducedMotion } from "motion/react";
+import { Download, ArrowCounterClockwise, CaretDown, Trash } from "@phosphor-icons/react";
 import { useJobs, type UiJob } from "@/jobs/JobsContext";
-import { showsCreditsUsed } from "@/jobs/jobStore";
+import { showsCreditsUsed, jobCreatedAt } from "@/jobs/jobStore";
 import { useAuth } from "@/auth/AuthContext";
 import { useToast } from "@/auth/ToastContext";
 import { getCachedFile, dropCachedFile } from "@/lib/fileCache";
 import { Dropdown } from "@/components/Dropdown";
 import { ErrorButton } from "@/components/ErrorButton";
+import { JobDetailsPanel } from "@/components/JobDetailsPanel";
 import { Modal } from "@/components/Modal";
 import { Button, Card, CreditsBadge, FormatChip, StatusBadge } from "@/components/ui";
 import { formatDateTime } from "@/lib/format";
 import { HISTORY_HEADER_GRID, HISTORY_ROW_GRID } from "@/lib/tableColumns";
+import { useNarrowViewport } from "@/lib/useMediaQuery";
 
 const PRIMARY_FORMATS = ["pdf", "docx", "xlsx", "png"] as const;
 const MORE_FORMATS = ["mp3", "mp4"] as const;
@@ -49,6 +52,16 @@ function writeStoredStatus(status: StatusFilter): void {
 
 interface HistoryRowProps {
   job: UiJob;
+  /** Whether this is the expanded row. Exactly one row is open at a time. */
+  open: boolean;
+  /**
+   * True below `md`, where the row is a card rather than a table row. It no
+   * longer controls whether the row expands (every row does, at every width) —
+   * only whether the panel has to supply the Delete/Retry actions, because the
+   * desktop row has them inline.
+   */
+  compact: boolean;
+  onToggle: (jobId: string) => void;
   onDownload: (jobId: string) => void;
   onRetry: (job: UiJob) => void;
   onDelete: (job: UiJob) => void;
@@ -57,34 +70,89 @@ interface HistoryRowProps {
 /**
  * Memoized history row. Keyed by stable props (job id + callback identities) so
  * a single SSE progress tick on one job does not re-render every other row.
+ *
+ * One row, two layouts: below `md` it is a card (name · status · download),
+ * from `md` up it is the five-column table row. The table row keeps the format
+ * chips, the token cost, the date and the per-row actions in their own tracks;
+ * the card leaves the name, the status and the download button, and moves the
+ * rest into the expanded panel.
+ *
+ * Clicking anywhere on the row — or pressing Enter on the filename button it
+ * contains — expands it, at every width.
  */
 const HistoryRow = memo(function HistoryRow({
   job,
+  open,
+  compact,
+  onToggle,
   onDownload,
   onRetry,
   onDelete,
 }: HistoryRowProps) {
+  const reduce = useReducedMotion();
+  const fileName = job.fileName ?? job.input_file;
+  const panelId = `history-details-${job.job_id}`;
+
   return (
-    <li className={HISTORY_ROW_GRID}>
-      <span className="min-w-0 truncate text-sm text-on-background">
-        {job.fileName ?? job.input_file}
-      </span>
+    <li
+      className={HISTORY_ROW_GRID}
+      // The whole row is the click target; the disclosure button inside it
+      // carries the semantics (`aria-expanded`/`aria-controls`) and has no
+      // handler of its own, so its click bubbles here. Keyboard, assistive tech
+      // and mouse all run the one toggle path instead of three that can
+      // disagree. The panel's own buttons stop propagation so an action never
+      // also toggles the row.
+      onClick={() => onToggle(job.job_id)}
+    >
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-controls={panelId}
+        className="flex min-w-0 flex-1 items-center gap-2 text-left md:min-w-0"
+      >
+        <span className="min-w-0 truncate text-sm text-on-background">{fileName}</span>
+        {/* The chevron sits with the name, not in the action cell, so the
+            download button never moves as rows open and close. */}
+        <motion.span
+          aria-hidden
+          className="shrink-0 text-muted"
+          animate={reduce ? undefined : { rotate: open ? 180 : 0 }}
+          transition={{ type: "spring", stiffness: 420, damping: 30 }}
+        >
+          <CaretDown size={14} weight="bold" />
+        </motion.span>
+      </button>
       <span className="hidden items-center gap-1.5 md:flex">
         <FormatChip format={job.source_format} size="xs" />
         <FormatChip format={job.target_format} size="xs" />
       </span>
-      <StatusBadge status={job.status} />
+      {/* `shrink-0` keeps the pill at its natural width on the card layout: the
+          name is the item that gives way, never the status. */}
+      <span className="flex shrink-0 items-center">
+        <StatusBadge status={job.status} />
+      </span>
       {/* Created sits in its own track: it used to share the actions cell, so
           the header's "Created" label never lined up with the dates, and the
           width changed per row with the number of action buttons. */}
       <span className="hidden font-mono text-xs text-muted lg:block">
-        {formatDateTime(job.createdAt)}
+        {formatDateTime(jobCreatedAt(job))}
       </span>
-      <div className="flex flex-wrap items-center justify-end gap-3">
-        {showsCreditsUsed(job) && <CreditsBadge credits={job.credits_used ?? 0} />}
+      <div className="flex shrink-0 flex-wrap items-center justify-end gap-3">
+        {/* Cost and delete are desktop-only in the row: on a phone they live in
+            the expanded panel. Both are `display:none` (not unmounted), so the
+            row never states the same fact twice on screen. */}
+        {showsCreditsUsed(job) && (
+          <span className="hidden md:inline-flex">
+            <CreditsBadge credits={job.credits_used ?? 0} />
+          </span>
+        )}
         <button
-          onClick={() => onDelete(job)}
-          className="text-muted transition-transform hover:scale-110 hover:text-error"
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onDelete(job);
+          }}
+          className="hidden text-muted transition-transform hover:scale-110 hover:text-error md:inline-flex"
           aria-label="Delete history record"
           title="Delete"
         >
@@ -92,25 +160,49 @@ const HistoryRow = memo(function HistoryRow({
         </button>
         {job.status === "COMPLETED" && (
           <button
-            onClick={() => onDownload(job.job_id)}
-            className="text-muted transition-transform hover:scale-110 hover:text-primary"
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              onDownload(job.job_id);
+            }}
+            // 44px on a phone: this is the one action a completed row offers, so
+            // it has to be reliably tappable; `md:h-auto` restores the 18px icon
+            // button the table row uses.
+            className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-full text-muted transition-transform hover:text-primary active:scale-90 md:h-auto md:w-auto md:hover:scale-110"
             aria-label="Download"
           >
             <Download size={18} />
           </button>
         )}
         {job.status === "FAILED" && (
-          <>
+          // The desktop row keeps the popover; the card shows the message as
+          // plain text in the panel instead, since a hover tooltip is
+          // unreachable by touch.
+          <span className="hidden md:flex md:items-center md:gap-3">
             <ErrorButton message={job.errorMessage} />
             <button
-              onClick={() => onRetry(job)}
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                onRetry(job);
+              }}
               className="inline-flex items-center gap-1 text-xs font-medium text-primary transition-transform hover:scale-105 hover:underline"
             >
               <ArrowCounterClockwise size={14} /> Retry
             </button>
-          </>
+          </span>
         )}
       </div>
+      <JobDetailsPanel
+        open={open}
+        job={job}
+        id={panelId}
+        compact={compact}
+        // From `md` up the row already has these inline, so the panel is
+        // informational only there — passing the handlers is what decides.
+        onDelete={compact ? onDelete : undefined}
+        onRetry={compact ? onRetry : undefined}
+      />
     </li>
   );
 });
@@ -125,6 +217,18 @@ export function HistoryPage() {
   const [range, setRange] = useState<string>("all");
   const [deleteTarget, setDeleteTarget] = useState<UiJob | null>(null);
   const [showMoreFormats, setShowMoreFormats] = useState(false);
+  // At most one row is expanded. An accordion keeps the list the same height
+  // when you open a second row, so the content you tapped does not slide away
+  // under your thumb — with several panels open at once, tapping the third row
+  // pushes it down by the height of the two above it.
+  const [openJobId, setOpenJobId] = useState<string | null>(null);
+  // Resolved once for the page rather than once per row: a subscription per row
+  // would be 100 `matchMedia` listeners for a full history.
+  const compact = useNarrowViewport();
+
+  const handleToggle = useCallback((jobId: string) => {
+    setOpenJobId((prev) => (prev === jobId ? null : jobId));
+  }, []);
 
   // Persist the status filter to localStorage so it survives a reload. Safe
   // writes (never throw) and validated reads (never produce an invalid filter).
@@ -166,6 +270,19 @@ export function HistoryPage() {
     },
     [client, removeJob, success, error],
   );
+
+  /**
+   * Deleting is destructive, so the buttons open the confirmation modal and the
+   * modal calls `handleDelete`.
+   *
+   * The rows used to call `handleDelete` directly while the modal rendered on
+   * `deleteTarget !== null` — a condition nothing ever set, so the confirmation
+   * existed but could never appear and the trash icon deleted irreversibly on
+   * the first tap.
+   */
+  const handleDeleteRequest = useCallback((job: UiJob) => {
+    setDeleteTarget(job);
+  }, []);
 
   const handleRetry = useCallback(
     async (job: UiJob) => {
@@ -357,9 +474,12 @@ export function HistoryPage() {
               <HistoryRow
                 key={job.job_id}
                 job={job}
+                compact={compact}
+                open={openJobId === job.job_id}
+                onToggle={handleToggle}
                 onDownload={handleDownload}
                 onRetry={handleRetry}
-                onDelete={handleDelete}
+                onDelete={handleDeleteRequest}
               />
             ))}
           </ul>

@@ -120,6 +120,22 @@ export interface ConversionJobResponse {
   error_message?: string | null
   credits_used?: number
   compute_duration_ms?: number
+  /**
+   * Plaintext bytes moved, measured by the worker. `0` means "not measured"
+   * (the job has not run, or the row predates these fields) and the UI omits
+   * the line rather than rendering a zero-byte file.
+   */
+  input_size_bytes?: number
+  output_size_bytes?: number
+  /**
+   * When the job row was created, ISO-8601.
+   *
+   * Optional because the API and the SPA deploy independently: a new bundle can
+   * briefly talk to an older API that does not send it. Compose it with the
+   * client-side `createdAt` through `jobCreatedAt()` rather than reading either
+   * one directly.
+   */
+  created_at?: string | null
   /** Echoed FENCR metadata: wrapped (Fernet) data key + client-encrypted flag. */
   data_key_wrapped?: string | null
   client_encrypted?: boolean
@@ -342,4 +358,6 @@ export interface JobProgressEvent {
   message?: string
   compute_duration_ms?: number
   credits_used?: number
+  input_size_bytes?: number
+  output_size_bytes?: number
 }

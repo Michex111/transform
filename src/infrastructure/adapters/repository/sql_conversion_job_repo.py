@@ -31,6 +31,8 @@ class SQLConversionJobRepository:
             error_message=job_data.error_message,
             compute_duration_ms=job_data.compute_duration_ms,
             credits_used=job_data.credits_used,
+            input_size_bytes=job_data.input_size_bytes,
+            output_size_bytes=job_data.output_size_bytes,
             data_key_wrapped=job_data.data_key_wrapped,
             client_encrypted=job_data.client_encrypted,
         )
@@ -52,6 +54,8 @@ class SQLConversionJobRepository:
                 error_message=job.error_message,
                 compute_duration_ms=job.compute_duration_ms,
                 credits_used=job.credits_used,
+                input_size_bytes=job.input_size_bytes,
+                output_size_bytes=job.output_size_bytes,
                 data_key_wrapped=job.data_key_wrapped,
                 client_encrypted=job.client_encrypted,
                 updated_at=datetime.now(UTC),
@@ -217,4 +221,7 @@ class SQLConversionJobRepository:
             user_id=job_model.user_id,
             data_key_wrapped=job_model.data_key_wrapped,
             client_encrypted=job_model.client_encrypted,
+            created_at=job_model.created_at,
+            input_size_bytes=job_model.input_size_bytes,
+            output_size_bytes=job_model.output_size_bytes,
         )

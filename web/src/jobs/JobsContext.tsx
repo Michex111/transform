@@ -130,10 +130,14 @@ function JobsStore({ userId, children }: { userId: number | null; children: Reac
                       evt.status === "FAILED"
                         ? evt.message ?? j.errorMessage
                         : j.errorMessage,
-                    // Only the terminal event carries the token cost; spreading
-                    // it in means the badge appears as soon as the job
-                    // completes, instead of waiting for the next refresh.
+                    // Only the terminal event carries the token cost and the
+                    // byte sizes; spreading them in means the detail panel is
+                    // complete as soon as the job finishes, instead of waiting
+                    // for the next refresh.
                     credits_used: evt.credits_used ?? j.credits_used,
+                    compute_duration_ms: evt.compute_duration_ms ?? j.compute_duration_ms,
+                    input_size_bytes: evt.input_size_bytes ?? j.input_size_bytes,
+                    output_size_bytes: evt.output_size_bytes ?? j.output_size_bytes,
                   }
                 : j,
             ),

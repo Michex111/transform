@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime
 
-from sqlalchemy import Boolean, DateTime, Enum as SqlEnum, Integer, String
+from sqlalchemy import BigInteger, Boolean, DateTime, Enum as SqlEnum, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.domain.conversions.value_object.job_status import JobStatus
@@ -23,6 +23,16 @@ class ConversionJobModel(Base):
     error_message: Mapped[str | None] = mapped_column(String, nullable=True)
     compute_duration_ms: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     credits_used: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Plaintext bytes moved, measured by the worker. 0 means "not measured"
+    # (a job that has not run, or one recorded before these columns existed),
+    # which the API and the SPA render as absent rather than as an empty file.
+    # BigInteger because a single object may be up to the PRO_PLUS 1 GB limit.
+    input_size_bytes: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default="0"
+    )
+    output_size_bytes: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0, server_default="0"
+    )
     # Client-side (FENCR) encryption metadata. ``data_key_wrapped`` holds the
     # Fernet ciphertext (base64 str) of the client's raw per-file data key,
     # wrapped with the per-user derived key at job creation. The raw key is

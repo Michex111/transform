@@ -206,6 +206,9 @@ export function normalizeConversionJob(value: unknown): ConversionJobResponse {
     error_message: asNullableString(o.error_message),
     credits_used: asNumber(o.credits_used),
     compute_duration_ms: asNumber(o.compute_duration_ms),
+    input_size_bytes: asNumber(o.input_size_bytes),
+    output_size_bytes: asNumber(o.output_size_bytes),
+    created_at: asNullableString(o.created_at),
     data_key_wrapped: asNullableString(o.data_key_wrapped),
     client_encrypted: asBoolean(o.client_encrypted),
   }
