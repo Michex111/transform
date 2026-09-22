@@ -1,34 +1,10 @@
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { useEffect, useRef, useState } from "react";
 import { motion } from "motion/react";
-import {
-  ChartBar,
-  ArrowsClockwise,
-  List,
-  ClockCounterClockwise,
-  FolderOpen,
-  CreditCard,
-  GearSix,
-  Lifebuoy,
-  SignOut,
-  DotsThree,
-} from "@phosphor-icons/react";
+import { DotsThree, SignOut } from "@phosphor-icons/react";
 import { useAuth } from "@/auth/AuthContext";
 import { Logo } from "@/components/ui";
-
-const NAV = [
-  { to: "/app/dashboard", label: "Dashboard", icon: ChartBar },
-  { to: "/app/convert", label: "Convert", icon: ArrowsClockwise },
-  { to: "/app/queue", label: "Queue", icon: List },
-  { to: "/app/history", label: "History", icon: ClockCounterClockwise },
-  { to: "/app/files", label: "Files", icon: FolderOpen },
-  { to: "/app/billing", label: "Billing", icon: CreditCard },
-  { to: "/app/settings", label: "Settings", icon: GearSix },
-  { to: "/app/support", label: "Support", icon: Lifebuoy },
-];
-
-const PRIMARY = NAV.slice(0, 4);
-const MORE = NAV.slice(4);
+import { MORE, NAV, PRIMARY } from "@/components/navItems";
 
 export function AppShell() {
   const { user, logout } = useAuth();
@@ -69,10 +45,11 @@ export function AppShell() {
           <Logo />
         </div>
         <nav className="flex-1 space-y-1 overflow-y-auto p-3" aria-label="Main">
-          {NAV.map(({ to, label, icon: Icon }, i) => (
+          {NAV.map(({ to, label, icon: Icon, state }, i) => (
             <NavLink
               key={to}
               to={to}
+              state={state}
               className={({ isActive }) =>
                 `group relative flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors ${
                   isActive
@@ -149,10 +126,11 @@ export function AppShell() {
           {moreOpen && (
             <div className="absolute bottom-full right-0 left-0 border-t border-outline bg-surface shadow-lg">
               <nav className="grid grid-cols-2 gap-1 p-3" aria-label="More">
-                {MORE.map(({ to, label, icon: Icon }) => (
+                {MORE.map(({ to, label, icon: Icon, state }) => (
                   <NavLink
                     key={to}
                     to={to}
+                    state={state}
                     onClick={() => setMoreOpen(false)}
                     className={({ isActive }) =>
                       `flex items-center gap-3 rounded-lg px-3 py-3 text-sm font-medium ${
@@ -175,10 +153,11 @@ export function AppShell() {
             className="grid grid-cols-5 border-t border-outline bg-surface"
             aria-label="Mobile"
           >
-            {PRIMARY.map(({ to, label, icon: Icon }) => (
+            {PRIMARY.map(({ to, label, icon: Icon, state }) => (
               <NavLink
                 key={to}
                 to={to}
+                state={state}
                 className={({ isActive }) =>
                   `flex flex-col items-center gap-1 py-2.5 text-[11px] font-medium ${
                     isActive ? "text-primary" : "text-muted"

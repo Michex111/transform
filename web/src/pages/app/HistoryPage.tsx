@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import { motion, useReducedMotion } from "motion/react";
 import { Download, ArrowCounterClockwise, CaretDown, Trash } from "@phosphor-icons/react";
 import { useJobs, type UiJob } from "@/jobs/JobsContext";
@@ -13,42 +13,22 @@ import { JobDetailsPanel } from "@/components/JobDetailsPanel";
 import { Modal } from "@/components/Modal";
 import { Button, Card, CreditsBadge, FormatChip, StatusBadge } from "@/components/ui";
 import { formatDateTime } from "@/lib/format";
+import {
+  readStoredStatus,
+  readStoredTimeline,
+  refreshRangeFor,
+  timelineForNavigation,
+  timelineFromNavigationState,
+  writeStoredStatus,
+  writeStoredTimeline,
+  type StatusFilter,
+  type TimelineFilter,
+} from "@/lib/historyFilters";
 import { HISTORY_HEADER_GRID, HISTORY_ROW_GRID } from "@/lib/tableColumns";
 import { useNarrowViewport } from "@/lib/useMediaQuery";
 
 const PRIMARY_FORMATS = ["pdf", "docx", "xlsx", "png"] as const;
 const MORE_FORMATS = ["mp3", "mp4"] as const;
-
-const STATUS_KEY = "historyPageStatus";
-/** The only filter values the status dropdown can take. */
-const VALID_STATUSES = ["all", "COMPLETED", "PROCESSING", "PENDING", "FAILED"] as const;
-type StatusFilter = (typeof VALID_STATUSES)[number];
-
-/**
- * Read a key from localStorage, tolerating environments where storage is
- * blocked or unavailable (private mode, sandboxed preview ifranes, disabled
- * cookies). Mirrors JobsContext's defensive localStorage access.
- */
-function readStoredStatus(): StatusFilter {
-  try {
-    const raw = localStorage.getItem(STATUS_KEY);
-    return (VALID_STATUSES as readonly string[]).includes(raw ?? "")
-      ? (raw as StatusFilter)
-      : "all";
-  } catch {
-    return "all";
-  }
-}
-
-/** Persist the status filter, ignoring storage failures so a blocked
- *  localStorage never breaks the page. */
-function writeStoredStatus(status: StatusFilter): void {
-  try {
-    localStorage.setItem(STATUS_KEY, status);
-  } catch {
-    /* storage unavailable — persistence is best-effort */
-  }
-}
 
 interface HistoryRowProps {
   job: UiJob;
@@ -212,9 +192,20 @@ export function HistoryPage() {
   const { api: client } = useAuth();
   const { success, error } = useToast();
   const navigate = useNavigate();
+  const location = useLocation();
   const [format, setFormat] = useState<string | null>(null);
   const [status, setStatus] = useState<StatusFilter>(readStoredStatus);
-  const [range, setRange] = useState<string>("all");
+  // A link may ask for a specific window: the navigation's History entry always
+  // asks for "all", and the Dashboard's "View all" asks for 7 days. Navigation
+  // state wins because it is an explicit request; the stored preference is the
+  // fallback for every arrival that carries none (direct URL, reload, back
+  // button).
+  //
+  // Read in the initializer as well as in the effect below so the first paint is
+  // already the requested window instead of flashing the stored one.
+  const [range, setRange] = useState<TimelineFilter>(
+    () => timelineFromNavigationState(location.state) ?? readStoredTimeline(),
+  );
   const [deleteTarget, setDeleteTarget] = useState<UiJob | null>(null);
   const [showMoreFormats, setShowMoreFormats] = useState(false);
   // At most one row is expanded. An accordion keeps the list the same height
@@ -236,9 +227,39 @@ export function HistoryPage() {
     writeStoredStatus(status);
   }, [status]);
 
+  // Apply the window a navigation asked for.
+  //
+  // Keyed on `location.key` rather than on the requested value: clicking
+  // "History" in the navigation while already on this page must RESET the window
+  // to "all", and that click can carry a state object identical to the previous
+  // one. Only the navigation key changes in that case, so it is the signal that
+  // a fresh request arrived.
+  //
+  // `location.state` is in the dependencies too, because it is the value being
+  // read; it is referentially stable between navigations, so this still runs
+  // only when the router actually navigates.
+  //
+  // The functional update form is what makes the previous value available
+  // without also depending on `range` — depending on it would re-run this on
+  // every dropdown change for no reason.
   useEffect(() => {
-    refresh(range === "all" ? undefined : range);
+    setRange((previous) => timelineForNavigation(location.state, previous));
+  }, [location.key, location.state]);
+
+  // Fetch the window the dropdown is showing. The server owns the date cut-off
+  // (`range=24h|7d|30d`), so changing the filter has to re-query — filtering
+  // `jobs` here instead would only ever trim the page of history the server
+  // already returned, and would silently show fewer results than requested.
+  useEffect(() => {
+    refresh(refreshRangeFor(range));
   }, [refresh, range]);
+
+  // Remember the choice for the next visit. Kept separate from the query above
+  // so persistence can never alter what is displayed.
+  useEffect(() => {
+    writeStoredTimeline(range);
+  }, [range]);
+
 
   const handleDownload = useCallback(
     async (jobId: string) => {
