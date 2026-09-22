@@ -9,6 +9,7 @@ from typing import Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision: str = 'a23fe025bb21'
@@ -16,20 +17,34 @@ down_revision: Union[str, Sequence[str], None] = '0003_subscription_credit'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
+_APIKEYSTATUS_VALUES = ('ACTIVE', 'INACTIVE', 'REVOKED')
+
+
+def _apikeystatus_enum(create_type: bool = True) -> postgresql.ENUM:
+    """The ``apikeystatus`` enum, created explicitly rather than implicitly.
+
+    See ``0001_create_conversion_jobs``: an ``sa.Enum`` inlined into
+    ``create_table`` issues an unguarded ``CREATE TYPE`` and aborts
+    ``upgrade head`` on any database where the type already exists (types
+    survive a ``DROP TABLE`` in PostgreSQL).
+    """
+    return postgresql.ENUM(*_APIKEYSTATUS_VALUES, name='apikeystatus', create_type=create_type)
+
 
 def upgrade() -> None:
     """Upgrade schema."""
+    apikeystatus = _apikeystatus_enum(create_type=False)
+    bind = op.get_bind()
+    if bind.dialect.name == 'postgresql':
+        _apikeystatus_enum(create_type=True).create(bind, checkfirst=True)
+
     op.create_table(
         'api_keys',
         sa.Column('id', sa.String(), nullable=False),
         sa.Column('key', sa.String(length=255), nullable=False),
         sa.Column('user_id', sa.Integer(), nullable=False),
         sa.Column('name', sa.String(length=100), nullable=False),
-        sa.Column(
-            'status',
-            sa.Enum('ACTIVE', 'INACTIVE', 'REVOKED', name='apikeystatus'),
-            nullable=False,
-        ),
+        sa.Column('status', apikeystatus, nullable=False),
         sa.Column('created_at', sa.DateTime(timezone=True), nullable=False),
         sa.Column('expires_at', sa.DateTime(timezone=True), nullable=True),
         sa.Column('last_used_at', sa.DateTime(timezone=True), nullable=True),
