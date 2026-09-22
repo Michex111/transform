@@ -43,3 +43,6 @@ skills-lock.json
 # Production secrets backup. Never commit this; keep real values in the
 # deployment secret store / environment, not in the repository.
 .env.production.backup
+# Production-worker env overrides (holds a production DB credential). The
+# tracked template is deployment/docker/.env.production-workers.example.
+.env.production-workers

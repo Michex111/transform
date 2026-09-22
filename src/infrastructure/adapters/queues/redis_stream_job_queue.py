@@ -4,6 +4,13 @@ from src.domain.conversions.entities.conversion_job import ConversionJob
 from src.domain.conversions.value_object.conversion_type import ConversionType
 from src.domain.conversions.value_object.job_status import JobStatus
 from .messages import ConversionJobMessage as JobMessage
+from .stream_names import (
+    JOB_DEAD_LETTER_STREAM,
+    JOB_STREAM,
+    JOB_TIER_STREAMS,
+    qualify,
+    qualify_all,
+)
 
 from redis.asyncio import Redis
 from redis.exceptions import ResponseError
@@ -21,7 +28,10 @@ _DEAD_LETTER_MAXLEN = 10_000
 class RedisStreamQueue:
     def __init__(self, redis_client: Redis):
         self.redis_client = redis_client
-        self.stream_name = "conversion_jobs"
+        # Namespaced per environment (see ``stream_names``): dev and prod share
+        # one Redis, so unqualified names let their workers steal each other's
+        # jobs. Empty prefix = the original production name.
+        self.stream_name = qualify(JOB_STREAM)
 
 class JobStream(RedisStreamQueue):
     """Implements a Redis Stream for conversion jobs. Used by the producer to push new jobs into the stream."""
@@ -37,18 +47,24 @@ class JobStream(RedisStreamQueue):
 class JobStreamConsumer(RedisStreamQueue):
     """Implements a Redis Stream consumer for conversion jobs. Used by the worker to fetch jobs from the stream."""
 
-    # Tier streams consumed by workers, in priority order (high first).
-    STREAMS = (
-        "conversion_jobs:high",
-        "conversion_jobs:normal",
-        "conversion_jobs:low",
-        "conversion_jobs",
-    )
+    # Tier streams consumed by workers, in priority order (high first). These
+    # are the BASE names; ``self.streams`` applies QUEUE_STREAM_PREFIX.
+    STREAMS = JOB_TIER_STREAMS
 
     def __init__(self, consumer_group: str, consumer_name: str, redis_client: Redis):
         super().__init__(redis_client)
         self.consumer_group = consumer_group
         self.consumer_name = consumer_name
+        # Environment-qualified names actually read/written. Computed once per
+        # instance so a change to the setting cannot split a single consumer's
+        # reads from its ACKs mid-flight.
+        self.streams = qualify_all(self.STREAMS)
+        if self.streams != self.STREAMS:
+            worker_logger.info(
+                "Queue stream prefix %r active; consuming %s",
+                self.streams[0][: -len(JOB_STREAM)],
+                ", ".join(self.streams),
+            )
         # Delivery key -> stream. Keyed by the *composite* key handed back by
         # ``fetch_job`` because Redis stream ids are only unique within a
         # stream: two streams can mint the same literal id in the same
@@ -118,7 +134,7 @@ class JobStreamConsumer(RedisStreamQueue):
                     "Successfully connected to Redis consumer group '%s' at %s; streams: %s",
                     self.consumer_group,
                     self.describe_endpoint(),
-                    ", ".join(self.STREAMS),
+                    ", ".join(self.streams),
                 )
                 return
             except Exception as e:
@@ -139,7 +155,7 @@ class JobStreamConsumer(RedisStreamQueue):
                     raise
 
     async def _ensure_consumer_group(self):
-        for stream in self.STREAMS:
+        for stream in self.streams:
             try:
                 await self.redis_client.xgroup_create(stream, self.consumer_group, id='0', mkstream=True)
             except ResponseError as e:
@@ -158,7 +174,7 @@ class JobStreamConsumer(RedisStreamQueue):
         response = await self.redis_client.xreadgroup(  # type: ignore[arg-type]
             self.consumer_group,
             self.consumer_name,
-            {stream: '>' for stream in self.STREAMS},
+            {stream: '>' for stream in self.streams},
             count=1,
             block=10000,
         )
@@ -235,7 +251,7 @@ class JobStreamConsumer(RedisStreamQueue):
         # instead of falling back to a fixed stream, which would send the ACK
         # somewhere else. Log it so the anomaly is visible.
         decoded, _, _ = message_id.rpartition(":")
-        if decoded in self.STREAMS:
+        if decoded in self.streams:
             worker_logger.warning(
                 "No recorded stream for delivery key %r; decoding it as %r",
                 message_id, decoded,
@@ -282,7 +298,7 @@ class JobStreamConsumer(RedisStreamQueue):
         message["error"] = error_message
         message["original_message_id"] = message_id
         await self.redis_client.xadd(
-            "conversion_jobs:dead", message, maxlen=_DEAD_LETTER_MAXLEN
+            qualify(JOB_DEAD_LETTER_STREAM), message, maxlen=_DEAD_LETTER_MAXLEN
         )
 
     async def reclaim_stale_jobs(self, min_idle_ms: int = 60_000, count: int = 20) -> int:
@@ -311,7 +327,7 @@ class JobStreamConsumer(RedisStreamQueue):
         Returns the number of messages re-queued.
         """
         requeued = 0
-        for stream in self.STREAMS:
+        for stream in self.streams:
             try:
                 response = await self.redis_client.xautoclaim(
                     stream,
