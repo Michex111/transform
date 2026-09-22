@@ -82,7 +82,9 @@ def test_retry_resets_failed_job_to_pending_keeping_object_key(conversion_job: C
     conversion_job.pending_processing()
     conversion_job.start_processing()
     conversion_job.fail("transient error")
-    conversion_job.set_compute_result(duration_ms=500, credits=3)
+    conversion_job.set_compute_result(
+        duration_ms=500, credits=3, input_size_bytes=2048, output_size_bytes=900
+    )
 
     conversion_job.retry()
 
@@ -91,6 +93,10 @@ def test_retry_resets_failed_job_to_pending_keeping_object_key(conversion_job: C
     assert conversion_job.output_file is None
     assert conversion_job.compute_duration_ms == 0
     assert conversion_job.credits_used == 0
+    # The previous attempt's sizes describe a file this run replaces, so they are
+    # cleared with the rest of the result rather than left to look current.
+    assert conversion_job.input_size_bytes == 0
+    assert conversion_job.output_size_bytes == 0
     # The input object key is preserved so the worker reuses the existing file.
     assert conversion_job.object_key == "uploads/input.pdf"
 

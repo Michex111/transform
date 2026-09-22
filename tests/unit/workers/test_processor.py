@@ -209,6 +209,49 @@ def test_process_job_downloads_converts_and_uploads_successfully(
     assert len(fake_storage_port.download_calls) == 1
     assert len(fake_storage_port.upload_calls) == 1
 
+    # The sizes the detail panel reports: the plaintext input the converter read
+    # and the file it produced. The fake converter upper-cases "hello world", so
+    # both are 11 bytes here -- what matters is that they were measured at all
+    # and that they are non-zero (0 means "not measured", which the UI omits).
+    assert conversion_job.input_size_bytes == len(b"hello world")
+    assert conversion_job.output_size_bytes == len(b"HELLO WORLD")
+
+
+def test_process_job_reports_file_sizes_in_the_terminal_event(
+    conversion_job,
+    fake_storage_port,
+    fake_queue_port,
+    fake_event_publisher,
+    fake_converter_registry,
+) -> None:
+    """The completion event carries the byte sizes, so the panel is complete
+    without waiting for a history refresh."""
+
+    @fake_converter_registry.register(conversion_job.conversion)
+    def converter(input_path: str, output_path: str) -> None:
+        # A conversion that changes size, so the two values cannot be confused.
+        Path(output_path).write_text("a much longer output than the input", encoding="utf-8")
+
+    context = WorkerContext(
+        storage_port=fake_storage_port,
+        queue_port=fake_queue_port,
+        event_port=fake_event_publisher,
+        converter_registry=fake_converter_registry,
+        worker_name="processor-test",
+    )
+
+    conversion_job.pending_processing()
+    asyncio.run(process_job(context, conversion_job))
+
+    completed = [
+        e for e in fake_event_publisher.published_events if e.get("status") == "COMPLETED"
+    ]
+    assert len(completed) == 1
+    assert completed[0]["input_size_bytes"] == len(b"hello world")
+    assert completed[0]["output_size_bytes"] == len(b"a much longer output than the input")
+    # The two are genuinely different, so a swap between them would fail here.
+    assert completed[0]["input_size_bytes"] != completed[0]["output_size_bytes"]
+
 
 def test_process_job_uploads_a_container_under_its_declared_extension(
     conversion_job,

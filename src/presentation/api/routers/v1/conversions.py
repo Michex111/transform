@@ -57,6 +57,9 @@ def _to_response(job: ConversionJob, download_url: str | None = None) -> Convers
         error_message=job.error_message,
         credits_used=job.credits_used,
         compute_duration_ms=job.compute_duration_ms,
+        input_size_bytes=job.input_size_bytes,
+        output_size_bytes=job.output_size_bytes,
+        created_at=job.created_at,
         data_key_wrapped=job.data_key_wrapped,
         client_encrypted=job.client_encrypted,
     )

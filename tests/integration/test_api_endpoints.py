@@ -1,3 +1,5 @@
+from datetime import UTC, datetime
+
 from tests.integration.dependencies.api_overrides import create_test_client
 
 
@@ -252,6 +254,76 @@ def test_conversion_history_endpoint_defaults_credits_used_to_zero() -> None:
 
     assert response.status_code == 200
     assert response.json()["jobs"][0]["credits_used"] == 0
+
+
+def test_conversion_history_endpoint_reports_file_sizes() -> None:
+    """History must carry the byte sizes the expanded row shows.
+
+    Nothing else exposes them: the tables have no size column, so the detail
+    panel is the only place a user can see how big the file they converted was
+    or how big the result is. Pinning the field here keeps that contract from
+    silently regressing.
+    """
+    with create_test_client() as client:
+        client.post(
+            "/api/conversions/jobs",
+            json={"source_format": "pdf", "target_format": "docx", "input_key": "uploads/a.pdf"},
+        )
+        conversion_service = client.app.state.fake_conversion_service  # type: ignore
+        job = conversion_service.created_jobs[0]
+        job.set_compute_result(
+            duration_ms=1200, credits=7, input_size_bytes=4_300_000, output_size_bytes=1_100_000
+        )
+
+        response = client.get("/api/conversions/history")
+
+    assert response.status_code == 200
+    row = response.json()["jobs"][0]
+    assert row["input_size_bytes"] == 4_300_000
+    assert row["output_size_bytes"] == 1_100_000
+
+
+def test_conversion_history_endpoint_defaults_file_sizes_to_zero() -> None:
+    """A job that has not run reports 0 bytes, which the UI reads as
+    "not measured" and omits rather than rendering an empty file."""
+    with create_test_client() as client:
+        client.post(
+            "/api/conversions/jobs",
+            json={"source_format": "pdf", "target_format": "docx", "input_key": "uploads/a.pdf"},
+        )
+        response = client.get("/api/conversions/history")
+
+    assert response.status_code == 200
+    row = response.json()["jobs"][0]
+    assert row["input_size_bytes"] == 0
+    assert row["output_size_bytes"] == 0
+
+
+def test_conversion_history_endpoint_reports_when_the_job_was_created() -> None:
+    """History must carry when a conversion happened.
+
+    `created_at` is the only timestamp a history row has. The web app's
+    client-side `createdAt` exists only for jobs started in the same browser,
+    so without this field every row restored from the server rendered a blank
+    date — and the expanded job panel had no conversion time to show at all.
+    """
+    with create_test_client() as client:
+        client.post(
+            "/api/conversions/jobs",
+            json={"source_format": "pdf", "target_format": "docx", "input_key": "uploads/a.pdf"},
+        )
+        conversion_service = client.app.state.fake_conversion_service  # type: ignore
+        conversion_service.created_jobs[0].created_at = datetime(2026, 9, 21, 13, 45, tzinfo=UTC)
+
+        response = client.get("/api/conversions/history")
+
+    assert response.status_code == 200
+    jobs = response.json()["jobs"]
+    assert len(jobs) == 1
+    # The key is always present (the SPA renders the row without it, but must be
+    # able to tell "no timestamp" from "field not supported").
+    assert "created_at" in jobs[0]
+    assert jobs[0]["created_at"].startswith("2026-09-21T13:45")
 
 
 # ---------------------------------------------------------------------------

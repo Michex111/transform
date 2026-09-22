@@ -95,9 +95,22 @@ describe("table column templates", () => {
   });
 
   it("keeps a dashboard action track on every row, even with no action", () => {
-    // Five tracks at `sm` up, so a row without a download button still lines up.
+    // Five tracks from `md` up, so a row without a download button still lines
+    // up. (The band starts at `md` rather than `sm` now that the same
+    // expandable card serves both tables below it.)
     const tracks = parseGridTemplates(DASHBOARD_ROW_GRID);
-    expect(tracksAt(tracks, "sm")!.split("_")).toHaveLength(5);
+    expect(tracksAt(tracks, "md")!.split("_")).toHaveLength(5);
+  });
+
+  it.each([
+    ["History", HISTORY_ROW_GRID],
+    ["Dashboard", DASHBOARD_ROW_GRID],
+  ])("%s reserves no tracks at the phone band", (_name, row) => {
+    // Below `md` these rows are flex lines. A base grid template would mean a
+    // fixed width the filename has to compete with — the 360px History template
+    // it replaced left the name 36px, and the Dashboard's left it 0px.
+    expect(parseGridTemplates(row).filter((t) => t.breakpoint === "")).toEqual([]);
+    expect(row).toContain("flex-wrap");
   });
 });
 
