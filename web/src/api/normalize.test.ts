@@ -38,6 +38,7 @@ import {
   normalizeGuestJob,
   normalizePortal,
   normalizePresignedUrls,
+  normalizeResendVerification,
   normalizeStorageStats,
   normalizeSubscriptionPlan,
   normalizeSubscriptionPlans,
@@ -47,6 +48,7 @@ import {
   normalizeUploadResponse,
   normalizeUploadSession,
   normalizeUser,
+  normalizeVerifyEmail,
 } from "@/api/normalize";
 
 describe("primitive guards", () => {
@@ -321,6 +323,55 @@ describe("single-object normalizers", () => {
     expect(u.id).toBe(0);
     expect(u.username).toBe("");
     expect(u.is_active).toBe(false);
+  });
+
+  it("normalizeUser treats a missing email_verified as verified", () => {
+    // The API and the SPA deploy independently, so a new bundle can talk to an
+    // older API that never sends this field. Defaulting to `false` would flag
+    // every account of that API as unverified, with no way to clear it.
+    expect(normalizeUser({}).email_verified).toBe(true);
+    expect(normalizeUser({ username: "ada" }).email_verified).toBe(true);
+  });
+
+  it("normalizeUser preserves a real unverified flag", () => {
+    // The converse: an explicit `false` must survive, or the SPA would never
+    // show the "resend verification" affordance it exists for.
+    expect(normalizeUser({ email_verified: false }).email_verified).toBe(false);
+    expect(normalizeUser({ email_verified: true }).email_verified).toBe(true);
+  });
+
+  it("normalizeUser rejects a non-boolean email_verified", () => {
+    // A stringly-typed "false" from a proxy is not a boolean; fall back to the
+    // safe default rather than letting a truthy string read as verified.
+    expect(normalizeUser({ email_verified: "false" }).email_verified).toBe(true);
+  });
+
+  it("normalizeVerifyEmail defaults every field", () => {
+    expect(normalizeVerifyEmail({})).toEqual({
+      ok: false,
+      already_verified: false,
+      username: null,
+      message: "",
+    });
+  });
+
+  it("normalizeVerifyEmail keeps a real outcome", () => {
+    const result = normalizeVerifyEmail({
+      ok: true,
+      already_verified: true,
+      username: "ada",
+      message: "Already verified.",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.already_verified).toBe(true);
+    expect(result.username).toBe("ada");
+    expect(result.message).toBe("Already verified.");
+  });
+
+  it("normalizeResendVerification keeps the message a string", () => {
+    expect(normalizeResendVerification({}).message).toBe("");
+    expect(normalizeResendVerification({ message: "Sent." }).message).toBe("Sent.");
   });
 
   it("normalizeUploadResponse keeps the upload URL a string", () => {

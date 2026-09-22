@@ -20,7 +20,18 @@ from src.infrastructure.redis.client import create_redis_client
 
 logger = logging.getLogger(__name__)
 
-_AUTH_PATHS = {"/api/users/token", "/api/users/register", "/api/users/refresh"}
+# Auth endpoints get the stricter bucket. `verify-email` and
+# `resend-verification` belong here because both are unauthenticated and act on
+# a secret (a token) or trigger a send to a third party's inbox: leaving them on
+# the looser per-IP default would make the resend endpoint a cheap mail-bomb and
+# leave the token endpoint open to high-rate guessing.
+_AUTH_PATHS = {
+    "/api/users/token",
+    "/api/users/register",
+    "/api/users/refresh",
+    "/api/users/verify-email",
+    "/api/users/resend-verification",
+}
 
 
 def _truncate_rate_limit_key(key: str) -> str:

@@ -40,6 +40,7 @@ import pytest  # noqa: E402
 from src.infrastructure.converters.converter_registry import ConverterRegistry  # noqa: E402
 from src.presentation.api.middleware.rate_limit import RateLimitMiddleware  # noqa: E402
 from tests.fakes.fake_converter_registry import FakeConverterRegistry  # noqa: E402
+from tests.fakes.fake_email_sender import FakeEmailSender  # noqa: E402
 from tests.fakes.fake_event_publisher import FakeEventPublisher  # noqa: E402
 from tests.fakes.fake_logger import FakeLogger  # noqa: E402
 from tests.fakes.fake_queue import FakeQueuePort  # noqa: E402
@@ -82,6 +83,12 @@ def fake_repository_port() -> FakeDatabaseRepository:
 @pytest.fixture
 def fake_event_publisher() -> FakeEventPublisher:
     return FakeEventPublisher()
+
+
+@pytest.fixture
+def fake_email_sender() -> FakeEmailSender:
+    """Capturing email transport; never touches the network."""
+    return FakeEmailSender()
 
 
 @pytest.fixture

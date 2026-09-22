@@ -45,6 +45,7 @@ import type {
   GuestJobResponse,
   PortalResponse,
   PresignedUrlResponse,
+  ResendVerificationResponse,
   StorageBreakdownEntry,
   StorageStats,
   SubscriptionPlanResponse,
@@ -54,6 +55,7 @@ import type {
   UploadResponse,
   UploadSession,
   UserResponse,
+  VerifyEmailResponse,
 } from "./types"
 
 /* ------------------------------------------------------------------ *
@@ -109,7 +111,25 @@ export function normalizeUser(value: unknown): UserResponse {
     email: asString(o.email),
     is_active: asBoolean(o.is_active),
     created_at: asString(o.created_at),
+    // An older API omits this field entirely. Defaulting to `false` would flag
+    // every account as unverified against that API, with no way for the user to
+    // clear it; `true` degrades silently instead.
+    email_verified: asBoolean(o.email_verified, true),
   }
+}
+
+export function normalizeVerifyEmail(value: unknown): VerifyEmailResponse {
+  const o = asObject(value)
+  return {
+    ok: asBoolean(o.ok),
+    already_verified: asBoolean(o.already_verified),
+    username: asNullableString(o.username),
+    message: asString(o.message),
+  }
+}
+
+export function normalizeResendVerification(value: unknown): ResendVerificationResponse {
+  return { message: asString(asObject(value).message) }
 }
 
 /* ------------------------------------------------------------------ *

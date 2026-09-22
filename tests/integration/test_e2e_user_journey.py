@@ -40,6 +40,7 @@ from src.infrastructure.converters.converter_registry import ConverterRegistry  
 from src.infrastructure.database.session import Base, get_db_session  # noqa: E402
 from src.infrastructure.config.settings import get_settings  # noqa: E402
 from src.presentation.api.dependencies.service_dependencies import (  # noqa: E402
+    get_email_sender,
     get_encryption_service,
     get_event_subscriber,
     get_job_queue_port,
@@ -48,6 +49,7 @@ from src.presentation.api.dependencies.service_dependencies import (  # noqa: E4
     get_transfer_service,
 )
 from src.presentation.api.middleware.rate_limit import RateLimitMiddleware  # noqa: E402
+from tests.fakes.fake_email_sender import FakeEmailSender  # noqa: E402
 from tests.fakes.fake_event_publisher import FakeEventPublisher  # noqa: E402
 from tests.fakes.fake_queue import FakeQueuePort  # noqa: E402
 from workers.converter_workers.context.worker_context import WorkerContext  # noqa: E402
@@ -234,6 +236,7 @@ def e2e_app(tmp_path) -> Generator[tuple[TestClient, dict], None, None]:
     queue = FakeQueuePort()
     events = FakeEventPublisher()
     stripe_mock = MockStripeService()
+    email_sender = FakeEmailSender()
 
     async def no_op_init() -> None:
         return None
@@ -262,6 +265,18 @@ def e2e_app(tmp_path) -> Generator[tuple[TestClient, dict], None, None]:
         del key, limit, window
         return True
 
+    # Pin the email settings for the duration of the journey. Without this the
+    # outcome depends on the developer's .env: with RESEND_API_KEY set the
+    # sign-in gate would be enforced and the journey's login would 403. Set here
+    # (not at module scope) so the values cannot leak into other test modules.
+    email_env = {
+        "EMAIL_BACKEND": "smtp",
+        "SMTP_HOST": "smtp.example.com",
+        "APP_BASE_URL": "https://transform-web.onrender.com",
+    }
+    email_env_previous = {key: os.environ.get(key) for key in email_env}
+    os.environ.update(email_env)
+
     # Refresh settings so the mocked STRIPE_* env vars are picked up.
     get_settings.cache_clear()
 
@@ -276,6 +291,7 @@ def e2e_app(tmp_path) -> Generator[tuple[TestClient, dict], None, None]:
     api_main.app.dependency_overrides[get_job_queue_port] = override_queue
     api_main.app.dependency_overrides[get_event_subscriber] = override_subscriber
     api_main.app.dependency_overrides[get_stripe_service] = override_stripe
+    api_main.app.dependency_overrides[get_email_sender] = lambda: email_sender
     # The e2e journey asserts on pre-signed download URLs, which only appear
     # when encryption is OFF. Force it off here so the test is deterministic
     # regardless of whether ENCRYPTION_MASTER_KEY is set in the developer's
@@ -291,20 +307,54 @@ def e2e_app(tmp_path) -> Generator[tuple[TestClient, dict], None, None]:
             "events": events,
             "stripe": stripe_mock,
             "backend": backend,
+            "email": email_sender,
         }
     finally:
         client.close()
         api_main.app.dependency_overrides.clear()
         api_main.initialize_database = original_init
         RateLimitMiddleware._is_allowed = original_rate_limit
+        for key, previous in email_env_previous.items():
+            if previous is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = previous
+        get_settings.cache_clear()
 
 
-def register_user(client: TestClient, username: str, password: str = "Sup3rSecret!") -> dict:
+def register_user(
+    client: TestClient,
+    username: str,
+    email_sender: FakeEmailSender,
+    password: str = "Sup3rSecret!",
+) -> dict:
+    """Register an account and verify its email, as a real user must.
+
+    The verification step is not incidental: with a transport configured the API
+    refuses to sign in an unverified account (403 EMAIL_NOT_VERIFIED), so a
+    helper that skipped it would make every journey test fail for the wrong
+    reason — and would stop covering the sign-up flow it is meant to exercise.
+    """
+    address = f"{username}@example.com"
     resp = client.post(
         "/api/users/register",
-        json={"username": username, "email": f"{username}@example.com", "password": password},
+        json={"username": username, "email": address, "password": password},
     )
     assert resp.status_code == 201, resp.text
+    payload = resp.json()
+    assert payload["email_verified"] is False
+
+    verify_email(client, email_sender, address)
+    return payload
+
+
+def verify_email(client: TestClient, email_sender: FakeEmailSender, address: str) -> dict:
+    """Consume the verification link the API emailed to ``address``."""
+    resp = client.post(
+        "/api/users/verify-email",
+        json={"token": email_sender.verification_token_for(address)},
+    )
+    assert resp.status_code == 200, resp.text
     return resp.json()
 
 
@@ -379,9 +429,10 @@ def test_full_user_journey_e2e(tmp_path, monkeypatch) -> None:
         queue: FakeQueuePort = ctx["queue"]
         events: FakeEventPublisher = ctx["events"]
         stripe_mock: MockStripeService = ctx["stripe"]
+        email_sender: FakeEmailSender = ctx["email"]
 
         # -- 1. Registration & auth -----------------------------------------
-        user = register_user(client, "e2euser")
+        user = register_user(client, "e2euser", email_sender)
         user_id = user["id"]
         tokens = login(client, "e2euser")
         access = tokens["access_token"]
@@ -677,6 +728,7 @@ def test_security_isolation_e2e(tmp_path) -> None:
     """Negative-path checks: auth failures, cross-user isolation, 404s."""
     with e2e_app(tmp_path) as (client, ctx):
         store: InMemoryObjectStore = ctx["store"]
+        email_sender: FakeEmailSender = ctx["email"]
 
         # Unauthenticated access is rejected
         assert client.get("/api/users/me").status_code == 401
@@ -684,7 +736,7 @@ def test_security_isolation_e2e(tmp_path) -> None:
         assert client.get("/api/v1/credits/balance").status_code == 401
 
         # Wrong password is rejected
-        register_user(client, "alice")
+        register_user(client, "alice", email_sender)
         bad_login = client.post("/api/users/token", data={"username": "alice", "password": "WrongPass123"})
         assert bad_login.status_code == 401
 
@@ -700,7 +752,7 @@ def test_security_isolation_e2e(tmp_path) -> None:
             "/api/v1/files/folders", json={"name": "Secret"}, headers=alice_headers
         ).json()
 
-        register_user(client, "bob")
+        register_user(client, "bob", email_sender)
         bob = login(client, "bob")
         bob_headers = auth(bob["access_token"])
 

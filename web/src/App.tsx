@@ -23,6 +23,9 @@ const LoginPage = lazy(() =>
 const RegisterPage = lazy(() =>
   import("@/pages/public/RegisterPage").then((m) => ({ default: m.RegisterPage })),
 );
+const VerifyEmailPage = lazy(() =>
+  import("@/pages/public/VerifyEmailPage").then((m) => ({ default: m.VerifyEmailPage })),
+);
 // Single dynamic public route: `/{ext}-converter` and `/{from}-to-{to}`.
 // Static segments outrank it, so `/pricing`, `/convert`, `/login`, … still win.
 const FormatRoutePage = lazy(() =>
@@ -80,6 +83,19 @@ export default function App() {
         <Route path="/login" element={<LoginPage />} />
         <Route path="/register" element={<RegisterPage />} />
       </Route>
+
+      {/*
+        Deliberately NOT behind `PublicOnlyRoute`.
+
+        An activation link arrives from an email client and must work in
+        whatever session the browser happens to be in. Inside that guard a user
+        with a live session (a stale tab, a shared machine, a webmail link
+        opened in the same browser) was redirected to the dashboard and their
+        link silently did nothing. The page is idempotent and reveals nothing
+        the holder of the link does not already have, so there is nothing to
+        gate.
+      */}
+      <Route path="/verify-email" element={<VerifyEmailPage />} />
 
       {/* Authenticated app routes */}
       <Route element={<ProtectedRoute />}>

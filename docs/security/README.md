@@ -1,12 +1,12 @@
 # ISMS Security Pack — Index
 
 **Transform (File Conversion SaaS)** · ISO/IEC 27001:2022 · TÜV Süd Stage 1/2 assessment pack
-**Generated:** 2026-08-22 · **Owner:** CISO / InfoSec Lead
+**Generated:** 2026-08-22 · **Last updated:** 2026-09-22 · **Owner:** CISO / InfoSec Lead
 
-This directory is a documentation-only evidence pack. **No application code was
-modified.** It maps genuinely implemented controls to the actual repository
-artifacts (file paths / config / middleware / Dockerfile / service) and is honest
-about what is missing or planned.
+This directory is a documentation-only evidence pack. It maps genuinely
+implemented controls to the actual repository artifacts (file paths / config /
+middleware / Dockerfile / service) and is honest about what is missing or
+planned. It documents application changes; it does not make them.
 
 ---
 
@@ -18,7 +18,7 @@ about what is missing or planned.
 | 2 | [`statement-of-applicability.md`](./statement-of-applicability.md) | The core audit artifact — Annex A control-by-control status (Implemented / Partially / Not applicable / Planned) with evidence. |
 | 3 | [`risk-assessment.md`](./risk-assessment.md) | Risk methodology, 8–12 realistic risks with L×I scoring, mitigations, residual risk, owners, verification evidence, acceptance sign-off. |
 | 4 | [`security-policy.md`](./security-policy.md) | Top-level information security policy (purpose/scope, statements, roles, enforcement). |
-| 5 | [`access-control-policy.md`](./access-control-policy.md) | AuthN/AuthZ detail: JWT access/refresh, API-key hashing, tier authz, ownership, least privilege, token lifetimes, revocation, audit. |
+| 5 | [`access-control-policy.md`](./access-control-policy.md) | AuthN/AuthZ detail: JWT access/refresh, email-address verification, API-key hashing, tier authz, ownership, least privilege, token lifetimes, revocation, audit. |
 | 6 | [`backup-recovery.md`](./backup-recovery.md) | PostgreSQL (Neon PITR), object storage (B2 versioning/lifecycle), Redis (transient), RPO/RTO, cleanup/retention worker, DR runbook. |
 | 7 | [`incident-response-plan.md`](./incident-response-plan.md) | IR phases, severity matrix, roles, escalation, audit-log & signal use. |
 | 8 | [`control-implementation-matrix.md`](./control-implementation-matrix.md) | "How do we prove it" — ISO control → concrete repo artifact mapping. |
@@ -69,6 +69,7 @@ materiality.
 | G8 | **Rotate secrets on a schedule** — `SECRET_KEY`, Stripe secrets, B2 keys, master key have no automated rotation policy/review. | `security-policy.md`, `incident-response-plan.md` | Define rotation period and a monthly secrets review; track in the SoA. | Low/Medium |
 | G9 | **Security awareness & supplier assurance artifacts not in-repo** — no evidence of staff training completion or Stripe/Neon/Upstash/B2 attestations & DPAs on file. | `security-policy.md`, `statement-of-applicability.md` (A.6.3, A.5.19–A.5.23) | Collect & archive training records and supplier attestations/DPAs. | Low |
 | G10 | **Prometheus `/metrics` is unauthenticated** — `GET /metrics` exposes operational metadata with no access control, and is served on the same origin as the public API. | `main.py` (`metrics_endpoint`), `nginx.conf` | Restrict `/metrics` to a monitoring network / internal-only route, or add auth. | Low |
+| G11 | **Email verification fails OPEN when no transport is configured** — `email_verification_is_enforced()` requires `EMAIL_VERIFICATION_REQUIRED` **and** an `EMAIL_BACKEND` that can actually deliver (Resend/SMTP). With neither, unverified sign-in is permitted; the only signal is a boot-time ERROR log, with no readiness probe, metric, or alert surfacing "verification is not being enforced". The relay is also a new supplier whose DPA is not on file. | `settings.py` (`_resolve_email_backend`, `_warn_on_degraded_email_delivery`), `routers/v1/users.py`, `infrastructure/adapters/email/*` | Configure `RESEND_API_KEY` (or `SMTP_HOST` + `SMTP_*`) and `APP_BASE_URL` in production; surface "verification not enforced" on `/ready` or as a metric so the state cannot go unnoticed; archive the relay's DPA. | Medium |
 
 ---
 

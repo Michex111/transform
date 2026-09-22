@@ -12,7 +12,9 @@ from src.application.services.file_service import FileService
 from src.application.services.file_transfer_service import TransferService
 from src.application.services.priority_queue_dispatcher import PriorityQueueDispatcher
 from src.application.services.queue_priority_router import QueuePriorityRouter
+from src.application.ports.email_port import EmailPort
 from src.infrastructure.adapters.cache.redis_session_adapter import RedisSessionAdapter
+from src.infrastructure.adapters.email import build_email_sender
 from src.infrastructure.adapters.payment.stripe_service import StripeService
 from src.infrastructure.adapters.queues.redis_stream_job_queue import JobStream
 from src.infrastructure.adapters.queues.redis_stream_status_queue import JobEventSubscriber
@@ -104,6 +106,20 @@ def get_stripe_service() -> StripeService:
     # fresh StripeClient per request. StripeService builds its StripeClient
     # lazily and is stateless otherwise, so sharing it is safe.
     return StripeService()
+
+
+@lru_cache
+def get_email_sender() -> EmailPort:
+    """The process-wide transactional email transport.
+
+    Cached so the transport (and, for the Resend adapter, its connection pool
+    configuration) is built once rather than per request. The transport is
+    stateless between sends, so sharing it across requests is safe.
+
+    Tests override this dependency with a capturing fake, which is how the
+    verification flow is asserted without a provider or network.
+    """
+    return build_email_sender(get_settings())
 
 
 def get_event_subscriber() -> JobEventSubscriber:
