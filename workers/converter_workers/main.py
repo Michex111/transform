@@ -182,12 +182,15 @@ async def main():
     log_context = worker.context.get_log_context()
     worker_logger.info("Starting converter worker", extra=log_context)
     # One line that makes a REDIS_URL mismatch visible: a worker connected to
-    # the wrong Redis otherwise looks identical to a healthy one.
+    # the wrong Redis otherwise looks identical to a healthy one. The streams
+    # are logged as the consumer actually resolved them (i.e. with
+    # QUEUE_STREAM_PREFIX applied), so a mis-set prefix is visible at startup
+    # rather than as jobs that silently never arrive.
     worker_logger.info(
         "Redis endpoint %s | consumer group '%s' | streams: %s",
         _redacted_redis_endpoint(),
         get_settings().WORKER_CONSUMER_GROUP,
-        ", ".join(JobStreamConsumer.STREAMS),
+        ", ".join(getattr(worker.context.queue_port, "streams", JobStreamConsumer.STREAMS)),
         extra=log_context,
     )
 

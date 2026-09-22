@@ -12,6 +12,14 @@ os.environ.setdefault("BACKBLAZE_ACCESS_KEY", "dummy-access-key")
 os.environ.setdefault("BACKBLAZE_SECRET_KEY", "dummy-secret-key")
 os.environ.setdefault("BASE_TARGET_KEY", "output/")
 
+# Redis stream namespacing (see src/infrastructure/adapters/queues/stream_names).
+# Pinned to the EMPTY prefix — the production stream names — so the suite does
+# not inherit a developer's local `.env`, where QUEUE_STREAM_PREFIX is normally
+# `dev:` to keep development from consuming production jobs. Without this, every
+# test asserting a stream name passes or fails based on the developer's machine.
+# OS environment takes precedence over `.env` in pydantic-settings, so this wins.
+os.environ.setdefault("QUEUE_STREAM_PREFIX", "")
+
 # CORS: the SPA is now hosted on its own origin, so it must be allow-listed
 # BEFORE src.presentation.api.main is imported (the app builds its
 # CORSMiddleware at import time from get_settings()). Without this the

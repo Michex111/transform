@@ -3,6 +3,8 @@ import logging
 from typing import AsyncIterator
 from redis.asyncio import Redis
 
+from .stream_names import JOB_EVENT_STREAM, qualify
+
 logger = logging.getLogger(__name__)
 
 # Approximate cap on retained job events. The stream had no bound at all while
@@ -26,7 +28,10 @@ class JobEventPublisher:
     """
     def __init__(self, redis_client: Redis):
         self.redis_client = redis_client
-        self.stream_name = "conversion_job_events"
+        # Namespaced per environment so a dev worker's events are not read by
+        # the production SSE endpoint (and vice versa). Empty prefix = the
+        # original production name.
+        self.stream_name = qualify(JOB_EVENT_STREAM)
 
     async def publish(self, job_id: str, status: str, progress: int, message: str | None = None, **kwargs) -> None:
         event: dict = {
@@ -49,9 +54,11 @@ class JobEventSubscriber:
     Used by the SSE endpoint to stream real-time progress to clients.
     """
 
-    def __init__(self, redis_client: Redis, stream_name: str = "conversion_job_events"):
+    def __init__(self, redis_client: Redis, stream_name: str | None = None):
         self.redis_client = redis_client
-        self.stream_name = stream_name
+        # Default to the environment-qualified name; an explicit name is still
+        # honoured (tests and replay tools pass one).
+        self.stream_name = stream_name or qualify(JOB_EVENT_STREAM)
 
     async def iter_events(self, job_id: str) -> AsyncIterator[tuple[str, dict]]:
         """

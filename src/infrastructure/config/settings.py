@@ -100,6 +100,22 @@ class Settings(BaseSettings):
     WORKER_BATCH_SIZE: int = 10
     """Batch size for worker queue consumption. Larger batches reduce queue overhead but increase memory usage."""
     WORKER_CONVERSION_TIMEOUT: int = 600  # 10 minutes
+    QUEUE_STREAM_PREFIX: str = ""
+    """Namespace for every Redis stream/queue key (default: none).
+
+    Development and production share ONE Redis instance, so without a prefix a
+    single consumer group competes for every message: a job created in one
+    environment can be executed by a worker bound to the other environment's
+    database. That fails silently — the worker converts, uploads, ACKs and logs
+    success while the owning database's row never advances (the status UPDATE
+    matches no row and raises nothing), and credits are consumed against the
+    wrong environment's account.
+
+    Set to e.g. ``dev:`` in a development ``.env`` so dev publishes and
+    consumes ``dev:conversion_jobs:*`` while production keeps the unprefixed
+    names. Leave EMPTY in production: an empty prefix reproduces the original
+    stream names exactly, so this setting is a no-op there.
+    """
 
     # Cleanup worker (guest data retention)
     CLEANUP_INTERVAL_SECONDS: int = 6 * 60 * 60  # every 6 hours
