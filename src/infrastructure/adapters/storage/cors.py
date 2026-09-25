@@ -42,6 +42,16 @@ _B2_ALLOWED_OPERATIONS = ["s3_head", "s3_get", "s3_put", "s3_post"]
 # S3-style methods for the generic S3 path.
 _S3_ALLOWED_METHODS = ["GET", "PUT", "POST", "HEAD"]
 
+# Response headers the browser must be able to READ from a direct-to-bucket
+# request. ``ETag`` is the load-bearing one: a multipart upload is assembled
+# from the ETag each part PUT returns, so without
+# ``Access-Control-Expose-Headers: ETag`` the browser hides the header, the
+# client uploads every part successfully and then cannot call
+# ``CompleteMultipartUpload`` — surfacing as a confusing CORS error long after
+# the transfer. Do not remove it from either rule builder.
+_B2_EXPOSED_HEADERS = ["ETag", "content-length", "x-bz-content-sha1"]
+_S3_EXPOSED_HEADERS = ["ETag", "Content-Length", "Content-Type"]
+
 # Baseline origins that must ALWAYS survive a CORS rewrite.
 #
 # Rationale: the bucket holds ONE rule set shared by every deployment, and each
@@ -133,7 +143,7 @@ def _build_b2_cors(origins: list[str]) -> list[dict]:
             "allowedOrigins": allowed_origins,
             "allowedOperations": _B2_ALLOWED_OPERATIONS,
             "allowedHeaders": ["*"],
-            "exposeHeaders": ["ETag", "content-length", "x-bz-content-sha1"],
+            "exposeHeaders": _B2_EXPOSED_HEADERS,
             "maxAgeSeconds": 3600,
         }
     ]
@@ -146,7 +156,9 @@ def _build_s3_cors(origins: list[str]) -> list[dict]:
             "AllowedOrigins": origins,
             "AllowedMethods": _S3_ALLOWED_METHODS,
             "AllowedHeaders": ["*"],
-            "ExposeHeaders": ["ETag", "Content-Length", "Content-Type"],
+            # Must include ETag (see _S3_EXPOSED_HEADERS): it is what a
+            # multipart upload reads back to complete the upload.
+            "ExposeHeaders": _S3_EXPOSED_HEADERS,
             "MaxAgeSeconds": 3600,
         }
     ]

@@ -101,11 +101,17 @@ export function LoginPage() {
         </div>
 
         <form onSubmit={onSubmit} className="space-y-4">
+          {/* Labelled "Username or email" because the API accepts either. It
+              used to accept a username only, which meant typing the address the
+              app itself shows you (the shell prints it, and the register form
+              asks for it) failed with a generic "Incorrect username or
+              password" — indistinguishable from a wrong password. */}
           <Field
-            label="Username"
+            label="Username or email"
             value={username}
             onChange={(e) => setUsername(e.target.value)}
             autoComplete="username"
+            hint="Either works — whichever you remember."
             required
           />
           <Field
@@ -116,6 +122,13 @@ export function LoginPage() {
             autoComplete="current-password"
             required
           />
+          {/* Right-aligned immediately under the field, which is where the eye
+              looks after failing to remember a password. */}
+          <div className="flex justify-end">
+            <Link to="/forgot-password" className="text-sm text-primary hover:underline">
+              Forgot password?
+            </Link>
+          </div>
           <Button type="submit" className="w-full" disabled={busy}>
             {busy ? "Signing in…" : "Sign in"}
           </Button>
@@ -123,7 +136,10 @@ export function LoginPage() {
 
         <p className="mt-4 text-center text-sm">
           {/* This affordance links to the registration form, so it must say so:
-              "Forgot password?" promised a recovery flow that does not exist. */}
+              it used to be labelled "Forgot password?" while pointing at
+              `/register`. A real recovery flow now exists, so this one is
+              honestly labelled "Create an account" and the actual
+              forgot-password link sits under the password field above. */}
           <Link to="/register" className="text-primary hover:underline">
             Create an account
           </Link>

@@ -50,42 +50,70 @@ _FONT_STACK = (
 _MONO_STACK = "'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace"
 
 
-def build_verification_email(
-    *,
-    to: str,
-    username: str,
-    verification_url: str,
-    ttl_hours: int,
-    app_base_url: str,
-    from_name: str = "Transform",
-) -> EmailMessage:
-    """Render the "activate your account" email.
+def _format_duration(minutes: int) -> str:
+    """Humanise a minutes TTL for email copy ("1 hour", "15 minutes").
 
-    ``from_name`` is used for the sign-off only; the envelope sender is the
-    transport's concern.
+    Whole hours are rendered as hours because "60 minutes" reads oddly in a
+    security message and is easy to misread; anything else stays in minutes so a
+    short-lived link is never described as "0 hours". Singular/plural matters
+    here: "1 hours" in a security email reads as a bug and undermines the one
+    instruction the user is being given.
     """
-    safe_username = html.escape(username)
-    # The URL is assembled by us from configuration, but it is still escaped:
-    # a mangled APP_BASE_URL must not be able to inject markup into the button.
-    safe_url = html.escape(verification_url, quote=True)
-    display_url = html.escape(verification_url)
-    brand = html.escape(from_name)
-    host = html.escape(urlsplit(app_base_url).netloc or app_base_url)
-    hours = f"{ttl_hours} hour" + ("" if ttl_hours == 1 else "s")
+    if minutes >= 60 and minutes % 60 == 0:
+        hours = minutes // 60
+        return f"{hours} hour" + ("" if hours == 1 else "s")
+    return f"{minutes} minute" + ("" if minutes == 1 else "s")
 
-    html_body = f"""<!DOCTYPE html>
+
+def _render_email_shell(
+    *,
+    title: str,
+    preheader: str,
+    heading: str,
+    greeting: str,
+    paragraphs: list[str],
+    cta_label: str,
+    cta_url: str,
+    expiry_line: str,
+    security_note: str,
+    brand: str,
+    host: str,
+) -> str:
+    """Wrap feature-specific copy in the shared branded shell.
+
+    Every link-bearing email looks the same on purpose: one shell means the
+    client-compatibility and accessibility work (tables, inline styles, no
+    remote assets) is done — and reviewed — once, and a phishing-prone message
+    like a password reset is unmistakably the same mail the user already trusts
+    from this product.
+
+    Text arguments are expected to be **already HTML-escaped** by the caller,
+    which is the only place that knows which values are attacker-controlled (the
+    username always is). ``cta_url`` is escaped here, because every caller
+    assembles it from configuration and should not have to remember to.
+    """
+    safe_url = html.escape(cta_url, quote=True)
+    display_url = html.escape(cta_url)
+    paragraph_html = "".join(
+        f'            <p style="margin:0 0 16px 0;font-family:{_FONT_STACK};font-size:15px;line-height:1.6;color:{_TEXT};">\n'
+        f"              {paragraph}\n"
+        f"            </p>\n"
+        for paragraph in paragraphs
+    )
+
+    return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="color-scheme" content="light">
-<title>Verify your email address</title>
+<title>{title}</title>
 </head>
 <body style="margin:0;padding:0;background-color:{_BG};">
 <!-- Preheader: the preview line clients show next to the subject. Hidden in
      the body so the inbox summary says something useful, and padded with
      zero-width spaces so the visible content does not bleed into it. -->
-<div style="display:none;max-height:0;overflow:hidden;opacity:0;">Confirm your address to activate your {brand} account.&#8203;&#8203;&#8203;&#8203;&#8203;&#8203;</div>
+<div style="display:none;max-height:0;overflow:hidden;opacity:0;">{preheader}&#8203;&#8203;&#8203;&#8203;&#8203;&#8203;</div>
 <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:{_BG};">
   <tr>
     <td align="center" style="padding:32px 16px;">
@@ -112,15 +140,12 @@ def build_verification_email(
         <tr>
           <td style="padding:36px 32px 8px 32px;">
             <h1 style="margin:0 0 14px 0;font-family:{_FONT_STACK};font-size:23px;line-height:1.3;font-weight:700;color:{_TEXT};">
-              Confirm your email address
+              {heading}
             </h1>
             <p style="margin:0 0 16px 0;font-family:{_FONT_STACK};font-size:15px;line-height:1.6;color:{_TEXT};">
-              Hi {safe_username},
+              {greeting}
             </p>
-            <p style="margin:0 0 24px 0;font-family:{_FONT_STACK};font-size:15px;line-height:1.6;color:{_TEXT};">
-              Thanks for signing up. Click the button below to activate your {brand} account and start converting files.
-            </p>
-          </td>
+{paragraph_html}          </td>
         </tr>
 
         <!-- Call to action -->
@@ -131,7 +156,7 @@ def build_verification_email(
                 <td align="center" bgcolor="{_PRIMARY}" style="border-radius:10px;">
                   <a href="{safe_url}"
                      style="display:inline-block;padding:14px 30px;font-family:{_FONT_STACK};font-size:15px;font-weight:600;color:{_PRIMARY_TEXT};text-decoration:none;border-radius:10px;">
-                    Activate my account
+                    {cta_label}
                   </a>
                 </td>
               </tr>
@@ -143,7 +168,7 @@ def build_verification_email(
         <tr>
           <td style="padding:20px 32px 0 32px;">
             <p style="margin:0 0 14px 0;font-family:{_FONT_STACK};font-size:13px;line-height:1.6;color:{_MUTED};">
-              This link is valid for {hours}. If the button does not work, copy and paste this address into your browser:
+              {expiry_line}
             </p>
             <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:{_TINT};border-radius:10px;">
               <tr>
@@ -164,7 +189,7 @@ def build_verification_email(
               <tr>
                 <td style="padding-top:20px;">
                   <p style="margin:0;font-family:{_FONT_STACK};font-size:13px;line-height:1.6;color:{_MUTED};">
-                    If you did not create a {brand} account, you can safely ignore this email &#8212; no account will be activated. Someone may have typed your address by mistake.
+                    {security_note}
                   </p>
                 </td>
               </tr>
@@ -190,6 +215,52 @@ def build_verification_email(
 </html>
 """
 
+
+def build_verification_email(
+    *,
+    to: str,
+    username: str,
+    verification_url: str,
+    ttl_hours: int,
+    app_base_url: str,
+    from_name: str = "Transform",
+) -> EmailMessage:
+    """Render the "activate your account" email.
+
+    ``from_name`` is used for the sign-off only; the envelope sender is the
+    transport's concern.
+    """
+    # Escaped up front because every one of these is interpolated into markup.
+    # The URL is assembled by us from configuration, but it is still escaped: a
+    # mangled APP_BASE_URL must not be able to inject markup into the button.
+    brand = html.escape(from_name)
+    host = html.escape(urlsplit(app_base_url).netloc or app_base_url)
+    hours = f"{ttl_hours} hour" + ("" if ttl_hours == 1 else "s")
+
+    html_body = _render_email_shell(
+        title="Verify your email address",
+        preheader=f"Confirm your address to activate your {brand} account.",
+        heading="Confirm your email address",
+        greeting=f"Hi {html.escape(username)},",
+        paragraphs=[
+            f"Thanks for signing up. Click the button below to activate your {brand} "
+            "account and start converting files.",
+        ],
+        cta_label="Activate my account",
+        cta_url=verification_url,
+        expiry_line=(
+            f"This link is valid for {hours}. If the button does not work, copy and "
+            "paste this address into your browser:"
+        ),
+        security_note=(
+            f"If you did not create a {brand} account, you can safely ignore this "
+            "email &#8212; no account will be activated. Someone may have typed your "
+            "address by mistake."
+        ),
+        brand=brand,
+        host=host,
+    )
+
     text_body = f"""{from_name}
 PDF <-> DOCX
 
@@ -214,6 +285,85 @@ This is an automated message from {from_name} and cannot receive replies.
     return EmailMessage(
         to=to,
         subject=f"Verify your email address to activate your {from_name} account",
+        html_body=html_body,
+        text_body=text_body,
+    )
+
+
+def build_password_reset_email(
+    *,
+    to: str,
+    username: str,
+    reset_url: str,
+    ttl_minutes: int,
+    app_base_url: str,
+    from_name: str = "Transform",
+) -> EmailMessage:
+    """Render the "reset your password" email.
+
+    Same shell as ``build_verification_email`` on purpose: a password-reset mail
+    is the single most forged message there is, so it must look exactly like the
+    mail the user already trusts from this product rather than introducing a
+    second visual language an attacker could imitate.
+
+    The TTL is rendered from the value that set the token's expiry, so the copy
+    cannot promise a longer window than the link actually has — a mismatch that
+    would either frustrate users or, worse, mislead them about the risk.
+
+    ``from_name`` is used for the sign-off only; the envelope sender is the
+    transport's concern.
+    """
+    brand = html.escape(from_name)
+    host = html.escape(urlsplit(app_base_url).netloc or app_base_url)
+    duration = _format_duration(ttl_minutes)
+
+    html_body = _render_email_shell(
+        title="Reset your password",
+        preheader=f"Reset your password. This link is valid for {duration}.",
+        heading="Reset your password",
+        greeting=f"Hi {html.escape(username)},",
+        paragraphs=[
+            f"We received a request to reset the password for your {brand} account. "
+            "Click the button below to choose a new one.",
+        ],
+        cta_label="Choose a new password",
+        cta_url=reset_url,
+        expiry_line=(
+            f"This link is valid for {duration}. If the button does not work, copy "
+            "and paste this address into your browser:"
+        ),
+        security_note=(
+            "If you did not request a password reset, you can safely ignore this "
+            "email &#8212; your password will not change."
+        ),
+        brand=brand,
+        host=host,
+    )
+
+    text_body = f"""{from_name}
+PDF <-> DOCX
+
+Reset your password
+
+Hi {username},
+
+We received a request to reset the password for your {from_name} account. Open
+the link below to choose a new one:
+
+{reset_url}
+
+This link is valid for {duration}.
+
+If you did not request a password reset, you can safely ignore this email -
+your password will not change.
+
+This is an automated message from {from_name} and cannot receive replies.
+{app_base_url}
+"""
+
+    return EmailMessage(
+        to=to,
+        subject=f"Reset your {from_name} password",
         html_body=html_body,
         text_body=text_body,
     )

@@ -1,6 +1,7 @@
 import asyncio
 
 from minio import Minio
+from minio.datatypes import Part
 from minio.error import S3Error
 from datetime import timedelta
 from pathlib import Path
@@ -134,6 +135,129 @@ class MinioUrlStorageAdapter:
                 raise StoragePermissionError(f"Access denied for object '{object_key}' in bucket '{self._bucket_name}'.")
             
             raise StorageOperationError() from e
+
+    # ------------------------------------------------------------------
+    # Multipart upload
+    # ------------------------------------------------------------------
+    # These call the SDK's ``_``-prefixed multipart helpers. That is not an
+    # oversight: minio-py (7.2.x) exposes multipart upload only through
+    # ``fput_object``/``put_object``, which stream the bytes *through* this
+    # process. That defeats the entire point of a presigned direct upload (the
+    # browser would have to hand 5 GiB to the API first), so we drive the
+    # underlying S3 API calls directly. The helpers are thin, stable wrappers
+    # over ``CreateMultipartUpload``/``CompleteMultipartUpload``/
+    # ``AbortMultipartUpload`` and are what the SDK's own public methods use.
+    #
+    # The presigned part URL uses the public ``get_presigned_url`` with
+    # ``extra_query_params``: SigV4 signs the full canonical query string, so
+    # ``partNumber`` + ``uploadId`` are covered by the signature exactly as a
+    # native ``UploadPart`` presign would be. (Verified against the installed
+    # minio 7.2.20: ``get_presigned_url(method, bucket_name, object_name,
+    # expires, ..., extra_query_params)`` and ``presign_v4`` signs
+    # ``url.query`` in full.)
+
+    def create_multipart_upload(self, object_key: str) -> str:
+        """Start a multipart upload and return the provider upload id."""
+        try:
+            return self._minio_client._create_multipart_upload(
+                self._bucket_name,
+                object_key,
+                # The SDK mutates this dict and defaults Content-Type itself.
+                {"Content-Type": "application/octet-stream"},
+            )
+        except S3Error as e:
+            self._logger.error(
+                "minio_create_multipart_failed", extra={"key": object_key, "error": str(e)}
+            )
+            raise StorageOperationError() from e
+
+    def generate_part_upload_url(
+        self,
+        object_key: str,
+        part_number: int,
+        upload_id: str,
+        expires_in_minutes: int,
+    ) -> str:
+        """Presign a PUT URL for one part of a multipart upload.
+
+        The URL is valid only for ``object_key`` + ``upload_id`` +
+        ``part_number``: the query parameters are inside the signature, so a
+        part URL cannot be replayed against a different part or upload.
+        """
+        try:
+            return self._minio_client.get_presigned_url(
+                "PUT",
+                self._bucket_name,
+                object_key,
+                expires=timedelta(minutes=expires_in_minutes),
+                extra_query_params={
+                    "partNumber": str(part_number),
+                    "uploadId": upload_id,
+                },
+            )
+        except S3Error as e:
+            self._logger.error(
+                "minio_generate_part_url_failed",
+                extra={"key": object_key, "part_number": part_number, "error": str(e)},
+            )
+            raise StorageOperationError() from e
+
+    async def complete_multipart_upload(
+        self, object_key: str, upload_id: str, parts: list[tuple[int, str]],
+    ) -> None:
+        """Assemble the uploaded parts into the final object.
+
+        ``parts`` must be in ascending part order and carry the etags exactly as
+        returned by each part PUT. Any surrounding double quotes are stripped
+        here because the SDK re-adds them when it writes the
+        ``CompleteMultipartUpload`` XML body; passing a quoted etag through
+        would produce ``""etag""`` and the provider would reject the completion.
+        """
+
+        def _complete() -> None:
+            try:
+                self._minio_client._complete_multipart_upload(
+                    self._bucket_name,
+                    object_key,
+                    upload_id,
+                    [
+                        Part(part_number=n, etag=etag.strip('"'))
+                        for n, etag in parts
+                    ],
+                )
+            except S3Error as e:
+                self._logger.error(
+                    "minio_complete_multipart_failed",
+                    extra={"key": object_key, "error": str(e)},
+                )
+                raise StorageOperationError() from e
+
+        await asyncio.to_thread(_complete)
+
+    async def abort_multipart_upload(self, object_key: str, upload_id: str) -> None:
+        """Abort a multipart upload, discarding every part already uploaded.
+
+        Best-effort: a missing upload (``NoSuchUpload``) is not an error, because
+        this runs on cleanup paths where the interesting failure already
+        happened and raising here would mask it. For a session delete that would
+        also leave the client unable to release a stuck upload.
+        """
+
+        def _abort() -> None:
+            try:
+                self._minio_client._abort_multipart_upload(
+                    self._bucket_name, object_key, upload_id,
+                )
+            except S3Error as e:
+                if e.code in ("NoSuchUpload", "NoSuchKey"):
+                    return
+                self._logger.error(
+                    "minio_abort_multipart_failed",
+                    extra={"key": object_key, "error": str(e)},
+                )
+                raise StorageOperationError() from e
+
+        await asyncio.to_thread(_abort)
 
     async def object_exists(self, object_key: str) -> bool:
         """

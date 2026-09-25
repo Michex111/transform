@@ -13,6 +13,7 @@ import { JobDetailsPanel } from "@/components/JobDetailsPanel";
 import { StorageBreakdownBar } from "@/components/StorageBreakdownBar";
 import { Stagger, Item } from "@/lib/motion";
 import { formatBytes, formatDateTime, formatDateOrNull } from "@/lib/format";
+import { withTimeline } from "@/lib/historyFilters";
 import { DASHBOARD_ROW_GRID } from "@/lib/tableColumns";
 import { useNarrowViewport } from "@/lib/useMediaQuery";
 import type { DashboardResponse } from "@/api/types";
@@ -155,7 +156,16 @@ export function DashboardPage() {
       <Card className="overflow-hidden">
         <div className="flex items-center justify-between border-b border-outline px-5 py-4">
           <h2 className="font-display text-lg font-semibold">Recent conversions</h2>
-          <Link to="/app/queue" className="inline-flex items-center gap-1 text-sm font-medium text-primary hover:underline">
+          {/* "View all" opens History on the window that matches this card:
+              it lists recent conversions, so it asks for the last 7 days via
+              navigation state. Passing intent with the navigation (rather than
+              writing localStorage here) keeps History's saved preference from
+              being overwritten as a side effect of clicking a link. */}
+          <Link
+            to="/app/history"
+            state={withTimeline("7d")}
+            className="inline-flex items-center gap-1 text-sm font-medium text-primary hover:underline"
+          >
             View all <ArrowRight size={16} />
           </Link>
         </div>

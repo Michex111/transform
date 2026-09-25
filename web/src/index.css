@@ -62,11 +62,102 @@
     outline: 2px solid var(--color-primary);
     outline-offset: 2px;
   }
+
+  /* ------------------------------------------------------------------ *
+   * Scrollbars: thin, themed, and faded out while a region is idle.     *
+   *                                                                     *
+   * Two mechanisms, split by `@supports` rather than layered on top of   *
+   * each other. Chromium and Safari get `::-webkit-scrollbar`, which is  *
+   * the only one that can transition (so the fade is a real fade).       *
+   * Firefox gets the standard `scrollbar-width`/`scrollbar-color`, which *
+   * it needs because it does not implement the webkit pseudo-elements.   *
+   * They must not both apply to one element: Chromium ignores the webkit *
+   * styling as soon as `scrollbar-width` is set, so layering them would  *
+   * silently kill the animation instead of gracefully falling back. If   *
+   * the `@supports` test ever misfires the result is still a thin themed *
+   * bar, just with a step instead of a fade — graceful either way.       *
+   *                                                                     *
+   * The reveal rules deliberately treat the page's own scrollbar         *
+   * differently from nested ones. `html:hover` is true whenever the      *
+   * pointer is anywhere over the page, so giving the root the same       *
+   * hover trigger as a nested region would leave the page bar visible    *
+   * almost always, which is the opposite of the point. The root instead  *
+   * reveals only while it is genuinely scrolling — which also covers     *
+   * keyboard paging and wheel input, since both raise scroll events      *
+   * (see `lib/scrollFade.ts`, which sets the attribute).                 *
+   *                                                                     *
+   * An invisible thumb still occupies its gutter and stays hit-testable, *
+   * so dragging the page scrollbar works even at rest, and the drag      *
+   * itself reveals it. The gutter is a constant 10px in both states, so  *
+   * revealing and fading never reflows the content.                      *
+   * ------------------------------------------------------------------ */
+  :root {
+    --scrollbar-size: 10px;
+    /* `color-mix`, not an alpha suffix: `${color}42` on a `var()` is invalid
+       CSS that silently drops the whole declaration. */
+    --scrollbar-thumb: color-mix(in srgb, var(--color-muted) 42%, transparent);
+    --scrollbar-thumb-strong: color-mix(in srgb, var(--color-muted) 72%, transparent);
+  }
+
+  @supports selector(::-webkit-scrollbar) {
+    *::-webkit-scrollbar {
+      width: var(--scrollbar-size);
+      height: var(--scrollbar-size);
+    }
+    *::-webkit-scrollbar-track,
+    *::-webkit-scrollbar-corner {
+      background: transparent;
+    }
+    *::-webkit-scrollbar-thumb {
+      background-color: transparent;
+      /* Inset the painted part inside the gutter so it reads as a slim rounded
+         puck rather than a slab filling the track — `border` here carves the
+         margin, `background-clip` keeps the fill out of it. */
+      background-clip: content-box;
+      border: 2px solid transparent;
+      border-radius: 9999px;
+      transition: background-color 200ms ease;
+    }
+    /* Nested regions: revealed by pointer or keyboard focus within them. */
+    *:not(html):hover::-webkit-scrollbar-thumb,
+    *:not(html):focus-within::-webkit-scrollbar-thumb,
+    /* Any region mid-scroll, including the page. */
+    *[data-scrolling]::-webkit-scrollbar-thumb {
+      background-color: var(--scrollbar-thumb);
+    }
+    /* Brighter under the cursor, which is also the drag affordance. */
+    *:not(html)::-webkit-scrollbar-thumb:hover,
+    *::-webkit-scrollbar-thumb:hover {
+      background-color: var(--scrollbar-thumb-strong);
+    }
+  }
+
+  /* Firefox: same behaviour, stepped rather than animated — `scrollbar-color`
+     is not animatable. */
+  @supports not selector(::-webkit-scrollbar) {
+    * {
+      scrollbar-width: thin;
+      /* Resting state: both parts invisible, then the rules below bring the
+         thumb back for exactly the same triggers as the webkit path. */
+      scrollbar-color: transparent transparent;
+    }
+    *:not(html):hover,
+    *:not(html):focus-within,
+    *[data-scrolling] {
+      scrollbar-color: var(--scrollbar-thumb) transparent;
+    }
+  }
+
   @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after {
       animation-duration: 0.01ms !important;
       animation-iteration-count: 1 !important;
       transition-duration: 0.01ms !important;
+    }
+    /* `*` does not match pseudo-elements, so the scrollbar fade has to be named
+       explicitly to get the same instant-reveal treatment as everything else. */
+    *::-webkit-scrollbar-thumb {
+      transition-duration: 0.01ms;
     }
   }
 }

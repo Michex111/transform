@@ -1,8 +1,9 @@
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { ArrowCounterClockwise, LockSimple, Trash } from "@phosphor-icons/react";
+import { ArrowCounterClockwise, CloudArrowUp, LockSimple, Trash } from "@phosphor-icons/react";
 import { CreditsBadge, FormatMorph, ProgressBar } from "@/components/ui";
 import { formatBytes, formatMeta } from "@/lib/format";
 import { jobDetails } from "@/lib/jobDetails";
+import { canSaveToDrive } from "@/lib/saveToDrive";
 import type { UiJob } from "@/jobs/JobsContext";
 
 interface JobDetailsPanelProps {
@@ -22,6 +23,15 @@ interface JobDetailsPanelProps {
   compact?: boolean;
   onDelete?: (job: UiJob) => void;
   onRetry?: (job: UiJob) => void;
+  /**
+   * File a completed conversion's output into the drive.
+   *
+   * Optional like `onDelete`/`onRetry`, and rendered only for a job that has an
+   * output to save. `DashboardPage` passes none, so its panels are unchanged.
+   */
+  onSaveToDrive?: (job: UiJob) => void;
+  /** True while this row's save is being fetched, so the button says so. */
+  savingToDrive?: boolean;
 }
 
 /**
@@ -53,6 +63,8 @@ export function JobDetailsPanel({
   compact = false,
   onDelete,
   onRetry,
+  onSaveToDrive,
+  savingToDrive = false,
 }: JobDetailsPanelProps) {
   const reduce = useReducedMotion();
   const fileName = job.fileName ?? job.input_file;
@@ -60,8 +72,17 @@ export function JobDetailsPanel({
   const source = formatMeta(job.source_format);
   const target = formatMeta(job.target_format);
   const canRetry = job.status === "FAILED" && onRetry !== undefined;
-  // Only the card layout needs the actions; see `compact` above.
-  const showActions = compact && (onDelete !== undefined || canRetry);
+  // Save to Drive is the one action with no inline counterpart on the wide row:
+  // Delete and Retry live in that row's action cell from `md` up (two of each
+  // would be worse than one), but a completed row there only offers Download, so
+  // leaving this to the card layout would make the feature unreachable on a
+  // desktop. It is therefore rendered whenever the caller offers it.
+  const canSave = canSaveToDrive(job) && onSaveToDrive !== undefined;
+  // Only the card layout needs Delete/Retry; see `compact` above. This gate is
+  // explicit rather than implied by the action row, because the row now also
+  // renders for Save to Drive at every width.
+  const showRowActions = compact && (onDelete !== undefined || canRetry);
+  const showActions = showRowActions || canSave;
 
   return (
     <AnimatePresence initial={false}>
@@ -126,8 +147,23 @@ export function JobDetailsPanel({
             </dl>
 
             {showActions && (
-              <div className="mt-4 flex items-center gap-2 border-t border-outline pt-3">
-                {canRetry && (
+              <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-outline pt-3">
+                {canSave && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      // The row itself toggles on click; an action must not.
+                      e.stopPropagation();
+                      onSaveToDrive?.(job);
+                    }}
+                    disabled={savingToDrive}
+                    className="inline-flex min-h-11 items-center gap-1.5 rounded-lg border border-primary/40 bg-primary-container/40 px-3 text-xs font-semibold text-on-primary-container transition-colors hover:bg-primary-container active:bg-primary-container disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    <CloudArrowUp size={15} />
+                    {savingToDrive ? "Saving…" : "Save to Drive"}
+                  </button>
+                )}
+                {showRowActions && canRetry && (
                   <button
                     type="button"
                     onClick={(e) => {
@@ -140,7 +176,7 @@ export function JobDetailsPanel({
                     <ArrowCounterClockwise size={15} /> Retry
                   </button>
                 )}
-                {onDelete && (
+                {showRowActions && onDelete && (
                   <button
                     type="button"
                     onClick={(e) => {

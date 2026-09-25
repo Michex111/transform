@@ -269,6 +269,9 @@ describe("email verification client", () => {
   });
 
   it("joins a 422 validation detail array into one message", async () => {
+    // Deliberately the *fragment* shape: this is what the API used to send, and
+    // what a proxy or an older API can still return. Fragments are joined with a
+    // comma; sentences are joined as sentences (see the tests below).
     const fetchMock = vi
       .fn()
       .mockResolvedValue(
@@ -281,6 +284,72 @@ describe("email verification client", () => {
     const err = await api.verifyEmail("").catch((e: unknown) => e);
 
     expect((err as Error).message).toBe("token must not be empty, too long");
+  });
+
+  it("keeps the API's per-field messages apart so a form can place them", async () => {
+    // The API's own handler writes these (src/presentation/api/validation_errors.py):
+    // they name the field rather than the Python type, and `loc` is what ties a
+    // message to an input.
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(422, {
+        detail: [
+          {
+            loc: ["body", "username"],
+            type: "string_too_short",
+            msg: "Username must be at least 3 characters.",
+          },
+        ],
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    stubLocalStorage();
+
+    const { api } = await loadClient();
+    const err = (await api.verifyEmail("tok").catch((e: unknown) => e)) as {
+      message: string
+      validationErrors?: { loc: (string | number)[]; msg: string }[]
+    };
+
+    expect(err.message).toBe("Username must be at least 3 characters.");
+    expect(err.validationErrors).toEqual([
+      { loc: ["body", "username"], type: "string_too_short", msg: "Username must be at least 3 characters." },
+    ]);
+  });
+
+  it("joins several sentence messages without a stray comma", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(422, {
+        detail: [
+          { loc: ["body", "username"], msg: "Username is required." },
+          { loc: ["body", "email"], msg: "Email is required." },
+        ],
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    stubLocalStorage();
+
+    const { api } = await loadClient();
+    const err = await api.verifyEmail("tok").catch((e: unknown) => e);
+
+    expect((err as Error).message).toBe("Username is required. Email is required.");
+    expect((err as Error).message).not.toContain(".,");
+  });
+
+  it("reports no validation errors for the other detail shapes", async () => {
+    // A structured detail is not a validation array, and `validationErrors` must
+    // stay undefined rather than becoming an empty array a form would inspect.
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(403, { detail: { code: "EMAIL_NOT_VERIFIED", message: "Verify first." } }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    stubLocalStorage();
+
+    const { api } = await loadClient();
+    const err = (await api.login("ada", "Sup3rSecret!").catch((e: unknown) => e)) as {
+      validationErrors?: unknown
+    };
+
+    expect(err.validationErrors).toBeUndefined();
   });
 
   it("falls back to the status text when the error body is not JSON", async () => {
@@ -311,6 +380,82 @@ describe("email verification client", () => {
     const err = await api.login("ada", "wrong").catch((e: unknown) => e);
 
     expect((err as Error).message).toBe("Invalid credentials");
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * Password reset
+ * ------------------------------------------------------------------ */
+
+describe("password reset client", () => {
+  it("POSTs the address to /users/forgot-password", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(202, {
+        message:
+          "If an account with that email address exists, we've sent instructions for resetting your password.",
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    stubLocalStorage();
+
+    const { api } = await loadClient();
+    const result = await api.forgotPassword("ada@example.com");
+
+    const [url, options] = fetchMock.mock.calls[0];
+    expect(url).toBe("/api/users/forgot-password");
+    expect((options as RequestInit).method).toBe("POST");
+    expect(JSON.parse((options as RequestInit).body as string)).toEqual({
+      email: "ada@example.com",
+    });
+    // 202 is a success for any address, so the caller gets the same message an
+    // existing and a non-existing account would.
+    expect(result.message).toContain("If an account with that email address exists");
+  });
+
+  it("POSTs the token and the new password to /users/reset-password", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(200, {
+        ok: true,
+        username: "ada",
+        message: "Your password has been updated. Sign in with your new password.",
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    stubLocalStorage();
+
+    const { api } = await loadClient();
+    const result = await api.resetPassword({ token: "tok-abc", new_password: "Sup3rSecret!" });
+
+    const [url, options] = fetchMock.mock.calls[0];
+    expect(url).toBe("/api/users/reset-password");
+    expect((options as RequestInit).method).toBe("POST");
+    // snake_case on the wire, exactly as the endpoint declares it.
+    expect(JSON.parse((options as RequestInit).body as string)).toEqual({
+      token: "tok-abc",
+      new_password: "Sup3rSecret!",
+    });
+    expect(result.ok).toBe(true);
+    expect(result.username).toBe("ada");
+  });
+
+  it("surfaces the plain-string 400 detail as the error message", async () => {
+    // A dead token is not a network fault: the caller has to be able to show
+    // the server's explanation and offer a new link, so the message and status
+    // must survive the round trip.
+    const detail =
+      "This password reset link is invalid or has expired. Request a new one and try again.";
+    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(400, { detail }));
+    vi.stubGlobal("fetch", fetchMock);
+    stubLocalStorage();
+
+    const { api, ApiError } = await loadClient();
+    const err = await api
+      .resetPassword({ token: "spent", new_password: "Sup3rSecret!" })
+      .catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as Error).message).toBe(detail);
+    expect((err as { status: number }).status).toBe(400);
   });
 });
 

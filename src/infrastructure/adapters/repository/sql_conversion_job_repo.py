@@ -198,6 +198,92 @@ class SQLConversionJobRepository:
                 counts[status] = count
         return counts
 
+    @staticmethod
+    def _deletable_history_filter(user_id: int, since: datetime | None):
+        """The shared scope for "jobs a bulk delete of this window may remove".
+
+        Factored out so ``count_deletable_history`` (the preview) and
+        ``delete_history_range`` (the delete) cannot disagree: they are the same
+        predicate, so the number the user confirms is exactly the number that
+        will disappear.
+
+        The terminal statuses are listed explicitly rather than expressed as
+        "not PENDING/PROCESSING/AWAITING_UPLOAD". An allowlist fails safe: a
+        status added later (e.g. CANCELLED) is *not* deletable until someone
+        decides it is, instead of silently becoming deletable and letting a
+        running worker's row be deleted out from under it.
+        """
+        from src.domain.conversions.value_object.job_status import JobStatus
+
+        clauses = [ConversionJobModel.user_id == user_id]
+        if since is not None:
+            clauses.append(ConversionJobModel.created_at >= since)
+        clauses.append(
+            ConversionJobModel.status.in_([JobStatus.COMPLETED, JobStatus.FAILED])
+        )
+        return clauses
+
+    async def count_deletable_history(
+        self, user_id: int, since: datetime | None
+    ) -> tuple[int, int]:
+        """``(deletable, active)`` counts for a bulk delete of the window.
+
+        Read-only. ``deletable`` is what the delete will remove; ``active`` is
+        the number of in-flight jobs inside the same window that will be kept.
+        """
+        from src.domain.conversions.value_object.job_status import JobStatus
+
+        window = [ConversionJobModel.user_id == user_id]
+        if since is not None:
+            window.append(ConversionJobModel.created_at >= since)
+
+        deletable = (
+            await self.session.execute(
+                select(func.count())
+                .select_from(ConversionJobModel)
+                .where(*self._deletable_history_filter(user_id, since))
+            )
+        ).scalar_one()
+        active = (
+            await self.session.execute(
+                select(func.count())
+                .select_from(ConversionJobModel)
+                .where(
+                    *window,
+                    ConversionJobModel.status.in_(
+                        [
+                            JobStatus.PENDING,
+                            JobStatus.PROCESSING,
+                            JobStatus.AWAITING_UPLOAD,
+                        ]
+                    ),
+                )
+            )
+        ).scalar_one()
+        return int(deletable), int(active)
+
+    async def delete_history_range(
+        self, user_id: int, since: datetime | None
+    ) -> tuple[int, int]:
+        """Delete the terminal jobs in the window; return ``(deleted, skipped)``.
+
+        Jobs that are still running are never touched — deleting a PENDING row
+        while a worker holds it orphans the job (the worker's status UPDATE
+        matches nothing and raises nothing, and credits are consumed against a
+        record that no longer exists). ``skipped`` is reported back so the API
+        can tell the user what was kept instead of silently under-deleting.
+        """
+        _, active = await self.count_deletable_history(user_id, since)
+
+        result = await self.session.execute(
+            delete(ConversionJobModel).where(
+                *self._deletable_history_filter(user_id, since)
+            )
+        )
+        await self.session.commit()
+        return int(result.rowcount or 0), int(active)  # type: ignore[attr-defined]
+
+
     async def sum_credits_used(self, user_id: int) -> int:
         """Total credits consumed across all of a user's jobs."""
         result = await self.session.execute(

@@ -25,12 +25,44 @@ logger = logging.getLogger(__name__)
 # a secret (a token) or trigger a send to a third party's inbox: leaving them on
 # the looser per-IP default would make the resend endpoint a cheap mail-bomb and
 # leave the token endpoint open to high-rate guessing.
+#
+# The profile-overhaul additions:
+# * `me/password` re-verifies a password, so it is a credential-guessing target
+#   like `/token` — and it is authenticated, so the default key would otherwise
+#   be the (much looser) per-token bucket.
+# * `me/phone` / `me/phone/resend` cost real money per message. At the
+#   authenticated limit (600/min) a single account could burn an SMS budget in
+#   seconds, and the strict 10/min cap is the control that makes that
+#   impossible.
+# * `me/phone/verify` is a 6-digit guess target: ~20 bits of entropy, which the
+#   per-code attempt ceiling also throttles, but the request rate must be capped
+#   too or an attacker can rotate through many numbers.
+#
+# The recovery-flow additions:
+# * `forgot-password` is unauthenticated *and* sends mail to a third party, so
+#   on the loose per-IP default it is a cheap mail-bomb: one client can aim
+#   unlimited reset messages at any address. The strict bucket is the only thing
+#   making that expensive.
+# * `reset-password` is unauthenticated and acts on a secret (the token), so it
+#   is a guessing surface exactly like `/verify-email`. A high request rate here
+#   is a high-rate attempt to brute-force a 256-bit token; the cap does not make
+#   that feasible, but it does keep the attempt rate bounded and auditable.
+#
+# Matching is an exact-path set lookup (see `_resolve_limit`), so these are the
+# literal request paths — a trailing slash or a sub-path is not covered and must
+# be added explicitly.
 _AUTH_PATHS = {
     "/api/users/token",
     "/api/users/register",
     "/api/users/refresh",
     "/api/users/verify-email",
     "/api/users/resend-verification",
+    "/api/users/forgot-password",
+    "/api/users/reset-password",
+    "/api/users/me/password",
+    "/api/users/me/phone",
+    "/api/users/me/phone/resend",
+    "/api/users/me/phone/verify",
 }
 
 

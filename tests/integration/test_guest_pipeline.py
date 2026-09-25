@@ -97,8 +97,12 @@ class FakeTransferService:
         user_id: str,
         file_name: str | None = None,
         folder_id: str | None = None,
+        **kwargs,
     ) -> UploadResponse:
-        del folder_id
+        # ``file_size``/``max_file_size_bytes`` are accepted (and ignored) so
+        # this fake matches the real service signature; guests never use them
+        # (their cap is below the multipart threshold).
+        del folder_id, kwargs
         self.create_calls.append((file_extension, user_id, file_name))
         return UploadResponse(
             upload_id="guest-upload-id",
