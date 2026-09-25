@@ -1,78 +1,90 @@
 import { useRef, useState } from "react";
-import { CircleNotch, FilePlus, UploadSimple } from "@phosphor-icons/react";
-import { motion } from "motion/react";
-import { useAuth } from "@/auth/AuthContext";
-import { useToast } from "@/auth/ToastContext";
+import { FilePlus, UploadSimple, X } from "@phosphor-icons/react";
 import { Modal } from "@/components/Modal";
 import { Button } from "@/components/ui";
-import { fileNameExtension, formatBytes } from "@/lib/format";
+import { formatBytes } from "@/lib/format";
+import { limitRefusal } from "@/lib/uploadStore";
+import { useUploads } from "@/uploads/uploadsContext";
 
-/** Mirrors the advertised tier upload limit shown across the UI (100 MB). */
-const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
+/**
+ * Fallback cap, used only while (or if) the API does not publish
+ * `max_file_size_bytes`.
+ *
+ * It is the limit this modal enforced before, which is the safe direction to
+ * err: an older API is never told a file is acceptable that it will reject. The
+ * server's own number replaces it as soon as it is available, which is where
+ * the raised limit comes from.
+ */
+const FALLBACK_MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
 
+/** Stable identity for a picked file, used for de-duping and React keys. */
+function fileKey(file: File): string {
+  return `${file.name}:${file.size}:${file.lastModified}`;
+}
+
+/**
+ * Pick files and hand them to the background upload manager.
+ *
+ * This dialog deliberately does no transferring of its own: it closes the moment
+ * the files are queued, and the dock (bottom-right) reports progress, the time
+ * estimate and cancellation. The previous version blocked the dialog on a fake
+ * indeterminate bar until the upload finished — exactly the behaviour this
+ * feature removes.
+ */
 export function FilesUploadModal({
   open,
   onClose,
   folderId,
-  onUploaded,
 }: {
   open: boolean;
   onClose: () => void;
   folderId: string | null;
-  /** Called after a successful upload+verify so the parent can refresh the list. */
-  onUploaded: () => void;
 }) {
-  const { api: client } = useAuth();
-  const { success, error } = useToast();
-  const [file, setFile] = useState<File | null>(null);
-  const [busy, setBusy] = useState(false);
+  const { addFiles, limits } = useUploads();
+  const [files, setFiles] = useState<File[]>([]);
   const [dragOver, setDragOver] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
+  const maxFileSizeBytes = limits.maxFileSizeBytes ?? FALLBACK_MAX_UPLOAD_BYTES;
+
   function reset() {
-    setFile(null);
+    setFiles([]);
     if (inputRef.current) inputRef.current.value = "";
   }
 
   function close() {
-    if (busy) return;
     reset();
     onClose();
   }
 
-  function pick(f: File | undefined | null) {
-    if (!f) return;
-    if (f.size > MAX_UPLOAD_BYTES) {
-      error(`"${f.name}" is too large. The maximum upload size is 100 MB.`);
-      return;
-    }
-    setFile(f);
+  /** Append newly picked files, ignoring exact repeats from a second pick. */
+  function pick(picked: FileList | File[] | null | undefined) {
+    const incoming = Array.from(picked ?? []);
+    if (incoming.length === 0) return;
+    setFiles((prev) => {
+      const seen = new Set(prev.map(fileKey));
+      const added = incoming.filter((file) => !seen.has(fileKey(file)));
+      return added.length > 0 ? [...prev, ...added] : prev;
+    });
   }
 
-  async function upload() {
-    if (!file || busy) return;
-    const ext = fileNameExtension(file.name);
-    setBusy(true);
-    try {
-      // 1. Open a presigned upload session scoped to the current folder.
-      const session = await client.createUploadSession({
-        file_extension: ext,
-        file_name: file.name,
-        folder_id: folderId,
-      });
-      // 2. PUT the bytes (no Content-Type header — the URL is signed without one).
-      await client.putToPresignedUrl(session.upload_url, file);
-      // 3. Verify completion — finalizes the file record in the library.
-      await client.verifyUpload(session.upload_id);
-      success(`"${file.name}" uploaded to your library.`);
-      reset();
-      onClose();
-      onUploaded();
-    } catch (err) {
-      error(err instanceof Error ? err.message : "Could not upload file");
-    } finally {
-      setBusy(false);
-    }
+  function removeAt(key: string) {
+    setFiles((prev) => prev.filter((file) => fileKey(file) !== key));
+  }
+
+  // Files the client already knows are too large are filtered out here so one
+  // bad pick cannot hold up the batch. The manager applies the same per-file
+  // check plus the cumulative free-space one when it queues what is sent.
+  const uploadable = files.filter(
+    (file) => limitRefusal(file, 0, { ...limits, availableBytes: null }) === null,
+  );
+
+  function startUpload() {
+    if (uploadable.length === 0) return;
+    addFiles(uploadable, folderId);
+    // Close immediately: the transfer continues in the background, and the dock
+    // is the surface that reports it.
+    close();
   }
 
   return (
@@ -88,14 +100,14 @@ export function FilesUploadModal({
         <div
           role="button"
           tabIndex={0}
-          onClick={() => !busy && inputRef.current?.click()}
+          onClick={() => inputRef.current?.click()}
           onKeyDown={(e) => {
-            if ((e.key === "Enter" || e.key === " ") && !busy) {
+            if (e.key === "Enter" || e.key === " ") {
               e.preventDefault();
               inputRef.current?.click();
             }
           }}
-          onDragOver={(e) => { e.preventDefault(); if (!busy) setDragOver(true); }}
+          onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
           onDragLeave={(e) => {
             e.preventDefault();
             if (e.currentTarget.contains(e.relatedTarget as Node)) return;
@@ -104,64 +116,77 @@ export function FilesUploadModal({
           onDrop={(e) => {
             e.preventDefault();
             setDragOver(false);
-            if (!busy) pick(e.dataTransfer.files?.[0]);
+            pick(e.dataTransfer.files);
           }}
-          aria-label="Choose a file to upload"
+          aria-label="Choose files to upload"
           className={`flex cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed px-6 py-10 text-center transition-colors ${
             dragOver ? "border-primary bg-primary/5" : "border-outline-strong hover:border-primary/50"
-          } ${busy ? "pointer-events-none opacity-60" : ""}`}
+          }`}
         >
           <span className="flex h-12 w-12 items-center justify-center rounded-full bg-primary-container text-primary">
             <UploadSimple size={24} weight="duotone" />
           </span>
-          {file ? (
-            <div className="flex items-center gap-2">
-              <FilePlus size={18} className="text-primary" />
-              <span className="max-w-xs truncate text-sm font-medium text-on-background">{file.name}</span>
-              <span className="text-xs text-muted">({formatBytes(file.size)})</span>
-            </div>
-          ) : (
-            <>
-              <p className="text-sm font-semibold text-on-background">Drag &amp; drop a file here</p>
-              <p className="text-xs text-muted">or click to browse — up to 100 MB</p>
-            </>
-          )}
+          <p className="text-sm font-semibold text-on-background">Drag &amp; drop files here</p>
+          <p className="text-xs text-muted">
+            or click to browse — up to {formatBytes(maxFileSizeBytes)} each
+          </p>
           <input
             ref={inputRef}
             type="file"
+            multiple
             className="hidden"
-            onChange={(e) => pick(e.target.files?.[0])}
+            onChange={(e) => {
+              pick(e.target.files);
+              // Clear the value so re-picking the same file fires `change` again.
+              e.target.value = "";
+            }}
             aria-hidden
             tabIndex={-1}
           />
         </div>
 
-        {/* Loading state */}
-        {busy && (
-          <div className="flex items-center gap-2">
-            <motion.span
-              className="flex h-1.5 flex-1 overflow-hidden rounded-full bg-outline"
-              aria-hidden
-            >
-              <motion.span
-                className="h-full rounded-full bg-primary"
-                animate={{ x: ["-100%", "400%"] }}
-                transition={{ duration: 1.2, repeat: Infinity, ease: "easeInOut" }}
-              />
-            </motion.span>
-            <span className="inline-flex items-center gap-1.5 text-sm text-muted">
-              <CircleNotch size={15} className="animate-spin text-primary" />
-              Uploading…
-            </span>
-          </div>
+        {files.length > 0 && (
+          <ul className="max-h-48 space-y-1 overflow-y-auto" aria-label="Files to upload">
+            {files.map((file) => {
+              const key = fileKey(file);
+              const refusal = limitRefusal(file, 0, { ...limits, availableBytes: null });
+              return (
+                <li
+                  key={key}
+                  className="flex items-center gap-2 rounded-lg border border-outline bg-surface-variant px-3 py-2"
+                >
+                  <FilePlus size={16} className="shrink-0 text-primary" aria-hidden />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-sm text-on-background" title={file.name}>
+                      {file.name}
+                    </span>
+                    {refusal ? (
+                      <span className="block text-xs text-error">{refusal}</span>
+                    ) : (
+                      <span className="block text-xs text-muted">{formatBytes(file.size)}</span>
+                    )}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => removeAt(key)}
+                    aria-label={`Remove ${file.name}`}
+                    className="-mr-1 shrink-0 rounded-md p-2 text-muted transition-colors hover:bg-surface hover:text-on-background pointer-coarse:p-3"
+                  >
+                    <X size={16} />
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
         )}
 
         <div className="flex justify-end gap-2">
-          <Button variant="secondary" onClick={close} disabled={busy}>
+          <Button variant="secondary" onClick={close}>
             Cancel
           </Button>
-          <Button onClick={upload} disabled={!file || busy}>
-            <UploadSimple size={16} /> {busy ? "Uploading…" : "Upload"}
+          <Button onClick={startUpload} disabled={uploadable.length === 0}>
+            <UploadSimple size={16} />
+            {uploadable.length > 1 ? `Upload ${uploadable.length} files` : "Upload"}
           </Button>
         </div>
       </div>

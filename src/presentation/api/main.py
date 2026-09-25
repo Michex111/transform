@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 
 import uvicorn
 from fastapi import FastAPI, Request, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
@@ -24,6 +25,7 @@ from src.infrastructure.database.session import get_engine
 from src.infrastructure.adapters.storage.cors import apply_bucket_cors
 from src.presentation.api.middleware.rate_limit import build_rate_limit_middleware
 from src.presentation.api.middleware.security_headers import SecurityHeadersMiddleware
+from src.presentation.api.validation_errors import validation_error_detail
 from src.presentation.api.routers.v1 import (
     api_keys,
     conversions,
@@ -80,6 +82,19 @@ async def lifespan(_: FastAPI):
         else "SUSPENDED — see Settings.validate()",
     )
 
+    # Same idea for SMS. Unlike email there is no sign-in gate to report — phone
+    # verification is opt-in — so the transport name is the whole story. Kept at
+    # WARNING (not INFO) so it survives the production log level: this is the
+    # single best proof of the live SMS configuration.
+    sms_backend = settings._resolve_sms_backend()
+    logger.warning(
+        "Sms transport: %s%s",
+        sms_backend,
+        " (codes are written to the log; verification still works)"
+        if sms_backend == "console"
+        else "",
+    )
+
     # Ensure the object-storage bucket allows browser uploads from the SPA
     # origin(s). Failures are non-fatal (logged) but configured origins are
     # honoured so direct uploads are not blocked by bucket CORS.
@@ -112,6 +127,28 @@ app.add_middleware(build_rate_limit_middleware)
 
 # Security hardening headers
 app.add_middleware(SecurityHeadersMiddleware)
+
+
+@app.exception_handler(RequestValidationError)
+async def handle_request_validation_error(
+    _request: Request, exc: RequestValidationError
+) -> JSONResponse:
+    """Answer a bad request body with messages addressed to the user.
+
+    FastAPI's default handler serialises pydantic's error records verbatim, and
+    those messages describe the *type* rather than the field — so a two-character
+    username reached the SPA as the sentence "String should have at least 3
+    characters". `validation_error_detail` rewrites them to name the field and
+    drops the two keys that echo the submitted value back (see that module).
+
+    Status stays 422 and the body keeps FastAPI's documented
+    `{"detail": [{loc, type, msg}]}` shape, so nothing downstream changes
+    except that `msg` is now English a person can act on.
+    """
+    return JSONResponse(
+        status_code=422,
+        content={"detail": validation_error_detail(exc)},
+    )
 
 
 def _metric_path(request: Request) -> str:

@@ -1,54 +1,35 @@
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import { motion, useReducedMotion } from "motion/react";
 import { Download, ArrowCounterClockwise, CaretDown, Trash } from "@phosphor-icons/react";
 import { useJobs, type UiJob } from "@/jobs/JobsContext";
 import { showsCreditsUsed, jobCreatedAt } from "@/jobs/jobStore";
 import { useAuth } from "@/auth/AuthContext";
 import { useToast } from "@/auth/ToastContext";
-import { getCachedFile, dropCachedFile } from "@/lib/fileCache";
+import { useRetryConversion } from "@/lib/useRetryConversion";
+import { useSaveToDrive } from "@/lib/useSaveToDrive";
 import { Dropdown } from "@/components/Dropdown";
 import { ErrorButton } from "@/components/ErrorButton";
 import { JobDetailsPanel } from "@/components/JobDetailsPanel";
 import { Modal } from "@/components/Modal";
 import { Button, Card, CreditsBadge, FormatChip, StatusBadge } from "@/components/ui";
 import { formatDateTime } from "@/lib/format";
+import {
+  readStoredStatus,
+  readStoredTimeline,
+  refreshRangeFor,
+  timelineForNavigation,
+  timelineFromNavigationState,
+  writeStoredStatus,
+  writeStoredTimeline,
+  type StatusFilter,
+  type TimelineFilter,
+} from "@/lib/historyFilters";
 import { HISTORY_HEADER_GRID, HISTORY_ROW_GRID } from "@/lib/tableColumns";
 import { useNarrowViewport } from "@/lib/useMediaQuery";
 
 const PRIMARY_FORMATS = ["pdf", "docx", "xlsx", "png"] as const;
 const MORE_FORMATS = ["mp3", "mp4"] as const;
-
-const STATUS_KEY = "historyPageStatus";
-/** The only filter values the status dropdown can take. */
-const VALID_STATUSES = ["all", "COMPLETED", "PROCESSING", "PENDING", "FAILED"] as const;
-type StatusFilter = (typeof VALID_STATUSES)[number];
-
-/**
- * Read a key from localStorage, tolerating environments where storage is
- * blocked or unavailable (private mode, sandboxed preview ifranes, disabled
- * cookies). Mirrors JobsContext's defensive localStorage access.
- */
-function readStoredStatus(): StatusFilter {
-  try {
-    const raw = localStorage.getItem(STATUS_KEY);
-    return (VALID_STATUSES as readonly string[]).includes(raw ?? "")
-      ? (raw as StatusFilter)
-      : "all";
-  } catch {
-    return "all";
-  }
-}
-
-/** Persist the status filter, ignoring storage failures so a blocked
- *  localStorage never breaks the page. */
-function writeStoredStatus(status: StatusFilter): void {
-  try {
-    localStorage.setItem(STATUS_KEY, status);
-  } catch {
-    /* storage unavailable — persistence is best-effort */
-  }
-}
 
 interface HistoryRowProps {
   job: UiJob;
@@ -65,6 +46,10 @@ interface HistoryRowProps {
   onDownload: (jobId: string) => void;
   onRetry: (job: UiJob) => void;
   onDelete: (job: UiJob) => void;
+  /** Files a completed conversion's output into the drive (default folder). */
+  onSaveToDrive: (job: UiJob) => void;
+  /** True while this row's output is being fetched for the save. */
+  savingToDrive: boolean;
 }
 
 /**
@@ -88,6 +73,8 @@ const HistoryRow = memo(function HistoryRow({
   onDownload,
   onRetry,
   onDelete,
+  onSaveToDrive,
+  savingToDrive,
 }: HistoryRowProps) {
   const reduce = useReducedMotion();
   const fileName = job.fileName ?? job.input_file;
@@ -202,19 +189,35 @@ const HistoryRow = memo(function HistoryRow({
         // informational only there — passing the handlers is what decides.
         onDelete={compact ? onDelete : undefined}
         onRetry={compact ? onRetry : undefined}
+        // Offered at every width: the row has no inline save control.
+        onSaveToDrive={onSaveToDrive}
+        savingToDrive={savingToDrive}
       />
     </li>
   );
 });
 
 export function HistoryPage() {
-  const { jobs, updateJob, refresh, removeJob } = useJobs();
+  const { jobs, refresh, removeJob } = useJobs();
   const { api: client } = useAuth();
   const { success, error } = useToast();
-  const navigate = useNavigate();
+  // Filing a completed conversion's output into the drive — the same flow the
+  // Convert page offers, shared through `lib/useSaveToDrive.ts`.
+  const { savingId, saveToDefaultFolder } = useSaveToDrive();
+  const location = useLocation();
   const [format, setFormat] = useState<string | null>(null);
   const [status, setStatus] = useState<StatusFilter>(readStoredStatus);
-  const [range, setRange] = useState<string>("all");
+  // A link may ask for a specific window: the navigation's History entry always
+  // asks for "all", and the Dashboard's "View all" asks for 7 days. Navigation
+  // state wins because it is an explicit request; the stored preference is the
+  // fallback for every arrival that carries none (direct URL, reload, back
+  // button).
+  //
+  // Read in the initializer as well as in the effect below so the first paint is
+  // already the requested window instead of flashing the stored one.
+  const [range, setRange] = useState<TimelineFilter>(
+    () => timelineFromNavigationState(location.state) ?? readStoredTimeline(),
+  );
   const [deleteTarget, setDeleteTarget] = useState<UiJob | null>(null);
   const [showMoreFormats, setShowMoreFormats] = useState(false);
   // At most one row is expanded. An accordion keeps the list the same height
@@ -236,9 +239,39 @@ export function HistoryPage() {
     writeStoredStatus(status);
   }, [status]);
 
+  // Apply the window a navigation asked for.
+  //
+  // Keyed on `location.key` rather than on the requested value: clicking
+  // "History" in the navigation while already on this page must RESET the window
+  // to "all", and that click can carry a state object identical to the previous
+  // one. Only the navigation key changes in that case, so it is the signal that
+  // a fresh request arrived.
+  //
+  // `location.state` is in the dependencies too, because it is the value being
+  // read; it is referentially stable between navigations, so this still runs
+  // only when the router actually navigates.
+  //
+  // The functional update form is what makes the previous value available
+  // without also depending on `range` — depending on it would re-run this on
+  // every dropdown change for no reason.
   useEffect(() => {
-    refresh(range === "all" ? undefined : range);
+    setRange((previous) => timelineForNavigation(location.state, previous));
+  }, [location.key, location.state]);
+
+  // Fetch the window the dropdown is showing. The server owns the date cut-off
+  // (`range=24h|7d|30d`), so changing the filter has to re-query — filtering
+  // `jobs` here instead would only ever trim the page of history the server
+  // already returned, and would silently show fewer results than requested.
+  useEffect(() => {
+    refresh(refreshRangeFor(range));
   }, [refresh, range]);
+
+  // Remember the choice for the next visit. Kept separate from the query above
+  // so persistence can never alter what is displayed.
+  useEffect(() => {
+    writeStoredTimeline(range);
+  }, [range]);
+
 
   const handleDownload = useCallback(
     async (jobId: string) => {
@@ -284,66 +317,7 @@ export function HistoryPage() {
     setDeleteTarget(job);
   }, []);
 
-  const handleRetry = useCallback(
-    async (job: UiJob) => {
-      // 1. If the input object is gone from storage, fall back to a full
-      //    re-upload via the normal conversion route.
-      const exists = await client.objectExists(
-        job.object_key || job.input_file,
-      );
-      if (!exists) {
-        const cached = getCachedFile(job.job_id);
-        if (cached) {
-          try {
-            const newJob = await client.convertWithFile(
-              cached.source,
-              cached.target,
-              cached.file,
-            );
-            updateJob(job.job_id, {
-              ...newJob,
-              fileName: cached.file.name,
-              status: "PENDING",
-              progress: 0,
-              createdAt: new Date().toISOString(),
-            });
-            dropCachedFile(job.job_id);
-            success("Input file was missing — re-uploaded and re-queued.");
-          } catch (err) {
-            error(
-              err instanceof Error ? err.message : "Could not re-upload file",
-            );
-          }
-          return;
-        }
-        // No cached file — send the user to Convert pre-filled.
-        navigate("/app/convert", {
-          state: { source: job.source_format, target: job.target_format },
-        });
-        error(
-          "The input file is no longer in storage. Re-select it to convert.",
-        );
-        return;
-      }
-
-      // 2. Input still exists — re-enqueue server-side without re-uploading.
-      try {
-        const updated = await client.retryJob(job.job_id);
-        updateJob(job.job_id, {
-          status: "PENDING",
-          progress: 0,
-          output_file: updated.output_file,
-          download_url: updated.download_url,
-        });
-        success("Conversion re-queued — tracking it now.");
-      } catch (err) {
-        error(
-          err instanceof Error ? err.message : "Could not retry conversion",
-        );
-      }
-    },
-    [client, navigate, updateJob, success, error],
-  );
+  const handleRetry = useRetryConversion().retry;
 
   const filtered = useMemo(() => {
     return jobs.filter((j) => {
@@ -353,6 +327,15 @@ export function HistoryPage() {
       return true;
     });
   }, [jobs, format, status]);
+
+  // Stabilised so the memoized rows do not re-render on every parent render;
+  // the hook already reports its own errors and progress through the dock.
+  const handleSaveToDrive = useCallback(
+    (job: UiJob) => {
+      void saveToDefaultFolder(job);
+    },
+    [saveToDefaultFolder],
+  );
 
   return (
     <div className="mx-auto max-w-5xl space-y-6">
@@ -480,6 +463,8 @@ export function HistoryPage() {
                 onDownload={handleDownload}
                 onRetry={handleRetry}
                 onDelete={handleDeleteRequest}
+                onSaveToDrive={handleSaveToDrive}
+                savingToDrive={savingId === job.job_id}
               />
             ))}
           </ul>

@@ -119,6 +119,47 @@ class ConversionService:
         """
         return await self.db_repository.delete_job(job_id, user_id)
 
+    async def preview_history_delete(
+        self, user_id: int, *, since=None
+    ) -> tuple[int, int]:
+        """Count what :meth:`delete_history_range` would remove.
+
+        Read-only, and deliberately routed through the same repository
+        predicate as the delete so the confirmation dialog and the outcome can
+        never disagree.
+
+        Args:
+            since: Optional lower bound on ``created_at`` (None means all time).
+                Callers must derive it from an explicit, validated range — never
+                from an absent parameter, which must not be able to mean
+                "everything".
+
+        Returns:
+            ``(deletable, active)`` — jobs that would be deleted, and jobs
+            inside the same window that are still running and would be kept.
+        """
+        return await self.db_repository.count_deletable_history(user_id, since)
+
+    async def delete_history_range(
+        self, user_id: int, *, since=None
+    ) -> tuple[int, int]:
+        """Delete the user's terminal jobs inside a time window.
+
+        Never deletes a job that is still running (PENDING/PROCESSING/
+        AWAITING_UPLOAD): a row removed from under a worker orphans the job and
+        loses its history entry. Those jobs are reported back instead.
+
+        Stored objects (the input and output files in bucket storage) are **not**
+        deleted — the cleanup worker owns them and reclaims them on its normal
+        retention sweep. Deleting the references synchronously would have to
+        enumerate an unbounded number of objects while the user waits, and a
+        partial failure would leave rows that point at nothing.
+
+        Returns:
+            ``(deleted_count, skipped_active)``.
+        """
+        return await self.db_repository.delete_history_range(user_id, since)
+
     async def update_conversion_job(self, job: ConversionJob) -> None:
         """Persist progress updates for an existing job (status, output, errors,
         compute time and credits consumed).

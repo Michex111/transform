@@ -26,6 +26,18 @@ class StorageStats(BaseModel):
     used_percent: float
     file_count: int
     breakdown: list[StorageBreakdownEntry] = Field(default_factory=list)
+    # --- additive fields -------------------------------------------------
+    # Added so the SPA stops hardcoding limits that the server owns. Optional
+    # with defaults so an already-deployed older frontend bundle (which does not
+    # know these keys) is unaffected, and so any reader written against the old
+    # schema still validates.
+    available_bytes: int | None = Field(
+        default=None, description="max(0, limit_bytes - used_bytes)"
+    )
+    max_file_size_bytes: int | None = Field(
+        default=None, description="Effective per-file cap for this tier, in bytes"
+    )
+
 
 
 class DashboardResponse(BaseModel):

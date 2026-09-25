@@ -284,6 +284,11 @@ def test_dashboard_pre_existing_fields_are_unchanged(tmp_path) -> None:
         "used_percent",
         "file_count",
         "breakdown",
+        # Added deliberately for the large-upload work: the SPA reads the
+        # headroom and the per-tier per-file cap from here instead of hardcoding
+        # them. Both are additive, so an older bundle is unaffected.
+        "available_bytes",
+        "max_file_size_bytes",
     }
     assert body["storage_stats"]["limit_bytes"] == 5 * 1024 * 1024 * 1024  # FREE quota
 

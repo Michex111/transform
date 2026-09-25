@@ -54,10 +54,11 @@ const stripReactComments = (html: string) => html.replace(/<!-- -->/g, "");
  */
 function render(
   job: UiJob,
-  { open = true, compact = true, handlers = {} }: {
+  { open = true, compact = true, savingToDrive = false, handlers = {} }: {
     open?: boolean;
     compact?: boolean;
-    handlers?: { onDelete?: boolean; onRetry?: boolean };
+    savingToDrive?: boolean;
+    handlers?: { onDelete?: boolean; onRetry?: boolean; onSaveToDrive?: boolean };
   } = {},
 ) {
   return stripReactComments(
@@ -67,8 +68,10 @@ function render(
         job={job}
         id="row-details"
         compact={compact}
+        savingToDrive={savingToDrive}
         onDelete={handlers.onDelete ? vi.fn() : undefined}
         onRetry={handlers.onRetry ? vi.fn() : undefined}
+        onSaveToDrive={handlers.onSaveToDrive ? vi.fn() : undefined}
       />,
     ),
   );
@@ -159,5 +162,45 @@ describe("JobDetailsPanel", () => {
     const html = render(JOB);
     expect(html).not.toContain("Delete");
     expect(html).not.toContain("Retry");
+    expect(html).not.toContain("Save to Drive");
+  });
+
+  it("offers Save to Drive for a completed job when the caller provides it", () => {
+    // History passes this; the Dashboard does not, so the button is the caller's
+    // decision rather than something the panel infers.
+    expect(render(JOB, { handlers: { onSaveToDrive: true } })).toContain("Save to Drive");
+  });
+
+  it("offers no Save to Drive when the caller passes no handler", () => {
+    const html = render(JOB, { handlers: { onDelete: true, onRetry: true } });
+    expect(html).not.toContain("Save to Drive");
+  });
+
+  it("offers no Save to Drive for a job with no output to file", () => {
+    // A running or failed job has nothing to save; queueing an upload for it
+    // would only fill the dock with a transfer that cannot succeed.
+    for (const status of ["PROCESSING", "PENDING", "FAILED"]) {
+      expect(render({ ...JOB, status }, { handlers: { onSaveToDrive: true } })).not.toContain(
+        "Save to Drive",
+      );
+    }
+  });
+
+  it("keeps Save to Drive in the wide layout, where it has no inline counterpart", () => {
+    // The `md`+ row renders Delete/Retry itself (so the panel drops those), but
+    // it has no save control of its own — hiding this one too would make the
+    // feature unreachable on a desktop.
+    const html = render(JOB, {
+      compact: false,
+      handlers: { onDelete: true, onRetry: true, onSaveToDrive: true },
+    });
+    expect(html).toContain("Save to Drive");
+    expect(html).not.toContain("Delete");
+  });
+
+  it("says 'Saving…' while the output is being fetched", () => {
+    const html = render(JOB, { savingToDrive: true, handlers: { onSaveToDrive: true } });
+    expect(html).toContain("Saving…");
+    expect(html).not.toContain("Save to Drive");
   });
 });

@@ -11,6 +11,8 @@ from src.domain.subscriptions.value_object.credit_period import (
     current_period_key,
     next_period_start,
 )
+from src.application.services.upload_limits import tier_max_file_size_bytes
+from src.application.services.user_profile import to_user_response
 from src.infrastructure.adapters.repository.sql_api_key_repo import SQLAPIKeyRepository
 from src.infrastructure.adapters.repository.sql_conversion_job_repo import SQLConversionJobRepository
 from src.infrastructure.adapters.repository.sql_credit_repo import SQLCreditRepository
@@ -94,6 +96,13 @@ async def get_dashboard(
                 )
                 for row in breakdown
             ],
+            # The SPA renders the upload pre-check from these, so they must be
+            # derived from the same two numbers the upload path enforces:
+            # the account quota (TierPolicy) and the per-tier per-file cap
+            # (upload_limits). ``available_bytes`` is clamped at zero so an
+            # over-quota account shows "0 left" rather than a negative number.
+            available_bytes=max(0, limit_bytes - used_bytes),
+            max_file_size_bytes=tier_max_file_size_bytes(tier),
         ),
         credit_balance=balance,
         tier=domain_tier_to_api(tier).value,
@@ -105,5 +114,10 @@ async def get_dashboard(
 
 @router.get("/profile", response_model=UserResponse)
 async def get_profile(current_user: CurrentUser) -> UserResponse:
-    """Get the current user's profile."""
-    return UserResponse.model_validate(current_user)
+    """Get the current user's profile.
+
+    ``display_name``/``initials``/``avatar_url`` are computed, so this cannot go
+    through ``UserResponse.model_validate`` — see
+    ``application/services/user_profile.py``.
+    """
+    return to_user_response(current_user)

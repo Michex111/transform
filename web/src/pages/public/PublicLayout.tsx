@@ -2,7 +2,10 @@ import { Link, Outlet, useLocation } from "react-router-dom";
 import { useEffect, useState } from "react";
 import { motion } from "motion/react";
 import { List, X } from "@phosphor-icons/react";
+import { useAuth } from "@/auth/AuthContext";
+import { ProfileMenu } from "@/components/ProfileMenu";
 import { Logo } from "@/components/ui";
+import { PUBLIC_HEADER_MENU } from "@/lib/profileMenu";
 
 export function PublicLayout() {
   const location = useLocation();
@@ -27,6 +30,7 @@ export function PublicLayout() {
 
 function PublicHeader() {
   const location = useLocation();
+  const { isAuthenticated } = useAuth();
   const [menuOpen, setMenuOpen] = useState(false);
 
   // Close the mobile menu when navigating between pages.
@@ -58,19 +62,37 @@ function PublicHeader() {
               {link.label}
             </Link>
           ))}
-          <Link
-            to="/login"
-            className="rounded-lg border border-outline-strong px-4 py-2 text-sm font-semibold text-on-background transition-colors hover:bg-surface-variant"
-          >
-            Sign in
-          </Link>
-          <Link
-            to="/register"
-            className="rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-on-primary transition-colors hover:bg-primary/90"
-          >
-            Get started
-          </Link>
+          {/* Signed-in visitors reach their account from here too; a guest keeps
+              the sign-in / get-started pair unchanged. The purge stays off: an
+              app-only action behind a marketing header is not discoverable, and
+              the count would mean nothing in this context. */}
+          {isAuthenticated ? (
+            <ProfileMenu {...PUBLIC_HEADER_MENU} align="right" placement="down" />
+          ) : (
+            <>
+              <Link
+                to="/login"
+                className="rounded-lg border border-outline-strong px-4 py-2 text-sm font-semibold text-on-background transition-colors hover:bg-surface-variant"
+              >
+                Sign in
+              </Link>
+              <Link
+                to="/register"
+                className="rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-on-primary transition-colors hover:bg-primary/90"
+              >
+                Get started
+              </Link>
+            </>
+          )}
         </nav>
+
+        {/* `ml-auto` parks the avatar against the menu toggle — the toggle keeps
+            the rightmost slot, because it still owns the nav links and taking
+            that slot would cost access to them. Only rendered when signed in,
+            so the guest header stays exactly as it was. */}
+        {isAuthenticated && (
+          <ProfileMenu {...PUBLIC_HEADER_MENU} align="right" placement="down" className="ml-auto md:hidden" />
+        )}
 
         {/* Mobile menu toggle — only visible on small screens. */}
         <button
@@ -101,20 +123,25 @@ function PublicHeader() {
                 {link.label}
               </Link>
             ))}
-            <div className="mt-2 flex flex-col gap-2">
-              <Link
-                to="/login"
-                className="rounded-lg border border-outline-strong px-4 py-2 text-center text-sm font-semibold text-on-background transition-colors hover:bg-surface-variant"
-              >
-                Sign in
-              </Link>
-              <Link
-                to="/register"
-                className="rounded-lg bg-primary px-4 py-2 text-center text-sm font-semibold text-on-primary transition-colors hover:bg-primary/90"
-              >
-                Get started
-              </Link>
-            </div>
+            {/* The sign-in pair is for visitors only. A signed-in reader opening
+                this panel is already in, and the account itself is the avatar in
+                the row above. */}
+            {!isAuthenticated && (
+              <div className="mt-2 flex flex-col gap-2">
+                <Link
+                  to="/login"
+                  className="rounded-lg border border-outline-strong px-4 py-2 text-center text-sm font-semibold text-on-background transition-colors hover:bg-surface-variant"
+                >
+                  Sign in
+                </Link>
+                <Link
+                  to="/register"
+                  className="rounded-lg bg-primary px-4 py-2 text-center text-sm font-semibold text-on-primary transition-colors hover:bg-primary/90"
+                >
+                  Get started
+                </Link>
+              </div>
+            )}
           </div>
         </nav>
       )}

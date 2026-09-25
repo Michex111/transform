@@ -43,3 +43,25 @@ class FakeEmailSender:
             assert index != -1, "verification email contains no token link"
             return message.text_body[index + len(marker) :].split()[0].strip()
         raise AssertionError(f"no email was sent to {recipient}")
+
+    def password_reset_token_for(self, recipient: str) -> str:
+        """Extract the raw reset token from the most recent email to ``recipient``.
+
+        Same principle as ``verification_token_for`` — the token is recovered
+        from the rendered plain-text body, because that is the only place the
+        plaintext exists. This deliberately searches for the SPA reset route
+        rather than the bare ``token=`` marker, so a verification email that
+        happens to be the most recent message for the recipient is not mistaken
+        for a reset link.
+        """
+        for message in reversed(self.sent):
+            if message.to != recipient:
+                continue
+            marker = "reset-password?token="
+            index = message.text_body.find(marker)
+            if index == -1:
+                continue
+            return (
+                message.text_body[index + len(marker) :].split()[0].strip()
+            )
+        raise AssertionError(f"no password reset email was sent to {recipient}")

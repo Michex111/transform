@@ -11,8 +11,10 @@ from src.application.exceptions.file_system_exceptions import (
     FileSizeLimitExceededError,
     FolderNameConflictError,
     FolderNotFoundError,
+    StorageQuotaExceededError,
 )
 from src.application.services.file_service import FileService
+from src.domain.subscriptions.policies.tier_policy import TierPolicy
 from src.domain.subscriptions.value_object.tier import SubscriptionTier
 from src.infrastructure.database.models import UserFileModel, UserFolderModel
 
@@ -25,6 +27,7 @@ class FakeFileRepo:
     def __init__(self) -> None:
         self.files: dict[str, UserFileModel] = {}
         self._seq = 0
+        self.locked_users: list[int] = []
 
     async def save(self, *, user_id, file_key, file_name, file_size_bytes,
                    mime_type, file_extension="", folder_id=None, expires_at=None) -> str:
@@ -87,6 +90,14 @@ class FakeFileRepo:
         rows = [f for f in self.files.values() if f.user_id == user_id and f.is_favorite]
         rows.sort(key=lambda f: f.id)
         return rows[offset:offset + limit], len(rows)
+
+    async def get_user_storage_used(self, user_id: int) -> int:
+        return sum(f.file_size_bytes for f in self.files.values() if f.user_id == user_id)
+
+    async def lock_user_for_update(self, user_id: int) -> None:
+        # SQLite (and this fake) have no row locks; recorded so tests can assert
+        # the authoritative quota check actually takes the lock.
+        self.locked_users.append(user_id)
 
 
 class FakeFolderRepo:
@@ -433,6 +444,151 @@ def test_complete_upload_validates_target_folder(service, storage) -> None:
     storage.sizes["uploads/abc.pdf"] = 10
     with pytest.raises(FolderNotFoundError):
         _run(service.complete_upload(1, _session(folder_id="missing")))
+
+
+# ---------------------------------------------------------------------------
+# Storage quota (the "full proof" half of the upload limits)
+# ---------------------------------------------------------------------------
+
+GB = 1024**3
+
+
+def _seed_size(file_repo, size: int, user_id: int = 1) -> None:
+    """Occupy part of the user's quota with an existing file row."""
+    _run(
+        file_repo.save(
+            user_id=user_id, file_key=f"files/seed-{size}.bin", file_name="seed.bin",
+            file_size_bytes=size, mime_type="application/octet-stream",
+        )
+    )
+
+
+def test_authorize_upload_size_returns_the_cap_when_nothing_is_declared(service) -> None:
+    """No declared size => no pre-check (legacy/guest behaviour), but the caller
+    still needs the effective cap to echo back to the client."""
+    assert _run(service.authorize_upload_size(1, None)) == 5 * GB
+
+
+def test_authorize_upload_size_rejects_a_declared_size_over_the_cap(service) -> None:
+    with pytest.raises(FileSizeLimitExceededError) as exc:
+        _run(service.authorize_upload_size(1, 5 * GB + 1))
+
+    detail = exc.value.http_detail()
+    assert detail["code"] == "FILE_TOO_LARGE"
+    assert detail["max_file_size_bytes"] == 5 * GB
+    assert detail["file_size"] == 5 * GB + 1
+
+
+def test_authorize_upload_size_rejects_a_declared_size_over_the_quota(
+    service, file_repo
+) -> None:
+    _seed_size(file_repo, 4 * GB)
+
+    with pytest.raises(StorageQuotaExceededError) as exc:
+        _run(service.authorize_upload_size(1, 2 * GB))
+
+    detail = exc.value.http_detail()
+    assert detail == {
+        "code": "STORAGE_QUOTA_EXCEEDED",
+        "message": detail["message"],
+        "limit_bytes": 5 * GB,
+        "used_bytes": 4 * GB,
+        "available_bytes": 1 * GB,
+        "file_size": 2 * GB,
+    }
+
+
+def test_authorize_upload_size_allows_a_file_that_exactly_fits(service, file_repo) -> None:
+    _seed_size(file_repo, 4 * GB)
+
+    assert _run(service.authorize_upload_size(1, 1 * GB)) == 5 * GB
+
+
+def test_complete_upload_rejects_when_the_measured_size_breaks_the_quota(
+    service, file_repo, storage
+) -> None:
+    """The AUTHORITATIVE check: the size is measured, not declared, and the
+    rejection leaves neither a row nor an orphan object."""
+    _seed_size(file_repo, 4 * GB)
+    storage.sizes["uploads/big.pdf"] = 2 * GB
+    files_before = dict(file_repo.files)
+
+    with pytest.raises(StorageQuotaExceededError) as exc:
+        _run(service.complete_upload(1, _session(key="uploads/big.pdf")))
+
+    assert exc.value.http_detail()["available_bytes"] == 1 * GB
+    assert file_repo.files == files_before  # nothing committed
+    assert storage.removed == ["uploads/big.pdf"]  # no orphan object
+
+
+def test_complete_upload_takes_the_user_row_lock_before_committing(
+    service, file_repo, storage
+) -> None:
+    """Without the lock two concurrent finalizes could both see the same usage
+    and both commit, leaving the account over quota."""
+    storage.sizes["uploads/abc.pdf"] = 1234
+
+    _run(service.complete_upload(1, _session()))
+
+    assert file_repo.locked_users == [1]
+
+
+def test_complete_upload_does_not_take_the_lock_for_an_idempotent_retry(
+    service, file_repo, storage
+) -> None:
+    """A repeat of an already-committed upload must short-circuit BEFORE the
+    quota check: those bytes are already counted, so charging them again would
+    reject a valid retry — and the account is exactly full after the first one."""
+    _seed_size(file_repo, 4 * GB)
+    storage.sizes["uploads/abc.pdf"] = 1 * GB  # exactly fills the 5 GB quota
+    first = _run(service.complete_upload(1, _session()))
+    file_repo.locked_users.clear()
+
+    second = _run(service.complete_upload(1, _session()))
+
+    assert first == second
+    assert file_repo.locked_users == []
+
+
+def test_complete_upload_removes_the_object_when_the_cap_is_exceeded(
+    service, storage
+) -> None:
+    """A rejected upload must not keep occupying the bucket."""
+    service._size_limits = {SubscriptionTier.FREE: 100}
+    storage.sizes["uploads/big.pdf"] = 500
+
+    with pytest.raises(FileSizeLimitExceededError):
+        _run(service.complete_upload(1, _session(key="uploads/big.pdf")))
+
+    assert storage.removed == ["uploads/big.pdf"]
+
+
+def test_a_zero_quota_tier_is_refused_without_a_negative_available_bytes(
+    service, storage, monkeypatch
+) -> None:
+    """A zero-quota tier behaves sanely: everything is refused, nothing crashes,
+    and ``available_bytes`` stays at zero rather than going negative."""
+    service._size_limits = {SubscriptionTier.FREE: 50}
+    monkeypatch.setattr(
+        TierPolicy,
+        "for_tier",
+        classmethod(
+            lambda cls, tier: TierPolicy(
+                tier=tier,
+                storage_quota_bytes=0,
+                monthly_conversion_credits=None,
+                monthly_api_conversion_credits=None,
+            )
+        ),
+    )
+    storage.sizes["uploads/abc.pdf"] = 10
+
+    with pytest.raises(StorageQuotaExceededError) as exc:
+        _run(service.complete_upload(1, _session(key="uploads/abc.pdf")))
+
+    detail = exc.value.http_detail()
+    assert detail["available_bytes"] == 0
+    assert detail["limit_bytes"] == 0
 
 
 # ---------------------------------------------------------------------------

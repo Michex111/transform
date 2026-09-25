@@ -21,7 +21,10 @@ from fastapi.responses import RedirectResponse, StreamingResponse
 
 from src.application.dtos.upload_dto import UploadResponse, UploadSession
 from src.application.exceptions.conversion_job_exception import InvalidConversionJobError
-from src.application.exceptions.file_system_exceptions import FileSystemError
+from src.application.exceptions.file_system_exceptions import (
+    FileSizeLimitExceededError,
+    FileSystemError,
+)
 from src.application.exceptions.file_transfer_exceptions import (
     UploadSessionNotFoundError,
     UploadVerificationError,
@@ -166,11 +169,35 @@ async def create_upload_session(
     payload: CreateUploadSessionRequest,
     transfer_service: Annotated[TransferService, Depends(get_transfer_service)],
 ) -> UploadResponse:
-    """Create a guest upload session with no folder and no owner."""
+    """Create a guest upload session with no folder and no owner.
+
+    Guests always get the single-PUT session: their cap (50 MB) sits below the
+    multipart threshold, so multipart upload can never be the right choice, and
+    the unauthenticated endpoint stays on the simplest possible path. A declared
+    ``file_size`` is still honoured as a fast pre-check so a guest is told the
+    file is too large before uploading it, rather than after — the check at
+    guest verify (which measures the real object) remains authoritative.
+    """
+    settings = get_settings()
+    if payload.file_size is not None and payload.file_size > settings.GUEST_MAX_FILE_SIZE:
+        raise HTTPException(
+            status_code=413,
+            detail=FileSizeLimitExceededError(
+                f"File exceeds the guest maximum size "
+                f"({settings.GUEST_MAX_FILE_SIZE // (1024 * 1024)} MB).",
+                max_file_size_bytes=settings.GUEST_MAX_FILE_SIZE,
+                file_size=payload.file_size,
+            ).http_detail(),
+        )
+
     return await transfer_service.create_upload(
         file_extension=payload.file_extension,
         user_id="guest",
         file_name=payload.file_name,
+        # Report the guest cap so the guest page can show the real limit
+        # instead of hardcoding one (it is enforced at finalize, where the
+        # object's true size is measured).
+        max_file_size_bytes=settings.GUEST_MAX_FILE_SIZE,
     )
 
 
@@ -220,7 +247,7 @@ async def verify_upload_session(
     except UploadVerificationError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except FileSystemError as exc:
-        raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        raise HTTPException(status_code=exc.status_code, detail=exc.http_detail()) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
 
