@@ -18,37 +18,39 @@ and "I control that mailbox", so its properties matter:
 * **Single-use and time-boxed.** ``consume`` clears the stored hash, so a
   replayed link fails; the expiry bounds the window in which a leaked mailbox
   or browser history entry is exploitable.
+
+The implementation of all of the above now lives in ``one_time_token``, because
+a password-reset token has exactly the same properties and one shared
+implementation is one thing to audit. This module is the
+verification-named façade the rest of the codebase imports, and its public API
+is unchanged: ``TOKEN_BYTES``, ``IssuedVerificationToken``,
+``hash_verification_token``, ``issue_verification_token``, ``token_is_expired``
+and ``cooldown_elapsed``.
 """
 
-import hashlib
-import secrets
-from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 
-#: Bytes of CSPRNG entropy per token (43 URL-safe characters once encoded).
-TOKEN_BYTES = 32
+from src.domain.security.enitities.one_time_token import (
+    TOKEN_BYTES,
+    IssuedToken,
+    cooldown_elapsed,
+    hash_token as hash_verification_token,
+    issue_token,
+    token_is_expired,
+)
 
+__all__ = [
+    "TOKEN_BYTES",
+    "IssuedVerificationToken",
+    "cooldown_elapsed",
+    "hash_verification_token",
+    "issue_verification_token",
+    "token_is_expired",
+]
 
-@dataclass(frozen=True)
-class IssuedVerificationToken:
-    """A freshly minted token: the value to email, and what to store."""
-
-    #: The value that goes in the link. Never persisted.
-    raw: str
-    #: SHA-256 hex digest, the only form written to the database.
-    hashed: str
-    #: Instant after which the token is rejected.
-    expires_at: datetime
-
-
-def hash_verification_token(raw: str) -> str:
-    """Return the storable digest of a raw token.
-
-    Deliberately un-salted: verification looks the row up *by* this digest, so
-    a per-row salt would make the lookup impossible. Salting adds nothing here
-    anyway — there is no dictionary of likely tokens to precompute against.
-    """
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+#: A verification token and a reset token are the same value object, so the
+#: published name is an alias rather than a parallel class that could drift.
+IssuedVerificationToken = IssuedToken
 
 
 def issue_verification_token(
@@ -63,60 +65,4 @@ def issue_verification_token(
     a naive/aware comparison raises ``TypeError`` deep in a request handler,
     which is a far worse failure than a clear error at the call site.
     """
-    reference = now or datetime.now(UTC)
-    if reference.tzinfo is None:
-        raise ValueError("issue_verification_token requires a timezone-aware 'now'")
-
-    raw = secrets.token_urlsafe(TOKEN_BYTES)
-    return IssuedVerificationToken(
-        raw=raw,
-        hashed=hash_verification_token(raw),
-        expires_at=reference + timedelta(hours=ttl_hours),
-    )
-
-
-def token_is_expired(expires_at: datetime | None, *, now: datetime | None = None) -> bool:
-    """True when ``expires_at`` has been reached (or is missing).
-
-    A missing expiry is treated as expired — fail closed. That state should be
-    unreachable (the token is issued with one), but if a row ever ends up
-    without it, accepting the token would make it valid forever.
-
-    Uses ``>=`` so that a token whose deadline is *exactly now* counts as
-    expired. This must agree with the activation statement in the users router,
-    which filters on ``email_verification_expires_at > now`` and therefore also
-    excludes the exact deadline. If the two disagreed, the request would pass
-    this check and then silently fail to match any row — an "invalid link"
-    error for a token that had just been reported live.
-    """
-    if expires_at is None:
-        return True
-    reference = now or datetime.now(UTC)
-    expires = expires_at
-    if expires.tzinfo is None:
-        # SQLite (used by the test suite) round-trips ``DateTime(timezone=True)``
-        # as a naive value; PostgreSQL returns it aware. Normalise rather than
-        # relying on the backend.
-        expires = expires.replace(tzinfo=UTC)
-    return reference >= expires
-
-
-def cooldown_elapsed(
-    sent_at: datetime | None,
-    *,
-    cooldown_seconds: int,
-    now: datetime | None = None,
-) -> bool:
-    """True when a new verification email may be sent for this account.
-
-    ``sent_at`` of ``None`` (never sent) always permits a send, as does a
-    non-positive cooldown — so a deployment that wants no limit can express that
-    without a separate code path.
-    """
-    if sent_at is None or cooldown_seconds <= 0:
-        return True
-    reference = now or datetime.now(UTC)
-    previous = sent_at
-    if previous.tzinfo is None:
-        previous = previous.replace(tzinfo=UTC)
-    return reference >= previous + timedelta(seconds=cooldown_seconds)
+    return issue_token(ttl=timedelta(hours=ttl_hours), now=now)

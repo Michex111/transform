@@ -41,6 +41,7 @@ from src.infrastructure.converters.converter_registry import ConverterRegistry  
 from src.presentation.api.middleware.rate_limit import RateLimitMiddleware  # noqa: E402
 from tests.fakes.fake_converter_registry import FakeConverterRegistry  # noqa: E402
 from tests.fakes.fake_email_sender import FakeEmailSender  # noqa: E402
+from tests.fakes.fake_sms_sender import FakeSmsSender  # noqa: E402
 from tests.fakes.fake_event_publisher import FakeEventPublisher  # noqa: E402
 from tests.fakes.fake_logger import FakeLogger  # noqa: E402
 from tests.fakes.fake_queue import FakeQueuePort  # noqa: E402
@@ -89,6 +90,12 @@ def fake_event_publisher() -> FakeEventPublisher:
 def fake_email_sender() -> FakeEmailSender:
     """Capturing email transport; never touches the network."""
     return FakeEmailSender()
+
+
+@pytest.fixture
+def fake_sms_sender() -> FakeSmsSender:
+    """Capturing SMS transport; never touches the network or costs a message."""
+    return FakeSmsSender()
 
 
 @pytest.fixture

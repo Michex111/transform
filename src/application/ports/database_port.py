@@ -48,6 +48,26 @@ class ConversionJobRepositoryPort(ConversionJobWriteRepositoryPort, Protocol):
         """Return the user's in-flight jobs (pending/processing/awaiting upload)."""
         ...
 
+    async def count_deletable_history(
+        self, user_id: int, since: datetime | None
+    ) -> tuple[int, int]:
+        """Return ``(deletable, active)`` for a bulk history delete of the window.
+
+        ``deletable`` counts terminal jobs inside the window (what a delete
+        would remove); ``active`` counts in-flight jobs inside it (what would be
+        kept). Read-only, and evaluated with the same predicate the delete uses.
+        """
+        ...
+
+    async def delete_history_range(
+        self, user_id: int, since: datetime | None
+    ) -> tuple[int, int]:
+        """Delete the terminal jobs in the window; return ``(deleted, skipped)``.
+
+        In-flight jobs (PENDING/PROCESSING/AWAITING_UPLOAD) are never removed.
+        """
+        ...
+
 class APIKeyRepositoryPort(Protocol):
     """Repository interface for API keys."""
     async def save(self, api_key: APIKey) -> None:

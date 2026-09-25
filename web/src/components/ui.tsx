@@ -1,4 +1,4 @@
-import type { InputHTMLAttributes, ReactNode } from "react";
+import type { InputHTMLAttributes, ReactNode, Ref } from "react";
 import { motion, useReducedMotion, type HTMLMotionProps } from "motion/react";
 import { Coins } from "@phosphor-icons/react";
 import { formatMeta, statusMeta } from "@/lib/format";
@@ -302,6 +302,7 @@ export function ProgressBar({
   from = "var(--color-primary)",
   to,
   className = "",
+  ariaLabel,
 }: {
   /**
    * Completed percentage, or `null` when the server has not reported one. A
@@ -313,6 +314,15 @@ export function ProgressBar({
   from?: string;
   to?: string;
   className?: string;
+  /**
+   * Accessible name for the bar.
+   *
+   * A `role="progressbar"` with no name is announced as a bare number with no
+   * indication of what it measures, so a page showing several of them (the
+   * uploads dock) is unusable with a screen reader. Callers that render more
+   * than one bar must pass something like `"report.pdf upload progress"`.
+   */
+  ariaLabel?: string;
 }) {
   const end = to ?? from;
   const background = `linear-gradient(90deg, ${from}, ${end})`;
@@ -322,6 +332,7 @@ export function ProgressBar({
       <div
         className={`h-1.5 w-full overflow-hidden rounded-full bg-outline ${className}`}
         role="progressbar"
+        aria-label={ariaLabel}
       >
         {/* An animated sweep, so a running job still reads as "moving". */}
         <motion.div
@@ -336,7 +347,7 @@ export function ProgressBar({
 
   const clamp = Math.max(0, Math.min(100, value));
   return (
-    <div className={`h-1.5 w-full overflow-hidden rounded-full bg-outline ${className}`} role="progressbar" aria-valuenow={clamp} aria-valuemin={0} aria-valuemax={100}>
+    <div className={`h-1.5 w-full overflow-hidden rounded-full bg-outline ${className}`} role="progressbar" aria-label={ariaLabel} aria-valuenow={clamp} aria-valuemin={0} aria-valuemax={100}>
       <motion.div
         className="h-full rounded-full"
         initial={{ width: 0 }}
@@ -353,10 +364,33 @@ export function ProgressBar({
 interface FieldProps extends InputHTMLAttributes<HTMLInputElement> {
   label: string;
   hint?: string;
+  /**
+   * Message to show under the field instead of the hint.
+   *
+   * Takes the hint's place rather than stacking below it: an error about the
+   * very rule the hint states ("Use at least 3 characters." under "At least 3
+   * characters") reads as the form repeating itself. Also drives
+   * `aria-invalid` and wires the message up via `aria-describedby`, so the field
+   * is announced as invalid and the message is read with it.
+   */
+  error?: string;
+  /**
+   * The input element, for a caller that has to move focus into it.
+   *
+   * A named prop rather than `ref`, because `Field` is a plain function
+   * component: attaching `ref` to it would need `forwardRef` (and would then
+   * be the wrapper's ref, not the input's). The caller that needs this is a
+   * form returning focus to the field a failure is about — a disabled control
+   * loses focus to `<body>`, so without it the user's retry starts with a Tab.
+   */
+  inputRef?: Ref<HTMLInputElement>;
 }
 
-export function Field({ label, hint, className = "", id, ...props }: FieldProps) {
+export function Field({ label, hint, className = "", id, error, inputRef, ...props }: FieldProps) {
   const fieldId = id ?? label.toLowerCase().replace(/\s+/g, "-");
+  // Described-by points at whichever line is rendered, so a hint is announced
+  // with its field rather than being visual-only text sitting under it.
+  const describedBy = error ? `${fieldId}-error` : hint ? `${fieldId}-hint` : undefined;
   return (
     <div className="space-y-1.5">
       <label htmlFor={fieldId} className="block text-sm font-medium text-on-background">
@@ -364,10 +398,25 @@ export function Field({ label, hint, className = "", id, ...props }: FieldProps)
       </label>
       <input
         id={fieldId}
+        ref={inputRef}
+        aria-invalid={error ? true : undefined}
+        aria-describedby={describedBy}
         className={`h-11 w-full rounded-lg border border-outline-strong bg-surface-variant px-3 text-sm text-on-background placeholder:text-muted focus:border-primary focus:outline-none ${className}`}
         {...props}
       />
-      {hint && <p className="text-xs text-muted">{hint}</p>}
+      {error ? (
+        // `role="alert"` so a failed submit is announced: the message appears
+        // without the user moving focus, and there is no toast on this path.
+        <p id={`${fieldId}-error`} role="alert" className="text-xs text-error">
+          {error}
+        </p>
+      ) : (
+        hint && (
+          <p id={`${fieldId}-hint`} className="text-xs text-muted">
+            {hint}
+          </p>
+        )
+      )}
     </div>
   );
 }

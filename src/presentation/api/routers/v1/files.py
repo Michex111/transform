@@ -93,8 +93,13 @@ def _to_folder(row) -> FolderResponse:
 
 
 def _map_fs_error(exc: FileSystemError) -> HTTPException:
-    """Map a FileService error to its HTTP status."""
-    return HTTPException(status_code=exc.status_code, detail=str(exc))
+    """Map a FileService error to its HTTP status.
+
+    Uses ``exc.http_detail()`` (not ``str(exc)``) so the upload-limit rejections
+    keep their structured ``detail`` here too. Every other file-system error
+    returns its message string as before.
+    """
+    return HTTPException(status_code=exc.status_code, detail=exc.http_detail())
 
 
 # ---------------------------------------------------------------------------
@@ -226,10 +231,18 @@ async def create_upload_session(
     transfer_service: Annotated[TransferService, Depends(get_transfer_service)],
     file_service: Annotated[FileService, Depends(get_file_service)],
 ) -> UploadResponse:
-    """Create a new file upload session. Returns a pre-signed PUT URL for Minio."""
+    """Create a new file upload session. Returns a pre-signed PUT URL for Minio.
+
+    Behaves identically to ``POST /api/uploads/sessions`` — same schema, same
+    pre-flight cap/quota check and same multipart selection from the declared
+    size — so there is no weaker second way to start an upload.
+    """
     try:
         if payload.folder_id is not None:
             await file_service.get_folder(current_user.id, payload.folder_id)
+        max_file_size_bytes = await file_service.authorize_upload_size(
+            current_user.id, payload.file_size
+        )
     except FileSystemError as exc:
         raise _map_fs_error(exc) from exc
 
@@ -238,6 +251,8 @@ async def create_upload_session(
         user_id=str(current_user.id),
         file_name=payload.file_name,
         folder_id=payload.folder_id,
+        file_size=payload.file_size,
+        max_file_size_bytes=max_file_size_bytes,
     )
 
 

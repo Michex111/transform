@@ -8,6 +8,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToString } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
+import { withTimeline } from "@/lib/historyFilters";
 import type { UiJob } from "@/jobs/jobStore";
 
 const JOBS: UiJob[] = [
@@ -79,6 +80,22 @@ vi.mock("@/auth/ToastContext", () => ({
   useToast: () => ({ success: vi.fn(), error: vi.fn() }),
 }));
 
+// History now offers "Save to Drive" from the details panel, and the shared
+// `useSaveToDrive` hook reads the app-wide upload queue (the background manager
+// that performs the transfer). `renderToString` runs no effects, so none of
+// these is ever called — they only have to exist for the hook to mount.
+vi.mock("@/uploads/uploadsContext", () => ({
+  useUploads: () => ({
+    addFiles: vi.fn(),
+    uploads: [],
+    cancel: vi.fn(),
+    retry: vi.fn(),
+    dismiss: vi.fn(),
+    refreshLimits: vi.fn(),
+    limits: { maxFileSizeBytes: null, availableBytes: null },
+  }),
+}));
+
 const { HistoryPage } = await import("@/pages/app/HistoryPage");
 
 // `renderToString` on an effectful tree makes React log a `useLayoutEffect`
@@ -111,6 +128,38 @@ function render(): string {
   );
 }
 
+/**
+ * Render History as if navigated to, optionally carrying router state.
+ *
+ * `renderToString` does not run effects, so this asserts the *initial* window
+ * (what the dropdown shows on arrival) rather than the fetch that follows it.
+ * The fetch is driven by the same value, and its mapping to the API's `range`
+ * parameter is covered in `src/lib/historyFilters.test.ts`.
+ */
+function renderAt(state?: Record<string, unknown>): string {
+  return stripReactComments(
+    renderToString(
+      <MemoryRouter initialEntries={[{ pathname: "/app/history", state }]}>
+        <HistoryPage />
+      </MemoryRouter>,
+    ),
+  );
+}
+
+/** Minimal localStorage stand-in; the Vitest environment is `node`. */
+function stubStorage(): void {
+  const map = new Map<string, string>();
+  Object.defineProperty(globalThis, "localStorage", {
+    value: {
+      getItem: (k: string) => map.get(k) ?? null,
+      setItem: (k: string, v: string) => void map.set(k, v),
+      removeItem: (k: string) => void map.delete(k),
+    },
+    configurable: true,
+    writable: true,
+  });
+}
+
 describe("HistoryPage token cost", () => {
   it("shows the tokens a completed conversion used", () => {
     const html = render();
@@ -134,5 +183,55 @@ describe("HistoryPage token cost", () => {
     // whole set. This covers the still-running row too, which has no cost yet.
     const badges = render().match(/aria-label="\d+ tokens used"/g) ?? [];
     expect(badges).toEqual(['aria-label="12 tokens used"']);
+  });
+});
+
+describe("HistoryPage timeline window", () => {
+  beforeEach(stubStorage);
+
+  it("opens on the last 7 days when a link asks for it", () => {
+    // Dashboard's "View all" points at 7 days, because the card it sits on lists
+    // recent conversions.
+    const html = renderAt(withTimeline("7d"));
+    expect(html).toContain("Last 7 days");
+  });
+
+  it("starts on all time when nothing asks for a window", () => {
+    expect(renderAt()).toContain("All time");
+  });
+
+  it("falls back to the stored preference", () => {
+    localStorage.setItem("historyPageTimeline", "30d");
+    expect(renderAt()).toContain("Last 30 days");
+  });
+
+  it("lets an explicit request win over the stored preference", () => {
+    localStorage.setItem("historyPageTimeline", "30d");
+    const html = renderAt(withTimeline("24h"));
+    expect(html).toContain("Last 24 hours");
+    expect(html).not.toContain("Last 30 days");
+  });
+
+  it("opens on all time when the navigation asks for the full window", () => {
+    // The sidebar / phone-bar History entry always asks for "all", so a stored
+    // window must not survive that click.
+    localStorage.setItem("historyPageTimeline", "7d");
+    const html = renderAt(withTimeline("all"));
+    expect(html).toContain("All time");
+    expect(html).not.toContain("Last 7 days");
+  });
+
+  it("ignores an invalid window in router state", () => {
+    localStorage.setItem("historyPageTimeline", "30d");
+    // A hand-typed URL or a stale history.state must not reach the API.
+    expect(renderAt({ timeline: "90d" })).toContain("Last 30 days");
+  });
+
+  it("exposes the window control to assistive tech", () => {
+    // The option list only renders once the popover is open, so the closed
+    // trigger is all a server render can show — assert the control is present
+    // and labelled, so a refactor cannot quietly drop the filter.
+    const html = renderAt();
+    expect(html).toContain("Filter by time range");
   });
 });

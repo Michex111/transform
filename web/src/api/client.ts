@@ -1,5 +1,6 @@
-import { downloadFromUrl, saveBlob } from '@/lib/download'
+import { downloadFromUrl, isTrustedDownloadUrl, saveBlob } from '@/lib/download'
 import { encryptFileToFencr, fencrDataKeyToBase64 } from '@/lib/fencr'
+import { joinValidationMessages, validationErrorsFrom } from '@/lib/apiErrors'
 import {
   normalizeApiKeyCreate,
   normalizeApiKeyList,
@@ -13,39 +14,55 @@ import {
   normalizeCreditHistory,
   normalizeCreditPricing,
   normalizeDashboard,
+  normalizeDeleteHistoryPreview,
+  normalizeDeleteHistoryRange,
   normalizeFile,
   normalizeFileDownload,
   normalizeFileList,
   normalizeFolder,
   normalizeFolderContents,
   normalizeFolderList,
+  normalizeForgotPassword,
   normalizeGuestJob,
+  normalizePhoneStatus,
   normalizePortal,
   normalizePresignedUrls,
   normalizeResendVerification,
+  normalizeResetPassword,
   normalizeSubscriptionPlans,
   normalizeSubscriptionStatus,
   normalizeSupportedConversions,
   normalizeTokenResponse,
   normalizeUploadResponse,
   normalizeUploadSession,
+  normalizeUploadSessionParts,
   normalizeUser,
   normalizeVerifyEmail,
 } from './normalize'
 import type {
   APIKeyCreateRequest,
   BatchDeleteRequest,
+  ChangePasswordRequest,
   ConversionJobResponse,
   CreditPurchaseRequest,
   CreateConversionJobRequest,
   CreateLibraryConversionRequest,
   CreateUploadSessionRequest,
+  DeleteAccountRequest,
   FavoriteFileRequest,
+  ForgotPasswordRequest,
   GuestJobResponse,
+  HistoryDeleteRange,
   PresignedUrlsRequest,
   RefreshTokenRequest,
+  RequestPhoneVerificationRequest,
+  ResetPasswordRequest,
   TokenResponse,
+  UpdateProfileRequest,
   UserCreateRequest,
+  ValidationErrorItem,
+  VerifyPhoneRequest,
+  VerifyUploadRequest,
 } from './types'
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? '/api').replace(/\/$/, '')
@@ -135,13 +152,30 @@ export class ApiError extends Error {
    * is only reachable with a correct username *and* password.
    */
   readonly details?: Record<string, unknown>
+  /**
+   * Per-field messages from a 422, when the API sent the validation array.
+   *
+   * Exposed separately from `details` (which is the *object* shape of
+   * `detail`) because a form needs to place each message under the input it
+   * names, and a joined sentence cannot be taken apart again. `message` carries
+   * the same text joined into one line, so a caller with no form to fill in
+   * still only has to read `err.message`.
+   */
+  readonly validationErrors?: ValidationErrorItem[]
 
-  constructor(message: string, status: number, code?: string, details?: Record<string, unknown>) {
+  constructor(
+    message: string,
+    status: number,
+    code?: string,
+    details?: Record<string, unknown>,
+    validationErrors?: ValidationErrorItem[],
+  ) {
     super(message)
     this.name = 'ApiError'
     this.status = status
     this.code = code
     this.details = details
+    this.validationErrors = validationErrors
   }
 }
 
@@ -154,7 +188,11 @@ export class ApiError extends Error {
  *   - a plain string for most errors,
  *   - `{ code, message }` where the client must branch
  *     (e.g. `EMAIL_NOT_VERIFIED` on an unverified sign-in),
- *   - an array of `{ msg }` objects for 422 request-validation failures.
+ *   - an array of `{ loc, type, msg }` objects for 422 request-validation
+ *     failures. `msg` is written for a person by the API's own
+ *     `RequestValidationError` handler — it names the field and the rule, so it
+ *     is shown as-is. `loc` rides along because it is what lets a form put each
+ *     message under the right input.
  *
  * Reading only the string shape turned the structured case into the literal
  * text `"[object Object]"`, which is how this was found.
@@ -162,7 +200,12 @@ export class ApiError extends Error {
 async function readErrorBody(
   response: Response,
   fallback: string,
-): Promise<{ detail: string; code?: string; details?: Record<string, unknown> }> {
+): Promise<{
+  detail: string
+  code?: string
+  details?: Record<string, unknown>
+  validationErrors?: ValidationErrorItem[]
+}> {
   let body: unknown
   try {
     body = await response.json()
@@ -177,10 +220,14 @@ async function readErrorBody(
   if (typeof detail === 'string' && detail) return { detail }
 
   if (Array.isArray(detail)) {
-    const messages = detail
-      .map((entry) => (entry as { msg?: unknown } | null)?.msg)
-      .filter((msg): msg is string => typeof msg === 'string')
-    if (messages.length) return { detail: messages.join(', ') }
+    const validationErrors = validationErrorsFrom(detail)
+    const messages = validationErrors.map((entry) => entry.msg)
+    if (messages.length) {
+      // `joinValidationMessages`, not `join(', ')`: several messages are
+      // sentences, and a comma between two full stops reads as a typo
+      // ("Username is required., Password must be…").
+      return { detail: joinValidationMessages(messages), validationErrors }
+    }
   }
 
   if (detail && typeof detail === 'object' && !Array.isArray(detail)) {
@@ -241,8 +288,13 @@ class ApiClient {
     }
     if (this.token) headers.Authorization = `Bearer ${this.token}`
     // JSON payloads sent by this client need the correct Content-Type or
-    // FastAPI will reject the body with HTTP 422.
-    if (options.body != null && !headers['Content-Type']) {
+    // FastAPI will reject the body with HTTP 422. A `FormData` body is the one
+    // exception: the browser must set `multipart/form-data` itself, because
+    // only it knows the boundary it generated. Overriding that here broke every
+    // multipart upload with a 422 that named no field.
+    const isFormData =
+      typeof FormData !== 'undefined' && options.body instanceof FormData
+    if (options.body != null && !isFormData && !headers['Content-Type']) {
       headers['Content-Type'] = 'application/json'
     }
 
@@ -263,8 +315,8 @@ class ApiClient {
     }
 
     if (!res.ok) {
-      const { detail, code, details } = await readErrorBody(res, res.statusText)
-      throw new ApiError(detail, res.status, code, details)
+      const { detail, code, details, validationErrors } = await readErrorBody(res, res.statusText)
+      throw new ApiError(detail, res.status, code, details, validationErrors)
     }
 
     if (res.status === 204) return undefined as T
@@ -300,6 +352,35 @@ class ApiClient {
       body: JSON.stringify({ email }),
     }).then(normalizeResendVerification)
 
+  /**
+   * Ask for a password-reset link.
+   *
+   * Answers 202 unconditionally, with the same body whether or not the address
+   * exists — anything else would turn the endpoint into an account-existence
+   * oracle. The caller must therefore show the same confirmation either way and
+   * must not tell the user that a mail was in fact sent.
+   */
+  forgotPassword = (email: string) =>
+    this.request<unknown>('/users/forgot-password', {
+      method: 'POST',
+      body: JSON.stringify({ email } satisfies ForgotPasswordRequest),
+    }).then(normalizeForgotPassword)
+
+  /**
+   * Consume a reset token and set a new password.
+   *
+   * A 400 is expected and meaningful here (the link was already used, or it
+   * expired), so the caller must surface the message rather than treat every
+   * failure as a network fault. Other devices keep their existing access tokens
+   * until they expire (30 minutes) — this deployment has no server-side token
+   * store, so a reset cannot sign anyone else out.
+   */
+  resetPassword = (body: ResetPasswordRequest) =>
+    this.request<unknown>('/users/reset-password', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }).then(normalizeResetPassword)
+
   login = async (username: string, password: string) => {
     const form = new URLSearchParams({ username, password })
     const res = await fetch(`${API_BASE}/users/token`, {
@@ -311,8 +392,8 @@ class ApiClient {
       // Shares the response reader with `request` so a structured detail
       // (EMAIL_NOT_VERIFIED) survives here too — this path does not throw a
       // plain Error string, and the sign-in page branches on the code.
-      const { detail, code, details } = await readErrorBody(res, 'Invalid credentials')
-      throw new ApiError(detail, res.status, code, details)
+      const { detail, code, details, validationErrors } = await readErrorBody(res, 'Invalid credentials')
+      throw new ApiError(detail, res.status, code, details, validationErrors)
     }
     const data = normalizeTokenResponse(await res.json())
     // Persist tokens immediately so subsequent calls are authenticated.
@@ -321,6 +402,89 @@ class ApiClient {
   }
 
   me = () => this.request<unknown>('/users/me').then(normalizeUser)
+
+  /**
+   * Update the editable profile fields.
+   *
+   * Names only — `username` is the login identifier (it appears in the token
+   * subject) and `email` is gated behind re-verification, so neither is
+   * writable here. An empty string clears a name; the server normalises that to
+   * `null` so "cleared" and "never set" are one state.
+   */
+  updateProfile = (body: UpdateProfileRequest) =>
+    this.request<unknown>('/users/me', { method: 'PATCH', body: JSON.stringify(body) }).then(
+      normalizeUser,
+    )
+
+  /**
+   * Change the password, proving knowledge of the current one.
+   *
+   * Answers 204. Other devices keep their existing access tokens until they
+   * expire (30 minutes) — this deployment has no server-side token store, so a
+   * claim to have revoked them would be false.
+   */
+  changePassword = (body: ChangePasswordRequest) =>
+    this.request<void>('/users/me/password', { method: 'POST', body: JSON.stringify(body) })
+
+  /**
+   * Replace the profile picture.
+   *
+   * Multipart rather than the presigned-URL flow used for conversions: an
+   * avatar is capped at 2 MB and is downscaled server-side before storage, so
+   * the extra round trip and the bucket CORS surface buy nothing here.
+   */
+  uploadAvatar = (file: File) => {
+    const form = new FormData()
+    form.append('file', file, file.name || 'avatar')
+    return this.request<unknown>('/users/me/avatar', { method: 'POST', body: form }).then(
+      normalizeUser,
+    )
+  }
+
+  /** Remove the profile picture, reverting the account to its initials tile. */
+  deleteAvatar = () =>
+    this.request<unknown>('/users/me/avatar', { method: 'DELETE' }).then(normalizeUser)
+
+  // ---- Phone verification ----
+  /**
+   * Submit a number and send it a code. Answers 202; nothing is verified until
+   * the code comes back through `verifyPhone`.
+   */
+  requestPhoneVerification = (body: RequestPhoneVerificationRequest) =>
+    this.request<unknown>('/users/me/phone', { method: 'POST', body: JSON.stringify(body) }).then(
+      normalizePhoneStatus,
+    )
+
+  /** Send a fresh code to the number already on file. Answers 202. */
+  resendPhoneVerification = () =>
+    this.request<unknown>('/users/me/phone/resend', { method: 'POST' }).then(normalizePhoneStatus)
+
+  /**
+   * Consume a code.
+   *
+   * A 400 is meaningful here (wrong, expired, or already-used code) and a 429
+   * means the attempt limit was reached, so callers must branch on the code
+   * rather than treating every failure as a network fault.
+   */
+  verifyPhone = (body: VerifyPhoneRequest) =>
+    this.request<unknown>('/users/me/phone/verify', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }).then(normalizePhoneStatus)
+
+  /** Forget the number and its verification. */
+  removePhone = () => this.request<void>('/users/me/phone', { method: 'DELETE' })
+
+  /**
+   * Permanently delete the account and everything it owns.
+   *
+   * Requires both the password and a typed confirmation phrase, so a stray
+   * click on a live session cannot destroy an account. Answers 204; the caller
+   * must clear the tokens and leave the app, since the session it holds is now
+   * meaningless.
+   */
+  deleteAccount = (body: DeleteAccountRequest) =>
+    this.request<void>('/users/me', { method: 'DELETE', body: JSON.stringify(body) })
 
   // ---- Dashboard ----
   dashboard = () => this.request<unknown>('/v1/user/dashboard').then(normalizeDashboard)
@@ -335,10 +499,35 @@ class ApiClient {
   getUploadSession = (id: string) =>
     this.request<unknown>(`/uploads/sessions/${id}`).then(normalizeUploadSession)
 
-  verifyUpload = (id: string, jobId?: string) =>
+  /**
+   * Mint presigned URLs for a batch of a multipart session's parts.
+   *
+   * Batching is the caller's job (see the upload engine): asking for every part
+   * of a 5 GB upload up front would make the whole transfer depend on URLs that
+   * expire while later parts are still queued, and the server only has to sign
+   * the requested numbers. A 409 means the session is not multipart.
+   */
+  createUploadSessionParts = (id: string, partNumbers: number[]) =>
+    this.request<unknown>(`/uploads/sessions/${id}/parts`, {
+      method: 'POST',
+      body: JSON.stringify({ part_numbers: partNumbers }),
+    }).then(normalizeUploadSessionParts)
+
+  /**
+   * Finalise an upload session.
+   *
+   * `body.parts` is required only for a multipart session — it carries each
+   * part's ETag so the server can assemble the object — and omitted for the
+   * single-PUT path, which is what the convert and guest flows use (`jobId` is
+   * their optional query parameter and is unaffected).
+   */
+  verifyUpload = (id: string, jobId?: string, body?: VerifyUploadRequest) =>
     this.request<unknown>(
       `/uploads/sessions/${id}/verify${jobId ? `?job_id=${encodeURIComponent(jobId)}` : ''}`,
-      { method: 'POST' },
+      {
+        method: 'POST',
+        ...(body ? { body: JSON.stringify(body) } : {}),
+      },
     ).then(normalizeUploadSession)
 
   cancelUpload = (id: string) =>
@@ -415,6 +604,28 @@ class ApiClient {
   /** Delete a single history record owned by the current user. */
   deleteHistoryJob = (id: string) =>
     this.request<void>(`/conversions/history/${id}`, { method: 'DELETE' })
+
+  /**
+   * Count what a bulk history delete would remove, for the confirmation dialog.
+   *
+   * Read-only, so it is safe to call while merely opening the menu.
+   */
+  deleteHistoryPreview = (range: HistoryDeleteRange) =>
+    this.request<unknown>(
+      `/conversions/history/delete-preview?range=${encodeURIComponent(range)}`,
+    ).then(normalizeDeleteHistoryPreview)
+
+  /**
+   * Delete every finished job in a time window.
+   *
+   * `range` is required — the endpoint rejects a request without one so that a
+   * missing parameter can never mean "delete everything". Jobs still running
+   * are skipped and reported back, never removed out from under a worker.
+   */
+  deleteHistoryRange = (range: HistoryDeleteRange) =>
+    this.request<unknown>(`/conversions/history?range=${encodeURIComponent(range)}`, {
+      method: 'DELETE',
+    }).then(normalizeDeleteHistoryRange)
   /** Retry a failed job without re-uploading its input file. */
   retryJob = (id: string) =>
     this.request<unknown>(`/conversions/jobs/${id}/retry`, { method: 'POST' }).then(normalizeConversionJob)
@@ -479,10 +690,29 @@ class ApiClient {
     const upload = await this.createUploadSession({ file_extension: source, file_name: name })
     // 3. Upload bytes directly to the presigned URL (no Content-Type header —
     //    the URL is signed without one, so sending it would 403 on B2/S3).
-    await this.putToPresignedUrl(upload.upload_url, uploadBytes)
+    await this.putToPresignedUrl(this.singlePutUrl(upload), uploadBytes)
     // 4. Verify upload completion and enqueue the job.
     await this.verifyUpload(upload.upload_id, job.job_id)
     return job
+  }
+
+  /**
+   * The whole-object URL a single-PUT flow needs, or a clear failure.
+   *
+   * A session the server answered with `upload_mode: "multipart"` carries no
+   * whole-object URL (the parts flow owns it). Nothing on this path requests
+   * multipart — `convertWithFile` is capped well below the split threshold and
+   * sends no `file_size` — but returning `""` to `putToPresignedUrl` would turn
+   * "unsupported session" into a confusing request against the SPA's own
+   * origin, so it is named here instead.
+   */
+  private singlePutUrl(upload: { upload_url: string | null }): string {
+    if (!upload.upload_url) {
+      throw new Error(
+        'This file is too large for a single upload. Upload it from the Files page instead.',
+      )
+    }
+    return upload.upload_url
   }
 
   /**
@@ -664,7 +894,7 @@ class ApiClient {
       file_extension: source,
       file_name: name,
     })
-    await this.guestPutToPresignedUrl(upload.upload_url, uploadBytes)
+    await this.guestPutToPresignedUrl(this.singlePutUrl(upload), uploadBytes)
     await this.guestVerifyUpload(upload.upload_id, job.job_id, guestToken)
     return job
   }
@@ -755,6 +985,81 @@ class ApiClient {
   async downloadLibraryFile(fileId: string, filename: string): Promise<void> {
     const { download_url } = await this.getFileDownload(fileId)
     await this.saveDownload(download_url, this.getFileStreamUrl(fileId), filename)
+  }
+
+  /**
+   * Fetch a library file's bytes as a Blob, for an in-page preview.
+   *
+   * Resolves the bytes the same way `downloadLibraryFile` does, because the API
+   * answers with one of two things: a pre-signed absolute URL (encryption off)
+   * or a server-relative path to the authenticated streaming endpoint
+   * (encryption on).
+   *
+   * WHY the same allowlist/fallback as the download: an API-supplied URL is
+   * handed to `fetch()`, and the browser would follow it wherever it points —
+   * `javascript:`, `data:` or a plain-http host included. An untrusted scheme
+   * must never reach the browser, so it falls back to the streaming endpoint
+   * instead. That fallback is not merely safer, it is the only correct path in
+   * the encrypted case: the streaming endpoint is what DECRYPTS an at-rest
+   * encrypted object, so the pre-signed object would come back as ciphertext.
+   *
+   * `authedFetch` repeats the request once after the silent 401 refresh, so
+   * previewing a file whose access token expired while the page was open works.
+   */
+  async fetchLibraryFileBlob(fileId: string): Promise<Blob> {
+    const { download_url } = await this.getFileDownload(fileId)
+
+    // A trusted absolute URL is a pre-signed GET: it carries its own signature,
+    // so it needs no Authorization header (sending one can invalidate the
+    // signature on some providers).
+    if (isTrustedDownloadUrl(download_url)) {
+      const res = await fetch(download_url)
+      if (!res.ok) throw new Error(`Download failed (${res.status})`)
+      return res.blob()
+    }
+
+    // Relative path, or a scheme we refuse to hand to the browser: stream it
+    // through the API, which authenticates and decrypts.
+    const res = await this.authedFetch(resolveServerPath(this.getFileStreamUrl(fileId)))
+    if (!res.ok) throw new Error(`Download failed (${res.status})`)
+    return res.blob()
+  }
+
+  /**
+   * Fetch a completed conversion's output bytes as a Blob.
+   *
+   * A job is NOT a library file: its ids live in a different space, so
+   * `fetchLibraryFileBlob(jobId)` answers `404 File not found` (and the two id
+   * spaces are both UUIDs, so that failure reads as a deleted file rather than
+   * as the wrong endpoint). A job's output is only reachable through the job.
+   *
+   * The URL is re-read from the API rather than taken from the row: `GET
+   * /conversions/jobs/{id}` is what decides where the bytes are. With at-rest
+   * encryption on it answers a server-relative path to the streaming endpoint,
+   * which returns the DECRYPTED object; without encryption it answers a
+   * pre-signed absolute URL to the plaintext object. Reading the stored object
+   * directly would put ciphertext (the server's `TRENC` container) into a
+   * preview or a saved file.
+   *
+   * Same allowlist, same fallback and the same silent 401 refresh as
+   * `fetchLibraryFileBlob` — one auth path, not a second one.
+   */
+  async fetchConversionOutputBlob(jobId: string): Promise<Blob> {
+    const job = await this.getJob(jobId)
+    const url = job.download_url ?? this.getJobDownloadUrl(jobId)
+
+    if (isTrustedDownloadUrl(url)) {
+      const res = await fetch(url)
+      if (!res.ok) throw new Error(`Could not read that file (${res.status})`)
+      return res.blob()
+    }
+
+    // A relative streaming path is used as-is; an absolute URL we refuse to
+    // hand to the browser falls back to the job's streaming endpoint.
+    const path = ABSOLUTE_URL.test(url) ? this.getJobDownloadUrl(jobId) : url
+    const res = await this.authedFetch(resolveServerPath(path))
+    if (!res.ok) throw new Error(`Could not read that file (${res.status})`)
+    return res.blob()
   }
 
   // ---- Files ----

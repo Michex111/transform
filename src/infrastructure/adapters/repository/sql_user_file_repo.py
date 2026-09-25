@@ -8,7 +8,7 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.infrastructure.adapters.storage.sanitize import normalize_extension
-from src.infrastructure.database.models import UserFileModel
+from src.infrastructure.database.models import UserFileModel, UserModel
 
 
 @dataclass(frozen=True)
@@ -212,12 +212,46 @@ class SQLUserFileRepository:
         return result.scalar_one()
 
     async def get_user_storage_used(self, user_id: int) -> int:
-        """Sum of file_size_bytes for all files owned by a user."""
+        """Sum of ``file_size_bytes`` for all files owned by a user.
+
+        The result is coerced to ``int``, and that is load-bearing rather than
+        cosmetic. ``SUM()`` over a ``BIGINT`` column comes back from
+        **PostgreSQL as a ``Decimal``** (asyncpg maps NUMERIC-like results that
+        way) while SQLite — used by the test suite — returns a plain ``int``.
+        Leaving it alone therefore worked in every test and broke in
+        production: the value is embedded in the structured 413 body for an
+        over-quota upload, and FastAPI's JSON encoder cannot serialise a
+        ``Decimal``, so the refusal raised and surfaced as a **500** instead of
+        "not enough storage". Converting here keeps the declared return type
+        true for every backend, so no caller has to know which one it is on.
+        """
         result = await self._session.execute(
             select(func.coalesce(func.sum(UserFileModel.file_size_bytes), 0))
             .where(UserFileModel.user_id == user_id)
         )
-        return result.scalar_one()
+        return int(result.scalar_one())
+
+    async def lock_user_for_update(self, user_id: int) -> None:
+        """Take a row lock on the user, serialising storage commits for them.
+
+        The lock is on the ``users`` row rather than on ``user_files`` because
+        the aggregate being protected is "this user's total storage": there is
+        no single file row to lock *before* the new row exists, and locking the
+        whole table would serialise unrelated users.
+
+        It lives on this repository because this repository owns
+        ``get_user_storage_used`` — the number the quota check reads — and the
+        lock is only meaningful when it is held across that read and the
+        subsequent insert. Callers must therefore run both in the same session
+        (they do: one request, one injected ``AsyncSession``).
+
+        SQLite ignores ``FOR UPDATE`` (and serialises writes anyway), so the
+        test suite exercises the same code path without the lock. PostgreSQL
+        honours it.
+        """
+        await self._session.execute(
+            select(UserModel.id).where(UserModel.id == user_id).with_for_update()
+        )
 
     async def get_storage_breakdown_by_extension(
         self, user_id: int

@@ -49,12 +49,18 @@ describe("SPA route stubs", () => {
     expect(declared).toContain("/verify-email");
   });
 
-  it.each(["login", "register", "verify-email", "pricing", "security", "convert"])(
-    "stubs the public route /%s",
-    (route) => {
-      expect(SPA_ROUTES).toContain(`/${route}`);
-    },
-  );
+  it.each([
+    "login",
+    "register",
+    "verify-email",
+    "forgot-password",
+    "reset-password",
+    "pricing",
+    "security",
+    "convert",
+  ])("stubs the public route /%s", (route) => {
+    expect(SPA_ROUTES).toContain(`/${route}`);
+  });
 
   it("stubs every static route App.tsx declares", () => {
     // `/` is exempt: `index.html` already serves it.

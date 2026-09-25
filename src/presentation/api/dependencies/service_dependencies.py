@@ -13,8 +13,10 @@ from src.application.services.file_transfer_service import TransferService
 from src.application.services.priority_queue_dispatcher import PriorityQueueDispatcher
 from src.application.services.queue_priority_router import QueuePriorityRouter
 from src.application.ports.email_port import EmailPort
+from src.application.ports.sms_port import SmsPort
 from src.infrastructure.adapters.cache.redis_session_adapter import RedisSessionAdapter
 from src.infrastructure.adapters.email import build_email_sender
+from src.infrastructure.adapters.sms import build_sms_sender
 from src.infrastructure.adapters.payment.stripe_service import StripeService
 from src.infrastructure.adapters.queues.redis_stream_job_queue import JobStream
 from src.infrastructure.adapters.queues.redis_stream_status_queue import JobEventSubscriber
@@ -122,6 +124,18 @@ def get_email_sender() -> EmailPort:
     return build_email_sender(get_settings())
 
 
+@lru_cache
+def get_sms_sender() -> SmsPort:
+    """The process-wide transactional SMS transport.
+
+    Cached for the same reason as ``get_email_sender``: the transport is built
+    once and is stateless between sends. Tests override this dependency with a
+    capturing fake, which is how the phone-verification flow is asserted
+    without a provider or network.
+    """
+    return build_sms_sender(get_settings())
+
+
 def get_event_subscriber() -> JobEventSubscriber:
     return JobEventSubscriber(redis_client=_shared_redis_client())
 
@@ -190,6 +204,12 @@ def get_transfer_service(
         cache_port=cache_port,
         ttl_minutes=settings.UPLOAD_URL_TTL_MINUTES,
         logger=logging.getLogger("file_converter_api"),
+        # Multipart configuration is injected rather than read lazily so the
+        # process uses one set of tuned values (and so a deployment that raises
+        # the ceiling also raises the part sizing that has to match it).
+        large_ttl_minutes=settings.LARGE_UPLOAD_URL_TTL_MINUTES,
+        multipart_threshold_bytes=settings.MULTIPART_THRESHOLD_BYTES,
+        multipart_part_size_bytes=settings.MULTIPART_PART_SIZE_BYTES,
     )
 
 

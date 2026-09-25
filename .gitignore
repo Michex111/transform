@@ -13,7 +13,6 @@ wheels/
 *.ini
 
 #ENV files
-.env
 
 Agents.MD
 .vscode
@@ -46,3 +45,11 @@ skills-lock.json
 # Production-worker env overrides (holds a production DB credential). The
 # tracked template is deployment/docker/.env.production-workers.example.
 .env.production-workers
+
+.projects/cache
+.projects/vault
+.projects/state.test.json
+.projects/state.local.test.json
+.env
+.env.*
+!.env.example

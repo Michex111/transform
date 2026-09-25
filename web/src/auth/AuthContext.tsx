@@ -26,8 +26,28 @@ interface AuthContextValue {
     username: string;
     email: string;
     password: string;
+    first_name?: string | null;
+    last_name?: string | null;
   }) => Promise<UserResponse>;
   logout: () => void;
+  /**
+   * Replace the cached user with a freshly returned record.
+   *
+   * The profile endpoints all answer with the updated `UserResponse`, so a
+   * caller that already holds one should publish it rather than re-fetching —
+   * one round trip, and the shell (name, initials, avatar) updates on the same
+   * tick as the form that changed it. Use {@link refreshUser} when only a
+   * mutation's side effects are known and the record is not.
+   */
+  setUser: (user: UserResponse) => void;
+  /**
+   * Re-read `/users/me` and publish the result.
+   *
+   * Used after an action that changes something the caller cannot see — e.g.
+   * a phone verification, which the server records on the user but does not
+   * return as a full user object everywhere.
+   */
+  refreshUser: () => Promise<void>;
   api: typeof api;
 }
 
@@ -79,6 +99,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       username: string;
       email: string;
       password: string;
+      first_name?: string | null;
+      last_name?: string | null;
     }): Promise<UserResponse> => {
       // Intentionally does NOT sign the user in. Sign-in is refused until the
       // address is verified (403 EMAIL_NOT_VERIFIED), so chaining a login here
@@ -95,6 +117,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(null);
   }, []);
 
+  const refreshUser = useCallback(async () => {
+    // Guarded so a token that vanished mid-flight (another tab signed out)
+    // cannot turn into an unauthenticated request that bounces the page.
+    if (!api.isAuthenticated()) return;
+    try {
+      setUser(await api.me());
+    } catch {
+      // Leave the cached user in place. A failed refresh is a network problem
+      // far more often than a revoked session, and the 401 path below already
+      // handles the real case.
+    }
+  }, []);
+
   const value = useMemo(
     () => ({
       user,
@@ -103,9 +138,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       login,
       register,
       logout,
+      setUser,
+      refreshUser,
       api,
     }),
-    [user, isLoading, login, register, logout],
+    [user, isLoading, login, register, logout, refreshUser],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

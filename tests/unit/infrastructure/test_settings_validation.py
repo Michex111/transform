@@ -200,3 +200,112 @@ def test_env_example_documents_the_email_transport_settings() -> None:
         "EMAIL_VERIFICATION_REQUIRED=",
     ):
         assert key in text, f"{key} missing from .env.example"
+
+
+# ---------------------------------------------------------------------------
+# Upload size limits / multipart configuration
+# ---------------------------------------------------------------------------
+
+def test_env_example_documents_the_upload_limit_settings() -> None:
+    """Same guard as the email settings: a limit that only exists in code is a
+    limit no deployment can ever tune (or discover)."""
+    text = _ENV_EXAMPLE.read_text(encoding="utf-8")
+
+    for key in (
+        "MAX_UPLOAD_FILE_SIZE_BYTES=",
+        "GUEST_MAX_FILE_SIZE=",
+        "FREE_MAX_FILE_SIZE=",
+        "PRO_MAX_FILE_SIZE=",
+        "PRO_PLUS_MAX_FILE_SIZE=",
+        "ENTERPRISE_MAX_FILE_SIZE=",
+        "MULTIPART_THRESHOLD_BYTES=",
+        "MULTIPART_PART_SIZE_BYTES=",
+        "LARGE_UPLOAD_URL_TTL_MINUTES=",
+        "UPLOAD_URL_TTL_MINUTES=",
+    ):
+        assert key in text, f"{key} missing from .env.example"
+
+
+def test_default_ceiling_is_five_gib_and_authenticated_tiers_reach_it() -> None:
+    """5 GiB is the requested per-file limit and the single-PUT provider cap."""
+    settings = _settings()
+
+    assert settings.MAX_UPLOAD_FILE_SIZE_BYTES == 5 * 1024**3
+    assert settings.FREE_MAX_FILE_SIZE == 5 * 1024**3
+    assert settings.PRO_MAX_FILE_SIZE == 5 * 1024**3
+    assert settings.PRO_PLUS_MAX_FILE_SIZE == 5 * 1024**3
+
+
+def test_enterprise_has_its_own_cap_not_an_alias_of_pro_plus() -> None:
+    """ENTERPRISE used to be hard-wired to the PRO_PLUS value, which made an
+    enterprise-specific override impossible to express. It must be its own
+    setting and it must actually be read."""
+    assert _settings(ENTERPRISE_MAX_FILE_SIZE=1024).ENTERPRISE_MAX_FILE_SIZE == 1024
+
+
+def test_guest_ceiling_stays_small() -> None:
+    """Guests are unauthenticated: raising their ceiling would hand anonymous
+    callers a large free storage/bandwidth sink."""
+    assert _settings().GUEST_MAX_FILE_SIZE == 50 * 1024 * 1024
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "GUEST_MAX_FILE_SIZE",
+        "FREE_MAX_FILE_SIZE",
+        "PRO_MAX_FILE_SIZE",
+        "PRO_PLUS_MAX_FILE_SIZE",
+        "ENTERPRISE_MAX_FILE_SIZE",
+    ],
+)
+def test_a_tier_cap_above_the_ceiling_is_rejected(key: str) -> None:
+    """The invariant that stops a tier advertising a file the store cannot take."""
+    with pytest.raises(RuntimeError, match=key):
+        _settings(**{key: 5 * 1024**3 + 1}).validate()
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "MAX_UPLOAD_FILE_SIZE_BYTES",
+        "MULTIPART_THRESHOLD_BYTES",
+        "MULTIPART_PART_SIZE_BYTES",
+        "LARGE_UPLOAD_URL_TTL_MINUTES",
+        "UPLOAD_URL_TTL_MINUTES",
+    ],
+)
+def test_non_positive_upload_values_are_rejected(key: str) -> None:
+    with pytest.raises(RuntimeError, match=key):
+        _settings(**{key: 0}).validate()
+
+
+def test_threshold_above_the_ceiling_is_rejected() -> None:
+    """Otherwise a file between the ceiling and the threshold would be neither
+    accepted whole nor routed to multipart — a dead zone."""
+    with pytest.raises(RuntimeError, match="MULTIPART_THRESHOLD_BYTES"):
+        _settings(MULTIPART_THRESHOLD_BYTES=5 * 1024**3 + 1).validate()
+
+
+def test_part_size_keeping_the_ceiling_under_ten_thousand_parts_is_accepted() -> None:
+    """The default configuration must clear S3's 10 000-part limit with room to
+    spare: ceil(5 GiB / 64 MiB) = 80 parts."""
+    settings = _settings()
+
+    assert settings.MULTIPART_PART_SIZE_BYTES == 64 * 1024 * 1024
+    assert -(-settings.MAX_UPLOAD_FILE_SIZE_BYTES // settings.MULTIPART_PART_SIZE_BYTES) == 80
+    settings.validate()  # must not raise
+
+
+def test_part_size_too_small_for_the_ceiling_is_rejected() -> None:
+    """A part size that needs more than 10 000 parts would fail only at the END
+    of a maximal transfer, so it is rejected at boot instead."""
+    with pytest.raises(RuntimeError, match="MULTIPART_PART_SIZE_BYTES"):
+        _settings(MULTIPART_PART_SIZE_BYTES=1024).validate()
+
+
+def test_part_size_at_exactly_the_required_boundary_is_accepted() -> None:
+    """ceil(ceiling / 10 000) parts is exactly at the limit, which is allowed."""
+    required = -(-5 * 1024**3 // 10_000)
+    _settings(MULTIPART_PART_SIZE_BYTES=required).validate()  # must not raise
+

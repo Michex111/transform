@@ -64,12 +64,18 @@ describe("parseFormatSlug", () => {
 
   // Even in the impossible case where a static path reached the dynamic route,
   // it must not be mistaken for a format page.
-  it.each(["pricing", "security", "convert", "login", "register", "verify-email"])(
-    "does not treat the static path %o as a format",
-    (slug) => {
-      expect(parseFormatSlug(slug).kind).toBe("not-found");
-    },
-  );
+  it.each([
+    "pricing",
+    "security",
+    "convert",
+    "login",
+    "register",
+    "verify-email",
+    "forgot-password",
+    "reset-password",
+  ])("does not treat the static path %o as a format", (slug) => {
+    expect(parseFormatSlug(slug).kind).toBe("not-found");
+  });
 });
 
 describe("public route ranking", () => {
@@ -87,6 +93,11 @@ describe("public route ranking", () => {
     // Reached by a hard load from the verification email, so a mis-ranking
     // here would break the sign-up flow for every user.
     { path: "/verify-email" },
+    // Reached by a hard load from the password-reset email (and its recovery
+    // link). A mis-ranking here renders a format page instead of the reset
+    // form, and the emailed link silently does nothing.
+    { path: "/forgot-password" },
+    { path: "/reset-password" },
   ];
 
   // `Array.prototype.at` is not in the configured ES2020 lib, so index manually.
@@ -95,12 +106,18 @@ describe("public route ranking", () => {
     return matches?.[matches.length - 1]?.route.path;
   };
 
-  it.each(["/pricing", "/security", "/convert", "/login", "/register", "/verify-email"])(
-    "resolves %s to its own static route, not /:slug",
-    (path) => {
-      expect(lastMatchedPath(path)).toBe(path);
-    },
-  );
+  it.each([
+    "/pricing",
+    "/security",
+    "/convert",
+    "/login",
+    "/register",
+    "/verify-email",
+    "/forgot-password",
+    "/reset-password",
+  ])("resolves %s to its own static route, not /:slug", (path) => {
+    expect(lastMatchedPath(path)).toBe(path);
+  });
 
   it("still resolves format paths to /:slug", () => {
     expect(lastMatchedPath("/pdf-converter")).toBe("/:slug");

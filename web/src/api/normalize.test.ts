@@ -29,16 +29,21 @@ import {
   normalizeCreditHistory,
   normalizeCreditPricing,
   normalizeDashboard,
+  normalizeDeleteHistoryPreview,
+  normalizeDeleteHistoryRange,
   normalizeFile,
   normalizeFileDownload,
   normalizeFileList,
   normalizeFolder,
   normalizeFolderContents,
   normalizeFolderList,
+  normalizeForgotPassword,
   normalizeGuestJob,
+  normalizePhoneStatus,
   normalizePortal,
   normalizePresignedUrls,
   normalizeResendVerification,
+  normalizeResetPassword,
   normalizeStorageStats,
   normalizeSubscriptionPlan,
   normalizeSubscriptionPlans,
@@ -162,7 +167,16 @@ describe("normalizeDashboard", () => {
   it("preserves a well-formed dashboard", () => {
     const valid = {
       conversion_stats: { total_jobs: 3, successful_jobs: 2, failed_jobs: 1, total_credits_used: 8 },
-      storage_stats: { used_bytes: 10, limit_bytes: 20, used_percent: 50, file_count: 1, breakdown: [] },
+      storage_stats: {
+        used_bytes: 10,
+        limit_bytes: 20,
+        used_percent: 50,
+        file_count: 1,
+        breakdown: [],
+        // Additive quota fields: the normaliser is lossless for them too.
+        available_bytes: 10,
+        max_file_size_bytes: 5368709120,
+      },
       credit_balance: 5,
       tier: "PRO",
       recent_jobs_count: 3,
@@ -346,6 +360,65 @@ describe("single-object normalizers", () => {
     expect(normalizeUser({ email_verified: "false" }).email_verified).toBe(true);
   });
 
+  it("normalizeUser degrades the profile fields of an older API", () => {
+    // An API that predates the profile overhaul sends none of these. They must
+    // arrive as null/"" so `lib/avatar.ts` falls back to the username-based
+    // initials this app rendered before, not as `undefined` in a template.
+    const u = normalizeUser({ username: "ada" });
+    expect(u.first_name).toBeNull();
+    expect(u.last_name).toBeNull();
+    expect(u.display_name).toBe("");
+    expect(u.initials).toBe("");
+    expect(u.avatar_url).toBeNull();
+    expect(u.phone_number).toBeNull();
+  });
+
+  it("normalizeUser treats a missing phone_verified as NOT verified", () => {
+    // The opposite default to `email_verified`, deliberately: an unverified
+    // phone is the normal state, whereas claiming a security control passed
+    // when the API never said so would be a lie. The section just reads
+    // "not verified".
+    expect(normalizeUser({}).phone_verified).toBe(false);
+    expect(normalizeUser({ phone_verified: "true" }).phone_verified).toBe(false);
+    expect(normalizeUser({ phone_verified: true }).phone_verified).toBe(true);
+  });
+
+  it("normalizeUser folds every unset default save folder into null", () => {
+    // Optional on the wire for the independent-deploy reason. An absent key, an
+    // explicit null, the API's cleared value ("") and a malformed non-string
+    // must all be the ONE "no preference" value, which the drive UI reads as
+    // "save to the root" — never as a save against an empty folder id.
+    expect(normalizeUser({}).default_save_folder_id).toBeNull();
+    expect(normalizeUser({ default_save_folder_id: null }).default_save_folder_id).toBeNull();
+    expect(normalizeUser({ default_save_folder_id: "" }).default_save_folder_id).toBeNull();
+    expect(normalizeUser({ default_save_folder_id: 7 }).default_save_folder_id).toBeNull();
+  });
+
+  it("normalizeUser keeps a real default save folder", () => {
+    expect(normalizeUser({ default_save_folder_id: "f-123" }).default_save_folder_id).toBe("f-123");
+  });
+
+  it("normalizeUser preserves a real profile", () => {
+    const u = normalizeUser({
+      id: 7,
+      username: "ada",
+      first_name: "Ada",
+      last_name: "Lovelace",
+      display_name: "Ada Lovelace",
+      initials: "AL",
+      avatar_url: "data:image/webp;base64,AAAA",
+      phone_number: "+14155552671",
+      phone_verified: true,
+    });
+    expect(u.first_name).toBe("Ada");
+    expect(u.last_name).toBe("Lovelace");
+    expect(u.display_name).toBe("Ada Lovelace");
+    expect(u.initials).toBe("AL");
+    expect(u.avatar_url).toBe("data:image/webp;base64,AAAA");
+    expect(u.phone_number).toBe("+14155552671");
+    expect(u.phone_verified).toBe(true);
+  });
+
   it("normalizeVerifyEmail defaults every field", () => {
     expect(normalizeVerifyEmail({})).toEqual({
       ok: false,
@@ -374,11 +447,18 @@ describe("single-object normalizers", () => {
     expect(normalizeResendVerification({ message: "Sent." }).message).toBe("Sent.");
   });
 
-  it("normalizeUploadResponse keeps the upload URL a string", () => {
+  it("normalizeUploadResponse keeps the upload URL nullable and plans single by default", () => {
+    // A multipart session legitimately carries no whole-object URL, so an
+    // absent one must read as `null` rather than an empty string that a
+    // single-PUT caller would try to fetch.
     const r = normalizeUploadResponse({});
-    expect(r.upload_url).toBe("");
+    expect(r.upload_url).toBeNull();
     expect(r.upload_id).toBe("");
     expect(r.expires_in_minutes).toBe(0);
+    expect(r.upload_mode).toBe("single");
+    expect(r.part_size_bytes).toBeNull();
+    expect(r.part_count).toBeNull();
+    expect(r.max_file_size_bytes).toBeNull();
   });
 
   it("normalizeUploadSession keeps nullable fields nullable", () => {
@@ -441,5 +521,128 @@ describe("single-object normalizers", () => {
       failed_jobs: 0,
       total_credits_used: 0,
     });
+  });
+});
+
+describe("phone verification + history-range normalizers", () => {
+  it("normalizePhoneStatus defaults an empty body", () => {
+    // A 202 whose body is `{}` must still describe a usable state, and must not
+    // report a verified number the API never claimed.
+    expect(normalizePhoneStatus({})).toEqual({
+      phone_number: null,
+      phone_verified: false,
+      expires_in_seconds: null,
+      resend_available_in_seconds: null,
+    });
+  });
+
+  it("normalizePhoneStatus preserves a real status", () => {
+    expect(
+      normalizePhoneStatus({
+        phone_number: "+14155552671",
+        phone_verified: true,
+        expires_in_seconds: 600,
+        resend_available_in_seconds: 60,
+      }),
+    ).toEqual({
+      phone_number: "+14155552671",
+      phone_verified: true,
+      expires_in_seconds: 600,
+      resend_available_in_seconds: 60,
+    });
+  });
+
+  it("normalizePhoneStatus drops a non-numeric countdown", () => {
+    // A countdown drives a timer, so a string would produce `NaN` seconds and a
+    // button that never re-enables.
+    expect(normalizePhoneStatus({ expires_in_seconds: "600" }).expires_in_seconds).toBeNull();
+    expect(normalizePhoneStatus({ resend_available_in_seconds: null }).resend_available_in_seconds).toBeNull();
+  });
+
+  it("normalizeDeleteHistoryPreview defaults an empty body", () => {
+    expect(normalizeDeleteHistoryPreview({})).toEqual({
+      range: "24h",
+      since: null,
+      count: 0,
+      active_count: 0,
+    });
+  });
+
+  it("normalizeDeleteHistoryPreview preserves a real preview", () => {
+    expect(
+      normalizeDeleteHistoryPreview({
+        range: "7d",
+        since: "2026-09-15T00:00:00Z",
+        count: 12,
+        active_count: 2,
+      }),
+    ).toEqual({ range: "7d", since: "2026-09-15T00:00:00Z", count: 12, active_count: 2 });
+  });
+
+  it("normalizeDeleteHistoryRange coerces an unknown window instead of echoing it", () => {
+    // The range is echoed into user-facing copy, so an unrecognised value must
+    // not reach the screen. The count — the part the user acts on — still does.
+    expect(normalizeDeleteHistoryRange({ range: "999y", deleted_count: 3 })).toEqual({
+      range: "24h",
+      deleted_count: 3,
+      skipped_active: 0,
+    });
+    expect(normalizeDeleteHistoryRange({ range: "all", deleted_count: 9 }).range).toBe("all");
+  });
+
+  it("normalizeDeleteHistoryRange defaults an empty body", () => {
+    expect(normalizeDeleteHistoryRange({})).toEqual({
+      range: "24h",
+      deleted_count: 0,
+      skipped_active: 0,
+    });
+  });
+});
+
+describe("password reset normalizers", () => {
+  it("normalizeForgotPassword keeps the confirmation a string", () => {
+    // A 202 with an empty body is technically possible and must render the
+    // page's own conditional copy rather than the word "undefined".
+    expect(normalizeForgotPassword({}).message).toBe("");
+    expect(normalizeForgotPassword(null).message).toBe("");
+    expect(normalizeForgotPassword("nope").message).toBe("");
+  });
+
+  it("normalizeForgotPassword passes a well-formed body through unchanged", () => {
+    const valid = {
+      message:
+        "If an account with that email address exists, we've sent instructions for resetting your password.",
+    };
+    expect(normalizeForgotPassword(valid)).toEqual(valid);
+  });
+
+  it("normalizeResetPassword defaults a malformed 200", () => {
+    // The shape boundary: `200 {}` must not crash the success panel, and must
+    // not claim an outcome the API never reported.
+    expect(normalizeResetPassword({})).toEqual({ ok: false, username: null, message: "" });
+    expect(normalizeResetPassword(null)).toEqual({ ok: false, username: null, message: "" });
+    expect(normalizeResetPassword([])).toEqual({ ok: false, username: null, message: "" });
+    expect(normalizeResetPassword({ ok: "true", username: 7, message: null })).toEqual({
+      ok: false,
+      username: null,
+      message: "",
+    });
+  });
+
+  it("normalizeResetPassword keeps an absent username null, never an empty string", () => {
+    // The sign-in form pre-fills from this value; `""` would submit as a
+    // pre-filled blank rather than leaving the field untouched.
+    expect(normalizeResetPassword({ ok: true, message: "Done." }).username).toBeNull();
+    expect(normalizeResetPassword({ ok: true, username: null }).username).toBeNull();
+    expect(normalizeResetPassword({ username: "ada" }).username).toBe("ada");
+  });
+
+  it("normalizeResetPassword passes a well-formed body through unchanged", () => {
+    const valid = {
+      ok: true,
+      username: "ada",
+      message: "Your password has been updated. Sign in with your new password.",
+    };
+    expect(normalizeResetPassword(valid)).toEqual(valid);
   });
 });

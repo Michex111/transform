@@ -11,8 +11,11 @@ import { api } from "@/api/client";
 import { useAuth } from "@/auth/AuthContext";
 import { clearCachedFiles, dropCachedFile, releaseCachedFile } from "@/lib/fileCache";
 import {
+  FINISHED_STATUSES,
   LEGACY_JOBS_STORAGE_KEY,
   isActiveJob,
+  markQueueCleared,
+  readQueueClearedAt,
   readStoredJobs,
   reconcileJobs,
   reduceStreamError,
@@ -30,6 +33,20 @@ interface JobsContextValue {
   updateJob: (jobId: string, patch: Partial<UiJob>) => void;
   removeJob: (jobId: string) => void;
   refresh: (range?: string) => Promise<void>;
+  /**
+   * When this identity last cleared the Convert page's recent list, ISO, or
+   * null when it never has.
+   */
+  queueClearedAt: string | null;
+  /**
+   * Hide the Convert page's finished conversions from *this browser only*.
+   *
+   * Clearing is a display concern and nothing more: no job is deleted, no
+   * request is sent, and History — which reads the very same `jobs` array — is
+   * deliberately unaffected. It survives a reload by leaving a timestamp marker
+   * in `localStorage`, so a job that finishes after the marker still appears.
+   */
+  clearQueue: () => void;
 }
 
 const JobsContext = createContext<JobsContextValue | undefined>(undefined);
@@ -75,6 +92,12 @@ export function JobsProvider({ children }: { children: ReactNode }) {
 
 function JobsStore({ userId, children }: { userId: number | null; children: ReactNode }) {
   const [jobs, setJobs] = useState<UiJob[]>(() => readStoredJobs(userId, localStorage));
+  // The clear marker is read lazily at mount. This store is remounted whenever
+  // the identity changes (`key={userId ?? "anon"}` in `JobsProvider`), so a lazy
+  // initialiser can never carry one account's marker into another's session.
+  const [queueClearedAt, setQueueClearedAt] = useState<string | null>(() =>
+    readQueueClearedAt(userId, localStorage),
+  );
   const subs = useRef<Map<string, () => void>>(new Map());
   // Bumped every time `refresh()` reconciles with the server. It gives the
   // subscription effect a reason to re-run that is independent of `jobs`, which
@@ -138,6 +161,19 @@ function JobsStore({ userId, children }: { userId: number | null; children: Reac
                     compute_duration_ms: evt.compute_duration_ms ?? j.compute_duration_ms,
                     input_size_bytes: evt.input_size_bytes ?? j.input_size_bytes,
                     output_size_bytes: evt.output_size_bytes ?? j.output_size_bytes,
+                    // Stamp when this session saw the job reach a terminal
+                    // state, so the Convert page can order its "recently
+                    // finished" list by *finish* time rather than start time.
+                    // A failure is stamped too — it is just as much a finish,
+                    // and without it a job that ran for 20 minutes and then
+                    // failed would be placed by its start and could fall outside
+                    // the window the moment it failed.
+                    // `?? j.finishedAt` keeps it idempotent: a replayed or
+                    // duplicate terminal event cannot move an already-recorded
+                    // finish.
+                    finishedAt: FINISHED_STATUSES.has(evt.status)
+                      ? (j.finishedAt ?? new Date().toISOString())
+                      : j.finishedAt,
                   }
                 : j,
             ),
@@ -209,6 +245,12 @@ function JobsStore({ userId, children }: { userId: number | null; children: Reac
     setJobs((prev) => prev.filter((j) => j.job_id !== jobId));
   }, []);
 
+  const clearQueue = useCallback(() => {
+    const now = new Date().toISOString();
+    setQueueClearedAt(now);
+    markQueueCleared(userId, now, localStorage);
+  }, [userId]);
+
   const refresh = useCallback(async (range?: string) => {
     try {
       const { jobs: serverJobs } = await api.conversionHistory(1, 100, range);
@@ -226,7 +268,9 @@ function JobsStore({ userId, children }: { userId: number | null; children: Reac
   }, []);
 
   return (
-    <JobsContext.Provider value={{ jobs, addJob, updateJob, removeJob, refresh }}>
+    <JobsContext.Provider
+      value={{ jobs, addJob, updateJob, removeJob, refresh, queueClearedAt, clearQueue }}
+    >
       {children}
     </JobsContext.Provider>
   );

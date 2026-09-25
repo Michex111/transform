@@ -36,16 +36,22 @@ import type {
   CreditPricingResponse,
   CreditTransactionResponse,
   DashboardResponse,
+  DeleteHistoryPreviewResponse,
+  DeleteHistoryRangeResponse,
   FileDownloadResponse,
   FileListResponse,
   FileMetadataResponse,
   FolderContentsResponse,
   FolderListResponse,
   FolderResponse,
+  ForgotPasswordResponse,
   GuestJobResponse,
+  HistoryDeleteRange,
+  PhoneVerificationStatusResponse,
   PortalResponse,
   PresignedUrlResponse,
   ResendVerificationResponse,
+  ResetPasswordResponse,
   StorageBreakdownEntry,
   StorageStats,
   SubscriptionPlanResponse,
@@ -54,9 +60,11 @@ import type {
   TokenResponse,
   UploadResponse,
   UploadSession,
+  UploadSessionPartsResponse,
   UserResponse,
   VerifyEmailResponse,
 } from "./types"
+import { HISTORY_DELETE_RANGES } from "./types"
 
 /* ------------------------------------------------------------------ *
  * Primitives
@@ -115,6 +123,74 @@ export function normalizeUser(value: unknown): UserResponse {
     // every account as unverified against that API, with no way for the user to
     // clear it; `true` degrades silently instead.
     email_verified: asBoolean(o.email_verified, true),
+    // Profile fields. `null` (not `""`) is the "absent" value for the nullable
+    // ones so `user.first_name === null` and "the API is older" are
+    // indistinguishable — which is what we want: both render as "no name set".
+    first_name: asNullableString(o.first_name),
+    last_name: asNullableString(o.last_name),
+    // Derived server-side. Left as an empty string when absent so the callers
+    // in `lib/avatar.ts` can fall back to the username in one place.
+    display_name: asString(o.display_name),
+    initials: asString(o.initials),
+    avatar_url: asNullableString(o.avatar_url),
+    phone_number: asNullableString(o.phone_number),
+    // Defaults to `false`, unlike `email_verified`: an unverified phone is the
+    // normal state and cannot be "wrongly" shown, whereas claiming a number is
+    // verified when the API never said so would be a lie about a security
+    // control. The section simply reads as "not verified" against an old API.
+    phone_verified: asBoolean(o.phone_verified, false),
+    // The `|| null` is the point: `asNullableString` keeps `""` as `""`, but an
+    // empty id is the API's "cleared" value and is not a folder. Missing, `""`
+    // and a malformed non-string must all arrive here as `null` — the single
+    // "no preference" value — so an API too old to send this field degrades to
+    // "save to the drive root" instead of a save against an empty folder id.
+    default_save_folder_id: asNullableString(o.default_save_folder_id) || null,
+  }
+}
+
+/**
+ * Coerce a `range` echo to a known window.
+ *
+ * Display-only: the caller always knows which range it asked for, so a
+ * malformed echo must not throw or produce `"undefined"` in a confirmation.
+ */
+export function asHistoryDeleteRange(
+  value: unknown,
+  fallback: HistoryDeleteRange = "24h",
+): HistoryDeleteRange {
+  return typeof value === "string" && (HISTORY_DELETE_RANGES as readonly string[]).includes(value)
+    ? (value as HistoryDeleteRange)
+    : fallback
+}
+
+export function normalizePhoneStatus(value: unknown): PhoneVerificationStatusResponse {
+  const o = asObject(value)
+  return {
+    phone_number: asNullableString(o.phone_number),
+    phone_verified: asBoolean(o.phone_verified, false),
+    expires_in_seconds: asNullableNumber(o.expires_in_seconds),
+    resend_available_in_seconds: asNullableNumber(o.resend_available_in_seconds),
+  }
+}
+
+export function normalizeDeleteHistoryPreview(value: unknown): DeleteHistoryPreviewResponse {
+  const o = asObject(value)
+  return {
+    range: asHistoryDeleteRange(o.range),
+    since: asNullableString(o.since),
+    count: asNumber(o.count),
+    // Defaults to 0 rather than erroring: a missing count only makes the
+    // warning line disappear, and the delete itself is still scoped.
+    active_count: asNumber(o.active_count),
+  }
+}
+
+export function normalizeDeleteHistoryRange(value: unknown): DeleteHistoryRangeResponse {
+  const o = asObject(value)
+  return {
+    deleted_count: asNumber(o.deleted_count),
+    skipped_active: asNumber(o.skipped_active),
+    range: asHistoryDeleteRange(o.range),
   }
 }
 
@@ -130,6 +206,28 @@ export function normalizeVerifyEmail(value: unknown): VerifyEmailResponse {
 
 export function normalizeResendVerification(value: unknown): ResendVerificationResponse {
   return { message: asString(asObject(value).message) }
+}
+
+/**
+ * The confirmation shown after a reset request. Answers 202 with the same body
+ * for every address, so all this can do is keep the message a string — and an
+ * empty one must render as the page's own copy, not as `undefined`.
+ */
+export function normalizeForgotPassword(value: unknown): ForgotPasswordResponse {
+  return { message: asString(asObject(value).message) }
+}
+
+/**
+ * `username` stays nullable rather than being coerced to `""`: the sign-in form
+ * pre-fills from it, and an empty string would submit as a pre-filled blank.
+ */
+export function normalizeResetPassword(value: unknown): ResetPasswordResponse {
+  const o = asObject(value)
+  return {
+    ok: asBoolean(o.ok),
+    username: asNullableString(o.username),
+    message: asString(o.message),
+  }
 }
 
 /* ------------------------------------------------------------------ *
@@ -164,6 +262,12 @@ export function normalizeStorageStats(value: unknown): StorageStats {
     used_percent: asNumber(o.used_percent),
     file_count: asNumber(o.file_count),
     breakdown,
+    // Additive fields: `null` (not `0`) is the "the API did not say" value, so
+    // a caller can tell "no quota left" apart from "this API is older" and fall
+    // back to the server's 413 instead of refusing every file against a
+    // fabricated zero.
+    available_bytes: asNullableNumber(o.available_bytes),
+    max_file_size_bytes: asNullableNumber(o.max_file_size_bytes),
   }
 }
 
@@ -360,7 +464,26 @@ export function normalizeUploadResponse(value: unknown): UploadResponse {
   return {
     upload_id: asString(o.upload_id),
     object_key: asString(o.object_key),
-    upload_url: asString(o.upload_url),
+    upload_url: asNullableString(o.upload_url),
+    expires_in_minutes: asNumber(o.expires_in_minutes),
+    // An unrecognised (or absent) mode degrades to `"single"`: that is the
+    // path every API before multipart supported, and guessing `"multipart"`
+    // for an unknown value would send the caller looking for part URLs a
+    // single-PUT session never mints.
+    upload_mode: o.upload_mode === "multipart" ? "multipart" : "single",
+    part_size_bytes: asNullableNumber(o.part_size_bytes),
+    part_count: asNullableNumber(o.part_count),
+    max_file_size_bytes: asNullableNumber(o.max_file_size_bytes),
+  }
+}
+
+export function normalizeUploadSessionParts(value: unknown): UploadSessionPartsResponse {
+  const o = asObject(value)
+  return {
+    parts: asArray<unknown>(o.parts).map((row) => {
+      const r = asObject(row)
+      return { part_number: asNumber(r.part_number), url: asString(r.url) }
+    }),
     expires_in_minutes: asNumber(o.expires_in_minutes),
   }
 }
