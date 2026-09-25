@@ -152,17 +152,27 @@ to strict rate limits (`RATE_LIMIT_GUEST=10`) and a short retention window
 
 **Tier-based limits (authorization by subscription):**
 
-| Tier | Rate limit (req/min) | Max file size |
-|---|---|---|
-| guest | `RATE_LIMIT_GUEST=10` | 50 MB |
-| free | `RATE_LIMIT_FREE=30` | 100 MB |
-| pro | `RATE_LIMIT_PRO=100` | 500 MB |
-| pro_plus | `RATE_LIMIT_PRO_PLUS=200` | 1 GB |
-| enterprise | `RATE_LIMIT_ENTERPRISE=500` | 1 GB |
+| Tier | Rate limit (req/min) | Max file size | Storage quota |
+|---|---|---|---|
+| guest | `RATE_LIMIT_GUEST=10` | 50 MB | none (ephemeral, 24h retention) |
+| free | `RATE_LIMIT_FREE=30` | 5 GB | 5 GB |
+| pro | `RATE_LIMIT_PRO=100` | 5 GB | 50 GB |
+| pro_plus | `RATE_LIMIT_PRO_PLUS=200` | 5 GB | 100 GB |
+| enterprise | `RATE_LIMIT_ENTERPRISE=500` | 5 GB | 1 TB |
 
-Defined in `settings.py` and enforced by `rate_limit.py`. Tier also drives the
-credit multiplier discount (see `settings.py` `CREDIT_MULTIPLIER_*`) and the
-credit-based gate in `processor.py`.
+The per-file cap and the storage quota are **independent controls**: the cap is
+how large one file may be (`*_MAX_FILE_SIZE`, capped by
+`MAX_UPLOAD_FILE_SIZE_BYTES`), the quota is how much the account may hold in
+total (`TierPolicy.storage_quota_bytes`). A FREE account has both at 5 GB, so it
+may upload one 5 GB file and then nothing more — that is intended. Both are
+checked on upload; the quota check reads `SUM(user_files.file_size_bytes)` (the
+same figure the dashboard shows) and is enforced authoritatively at upload
+finalize under a row lock on the user. Uploads at or above
+`MULTIPART_THRESHOLD_BYTES` use S3 multipart upload with presigned part URLs.
+
+Defined in `settings.py` and enforced by `rate_limit.py` and `FileService`. Tier
+also drives the credit multiplier discount (see `settings.py`
+`CREDIT_MULTIPLIER_*`) and the credit-based gate in `processor.py`.
 
 ---
 

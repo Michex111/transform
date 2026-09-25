@@ -80,6 +80,22 @@ vi.mock("@/auth/ToastContext", () => ({
   useToast: () => ({ success: vi.fn(), error: vi.fn() }),
 }));
 
+// History now offers "Save to Drive" from the details panel, and the shared
+// `useSaveToDrive` hook reads the app-wide upload queue (the background manager
+// that performs the transfer). `renderToString` runs no effects, so none of
+// these is ever called — they only have to exist for the hook to mount.
+vi.mock("@/uploads/uploadsContext", () => ({
+  useUploads: () => ({
+    addFiles: vi.fn(),
+    uploads: [],
+    cancel: vi.fn(),
+    retry: vi.fn(),
+    dismiss: vi.fn(),
+    refreshLimits: vi.fn(),
+    limits: { maxFileSizeBytes: null, availableBytes: null },
+  }),
+}));
+
 const { HistoryPage } = await import("@/pages/app/HistoryPage");
 
 // `renderToString` on an effectful tree makes React log a `useLayoutEffect`

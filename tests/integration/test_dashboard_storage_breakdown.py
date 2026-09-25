@@ -141,3 +141,37 @@ def test_dashboard_storage_breakdown_is_empty_without_files(tmp_path) -> None:
         assert stats["breakdown"] == []
         assert stats["used_bytes"] == 0
         assert stats["file_count"] == 0
+
+
+def test_dashboard_exposes_the_limits_the_upload_path_enforces(tmp_path) -> None:
+    """The SPA renders its upload pre-check from these, so they must agree with
+    the numbers the server enforces: ``available_bytes`` is the real headroom
+    and ``max_file_size_bytes`` is the per-tier per-file cap (5 GiB)."""
+    from src.domain.subscriptions.policies.tier_policy import TierPolicy
+    from src.domain.subscriptions.value_object.tier import SubscriptionTier
+
+    with dashboard_client(str(tmp_path / "limits.db")) as client:
+        response = client.get("/api/v1/user/dashboard")
+        assert response.status_code == 200, response.text
+        stats = response.json()["storage_stats"]
+
+        quota = TierPolicy.for_tier(SubscriptionTier.FREE).storage_quota_bytes
+        assert stats["limit_bytes"] == quota
+        assert stats["available_bytes"] == quota - stats["used_bytes"]
+        assert stats["available_bytes"] == max(0, quota - stats["used_bytes"])
+        assert stats["max_file_size_bytes"] == 5 * 1024**3
+        # Independent controls: the per-file cap equals the FREE quota here, but
+        # they are separate settings and must not be assumed equal.
+        assert stats["max_file_size_bytes"] <= stats["limit_bytes"]
+
+
+def test_dashboard_available_bytes_never_goes_negative(tmp_path) -> None:
+    """An account over quota must report 0 headroom, not a negative number."""
+    over_quota = [
+        ("huge.bin", "bin", 6 * 1024**3),  # more than the 5 GiB FREE quota
+    ]
+    with dashboard_client(str(tmp_path / "over.db"), files=over_quota) as client:
+        stats = client.get("/api/v1/user/dashboard").json()["storage_stats"]
+
+        assert stats["used_bytes"] > stats["limit_bytes"]
+        assert stats["available_bytes"] == 0

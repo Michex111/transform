@@ -1,5 +1,5 @@
 from datetime import UTC, datetime, timedelta
-from typing import Annotated
+from typing import Annotated, Literal
 
 import base64
 
@@ -39,9 +39,22 @@ from src.presentation.schemas.conversion import (
     CreateConversionJobRequest,
     SupportedConversionResponse,
 )
+from src.presentation.schemas.auth import (
+    DeleteHistoryPreviewResponse,
+    DeleteHistoryRangeResponse,
+)
 
 
 router = APIRouter(prefix="/api/conversions", tags=["conversions"])
+
+#: The **only** accepted values for the bulk-delete ``range`` query parameter.
+#:
+#: Modelled as a ``Literal`` so FastAPI rejects a missing or unknown value with
+#: its own 422 before the handler runs. That is the whole point: a bulk delete
+#: whose range defaults to "everything" is one dropped query parameter away from
+#: destroying a user's entire history, so ``all`` has to be *asked for* by name.
+#: The narrower GET /history filter stays permissive (it only hides rows).
+HistoryDeleteRange = Literal["24h", "7d", "30d", "all"]
 
 
 def _to_response(job: ConversionJob, download_url: str | None = None) -> ConversionJobResponse:
@@ -181,6 +194,82 @@ def _history_since(range_value: str | None) -> datetime | None:
     }
     delta = mapping.get(range_key)
     return now - delta if delta is not None else None
+
+
+@router.get("/history/delete-preview", response_model=DeleteHistoryPreviewResponse)
+async def preview_history_delete(
+    current_user: CurrentUser,
+    conversion_service: Annotated[ConversionService, Depends(get_conversion_service)],
+    range: HistoryDeleteRange = Query(
+        ...,
+        description="Required window: 24h | 7d | 30d | all (there is no default).",
+    ),
+) -> DeleteHistoryPreviewResponse:
+    """Report what ``DELETE /history?range=…`` would remove, for confirmation.
+
+    Read-only, and evaluated with the same predicate as the delete, so the
+    count the user agrees to and ``deleted_count`` cannot disagree. Like the
+    delete, it never counts (or removes) a job that is still running; those are
+    reported as ``active_count``.
+
+    No stored objects are removed by the delete this previews — the cleanup
+    worker owns bucket storage and reclaims it on its normal retention sweep.
+    """
+    since = _history_since(range)
+    count, active = await conversion_service.preview_history_delete(
+        current_user.id, since=since
+    )
+    log_data_access(
+        user_id=str(current_user.id),
+        action="read",
+        resource="conversion_history_delete_preview",
+        range=range,
+    )
+    return DeleteHistoryPreviewResponse(
+        range=range,
+        since=since,
+        count=count,
+        active_count=active,
+    )
+
+
+@router.delete("/history", response_model=DeleteHistoryRangeResponse)
+async def delete_history_range(
+    current_user: CurrentUser,
+    conversion_service: Annotated[ConversionService, Depends(get_conversion_service)],
+    range: HistoryDeleteRange = Query(
+        ...,
+        description="Required window: 24h | 7d | 30d | all (there is no default).",
+    ),
+) -> DeleteHistoryRangeResponse:
+    """Delete the user's finished conversions inside a time window.
+
+    ``range`` is required and validated against an allowlist, because a missing
+    parameter must never be able to mean "delete everything".
+
+    Jobs that are still running (PENDING/PROCESSING/AWAITING_UPLOAD) inside the
+    window are **kept** and reported as ``skipped_active`` — deleting a row out
+    from under a worker orphans the job. Stored objects are not deleted either:
+    the cleanup worker owns bucket storage and reclaims it on its retention
+    sweep, so this endpoint removes history records, not bytes.
+    """
+    since = _history_since(range)
+    deleted, skipped = await conversion_service.delete_history_range(
+        current_user.id, since=since
+    )
+    log_data_access(
+        user_id=str(current_user.id),
+        action="delete",
+        resource="conversion_history",
+        range=range,
+        deleted_count=deleted,
+        skipped_active=skipped,
+    )
+    return DeleteHistoryRangeResponse(
+        deleted_count=deleted,
+        skipped_active=skipped,
+        range=range,
+    )
 
 
 @router.delete("/history/{job_id}", status_code=status.HTTP_204_NO_CONTENT)

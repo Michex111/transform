@@ -10,7 +10,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { MORE, NAV, PRIMARY } from "@/components/navItems";
+import { MORE, NAV, PRIMARY, SUPPORT_LINKS } from "@/components/navItems";
 import { HISTORY_TIMELINE_STATE_KEY, timelineFromNavigationState } from "@/lib/historyFilters";
 
 describe("navigation model", () => {
@@ -62,5 +62,27 @@ describe("other destinations", () => {
     // would make this model an unreliable description of intent.
     const withState = NAV.filter((item) => item.state !== undefined).map((item) => item.to);
     expect(withState).toEqual(["/app/history"]);
+  });
+});
+
+describe("profile menu links", () => {
+  it("lists the account destinations in menu order", () => {
+    // Menu order, not NAV order: the sidebar groups Billing with the other
+    // destinations, the menu leads with Settings.
+    expect(SUPPORT_LINKS.map((item) => item.to)).toEqual([
+      "/app/settings",
+      "/app/billing",
+      "/app/support",
+    ]);
+  });
+
+  it("reuses the navigation entries instead of re-typing them", () => {
+    // Same object, not a copy: a copy is how the menu's "Settings" and the
+    // sidebar's "Settings" end up being two different words.
+    for (const link of SUPPORT_LINKS) {
+      const nav = NAV.find((item) => item.to === link.to);
+      expect(nav).toBeDefined();
+      expect(link).toBe(nav);
+    }
   });
 });

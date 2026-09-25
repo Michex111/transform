@@ -65,3 +65,24 @@ export const PRIMARY = NAV.slice(0, 4);
 
 /** The remaining destinations, which live behind the phone's "More" popover. */
 export const MORE = NAV.slice(4);
+
+/** Look one entry out of `NAV`, so a label or an icon is never written twice. */
+function navItemFor(to: string): NavItem {
+  const item = NAV.find((entry) => entry.to === to);
+  if (!item) throw new Error(`No navigation entry for ${to}`);
+  return item;
+}
+
+/**
+ * The account destinations the profile menu links to, in menu order.
+ *
+ * Taken from `NAV` rather than re-typed: the menu and the sidebar show the same
+ * three labels with the same three icons, and a hand-written copy is exactly how
+ * they drift apart (rename "Settings" in `NAV` and the menu keeps the old word).
+ *
+ * The order here is the menu's order, which is not `NAV`'s: the sidebar groups
+ * Billing with the other destinations, while the menu leads with Settings.
+ */
+export const SUPPORT_LINKS: NavItem[] = ["/app/settings", "/app/billing", "/app/support"].map(
+  navItemFor,
+);

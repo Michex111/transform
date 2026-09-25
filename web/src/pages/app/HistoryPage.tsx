@@ -1,12 +1,13 @@
 import { memo, useCallback, useEffect, useMemo, useState } from "react";
-import { Link, useLocation, useNavigate } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import { motion, useReducedMotion } from "motion/react";
 import { Download, ArrowCounterClockwise, CaretDown, Trash } from "@phosphor-icons/react";
 import { useJobs, type UiJob } from "@/jobs/JobsContext";
 import { showsCreditsUsed, jobCreatedAt } from "@/jobs/jobStore";
 import { useAuth } from "@/auth/AuthContext";
 import { useToast } from "@/auth/ToastContext";
-import { getCachedFile, dropCachedFile } from "@/lib/fileCache";
+import { useRetryConversion } from "@/lib/useRetryConversion";
+import { useSaveToDrive } from "@/lib/useSaveToDrive";
 import { Dropdown } from "@/components/Dropdown";
 import { ErrorButton } from "@/components/ErrorButton";
 import { JobDetailsPanel } from "@/components/JobDetailsPanel";
@@ -45,6 +46,10 @@ interface HistoryRowProps {
   onDownload: (jobId: string) => void;
   onRetry: (job: UiJob) => void;
   onDelete: (job: UiJob) => void;
+  /** Files a completed conversion's output into the drive (default folder). */
+  onSaveToDrive: (job: UiJob) => void;
+  /** True while this row's output is being fetched for the save. */
+  savingToDrive: boolean;
 }
 
 /**
@@ -68,6 +73,8 @@ const HistoryRow = memo(function HistoryRow({
   onDownload,
   onRetry,
   onDelete,
+  onSaveToDrive,
+  savingToDrive,
 }: HistoryRowProps) {
   const reduce = useReducedMotion();
   const fileName = job.fileName ?? job.input_file;
@@ -182,16 +189,21 @@ const HistoryRow = memo(function HistoryRow({
         // informational only there — passing the handlers is what decides.
         onDelete={compact ? onDelete : undefined}
         onRetry={compact ? onRetry : undefined}
+        // Offered at every width: the row has no inline save control.
+        onSaveToDrive={onSaveToDrive}
+        savingToDrive={savingToDrive}
       />
     </li>
   );
 });
 
 export function HistoryPage() {
-  const { jobs, updateJob, refresh, removeJob } = useJobs();
+  const { jobs, refresh, removeJob } = useJobs();
   const { api: client } = useAuth();
   const { success, error } = useToast();
-  const navigate = useNavigate();
+  // Filing a completed conversion's output into the drive — the same flow the
+  // Convert page offers, shared through `lib/useSaveToDrive.ts`.
+  const { savingId, saveToDefaultFolder } = useSaveToDrive();
   const location = useLocation();
   const [format, setFormat] = useState<string | null>(null);
   const [status, setStatus] = useState<StatusFilter>(readStoredStatus);
@@ -305,66 +317,7 @@ export function HistoryPage() {
     setDeleteTarget(job);
   }, []);
 
-  const handleRetry = useCallback(
-    async (job: UiJob) => {
-      // 1. If the input object is gone from storage, fall back to a full
-      //    re-upload via the normal conversion route.
-      const exists = await client.objectExists(
-        job.object_key || job.input_file,
-      );
-      if (!exists) {
-        const cached = getCachedFile(job.job_id);
-        if (cached) {
-          try {
-            const newJob = await client.convertWithFile(
-              cached.source,
-              cached.target,
-              cached.file,
-            );
-            updateJob(job.job_id, {
-              ...newJob,
-              fileName: cached.file.name,
-              status: "PENDING",
-              progress: 0,
-              createdAt: new Date().toISOString(),
-            });
-            dropCachedFile(job.job_id);
-            success("Input file was missing — re-uploaded and re-queued.");
-          } catch (err) {
-            error(
-              err instanceof Error ? err.message : "Could not re-upload file",
-            );
-          }
-          return;
-        }
-        // No cached file — send the user to Convert pre-filled.
-        navigate("/app/convert", {
-          state: { source: job.source_format, target: job.target_format },
-        });
-        error(
-          "The input file is no longer in storage. Re-select it to convert.",
-        );
-        return;
-      }
-
-      // 2. Input still exists — re-enqueue server-side without re-uploading.
-      try {
-        const updated = await client.retryJob(job.job_id);
-        updateJob(job.job_id, {
-          status: "PENDING",
-          progress: 0,
-          output_file: updated.output_file,
-          download_url: updated.download_url,
-        });
-        success("Conversion re-queued — tracking it now.");
-      } catch (err) {
-        error(
-          err instanceof Error ? err.message : "Could not retry conversion",
-        );
-      }
-    },
-    [client, navigate, updateJob, success, error],
-  );
+  const handleRetry = useRetryConversion().retry;
 
   const filtered = useMemo(() => {
     return jobs.filter((j) => {
@@ -374,6 +327,15 @@ export function HistoryPage() {
       return true;
     });
   }, [jobs, format, status]);
+
+  // Stabilised so the memoized rows do not re-render on every parent render;
+  // the hook already reports its own errors and progress through the dock.
+  const handleSaveToDrive = useCallback(
+    (job: UiJob) => {
+      void saveToDefaultFolder(job);
+    },
+    [saveToDefaultFolder],
+  );
 
   return (
     <div className="mx-auto max-w-5xl space-y-6">
@@ -501,6 +463,8 @@ export function HistoryPage() {
                 onDownload={handleDownload}
                 onRetry={handleRetry}
                 onDelete={handleDeleteRequest}
+                onSaveToDrive={handleSaveToDrive}
+                savingToDrive={savingId === job.job_id}
               />
             ))}
           </ul>

@@ -14,6 +14,7 @@ a copy it must not keep.
 """
 
 import asyncio
+import json
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Generator
@@ -422,6 +423,45 @@ def test_an_empty_token_is_rejected_by_schema_validation(tmp_path, enforced_emai
         response = client.post(VERIFY, json={"token": ""})
 
     assert response.status_code == 422
+
+
+def test_a_short_username_is_rejected_with_a_message_naming_the_username(
+    tmp_path, enforced_email
+) -> None:
+    """The reported defect, on the wire.
+
+    FastAPI's default handler passed pydantic's record through untouched, so the
+    SPA rendered the literal sentence **"String should have at least 3
+    characters"** — a statement about a Python type with the field never named.
+    This asserts the two things a client needs: a message addressed to a person,
+    and a `loc` path it can use to put that message under the right input.
+    """
+    with verification_client(str(tmp_path / "short.db")) as client:
+        response = register(client, username="ab")
+
+    assert response.status_code == 422
+    (error,) = response.json()["detail"]
+
+    assert error["msg"] == "Username must be at least 3 characters."
+    assert "String" not in error["msg"]
+    assert error["loc"] == ["body", "username"]
+    # The submitted value must not be echoed back to the client.
+    assert "input" not in error
+    assert "ab" not in json.dumps(error)
+
+
+def test_a_short_username_upon_a_missing_email_reports_both_fields(
+    tmp_path, enforced_email
+) -> None:
+    """A form must learn about every problem at once, not one per round trip."""
+    with verification_client(str(tmp_path / "both.db")) as client:
+        response = client.post(REGISTER, json={"username": "ab", "password": "Sup3rSecret!"})
+
+    assert response.status_code == 422
+    messages = {entry["loc"][-1]: entry["msg"] for entry in response.json()["detail"]}
+
+    assert messages["username"] == "Username must be at least 3 characters."
+    assert messages["email"] == "Email is required."
 
 
 # ---------------------------------------------------------------------------

@@ -16,6 +16,24 @@ vi.mock("@/auth/AuthContext", () => ({
   useAuth: () => ({
     user: { id: 1, username: "tester", email: "t@example.com", is_active: true, created_at: "" },
     logout: vi.fn(),
+    api: { deleteHistoryPreview: vi.fn(), deleteHistoryRange: vi.fn() },
+  }),
+}));
+
+// The shell now carries the account dropdown, which reads the job store and the
+// toast queue. `AppShell.test` renders the shell bare, without providers, so
+// both contexts have to be mocked or their hooks throw.
+vi.mock("@/auth/ToastContext", () => ({
+  useToast: () => ({ toast: vi.fn(), success: vi.fn(), error: vi.fn(), info: vi.fn() }),
+}));
+
+vi.mock("@/jobs/JobsContext", () => ({
+  useJobs: () => ({
+    jobs: [],
+    refresh: vi.fn(),
+    addJob: vi.fn(),
+    updateJob: vi.fn(),
+    removeJob: vi.fn(),
   }),
 }));
 
@@ -58,6 +76,20 @@ function sidebarNavHtml(html: string): string {
   const open = html.lastIndexOf("<nav", start);
   const close = html.indexOf("</nav>", start);
   return html.slice(open, close);
+}
+
+/** The markup of the whole desktop sidebar, nav and account row included. */
+function sidebarHtml(html: string): string {
+  const open = html.indexOf("<aside");
+  expect(open).toBeGreaterThan(-1);
+  return html.slice(open, html.indexOf("</aside>"));
+}
+
+/** The markup of the phone top bar. */
+function headerHtml(html: string): string {
+  const open = html.indexOf("<header");
+  expect(open).toBeGreaterThan(-1);
+  return html.slice(open, html.indexOf("</header>"));
 }
 
 describe("AppShell mobile bottom nav", () => {
@@ -105,5 +137,32 @@ describe("AppShell desktop sidebar", () => {
     const sidebar = sidebarNavHtml(renderShell());
     const links = sidebar.match(/href="\/app\//g) ?? [];
     expect(links).toHaveLength(8);
+  });
+
+  it("replaces the bare logout button with the account menu", () => {
+    const aside = sidebarHtml(renderShell());
+    expect(aside).toContain('aria-haspopup="menu"');
+    expect(aside).toContain('data-testid="avatar"');
+    expect(aside).toContain('aria-label="Account menu for tester"');
+    // The static row this replaced had a standalone sign-out button. What the
+    // panel itself carries cannot be seen here — it is closed in a server render
+    // — so `profileMenu.test.ts` and `ProfileMenu.test.tsx` pin the entries for
+    // this placement (`SIDEBAR_MENU`).
+    expect(aside).not.toContain('aria-label="Log out"');
+  });
+});
+
+describe("AppShell mobile header", () => {
+  it("carries the account menu, and only one of it", () => {
+    const header = headerHtml(renderShell());
+    const triggers = header.match(/aria-haspopup="menu"/g) ?? [];
+    expect(triggers).toHaveLength(1);
+    expect(header).toContain('aria-label="Account menu for tester"');
+  });
+
+  it("is hidden from the lg breakpoint up, where the sidebar takes over", () => {
+    // Two account affordances on a desktop screen is one too many — the sidebar
+    // footer owns that layout.
+    expect(headerHtml(renderShell())).toContain("lg:hidden");
   });
 });

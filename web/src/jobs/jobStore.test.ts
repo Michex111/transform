@@ -12,18 +12,25 @@
 import { describe, expect, it } from "vitest";
 import type { ConversionJobResponse } from "@/api/types";
 import {
+  FINISHED_STATUSES,
   IN_FLIGHT_STATUSES,
   JOBS_STORAGE_KEY,
   LEGACY_JOBS_STORAGE_KEY,
+  QUEUE_CLEARED_STORAGE_KEY,
+  RECENT_FINISHED_WINDOW_MS,
   activeJobs,
   isActiveJob,
   jobCreatedAt,
   jobProgress,
+  markQueueCleared,
+  readQueueClearedAt,
   readStoredJobs,
+  recentFinishedJobs,
   reconcileJobs,
   reduceStreamError,
   removeStoredJobs,
   showsCreditsUsed,
+  showsProgressBar,
   storageKeyFor,
   type KeyValueStore,
   type UiJob,
@@ -434,5 +441,373 @@ describe("jobProgress", () => {
 
   it("ignores a non-finite value", () => {
     expect(jobProgress({ status: "PROCESSING", progress: Number.NaN })).toBeNull();
+  });
+});
+
+/*
+ * Whether a row renders the progress bar. It is not "can we compute a
+ * percentage": the bar is dropped for a finished conversion to buy back the
+ * width that lets the row fit on one line, and it is dropped on a phone for a
+ * failure because a bar that will never move again is noise beside the status.
+ */
+describe("showsProgressBar", () => {
+  const wide = { narrow: false };
+  const phone = { narrow: true };
+
+  it("never shows a bar for a completed conversion, at any width", () => {
+    expect(showsProgressBar({ status: "COMPLETED" }, wide)).toBe(false);
+    expect(showsProgressBar({ status: "COMPLETED" }, phone)).toBe(false);
+  });
+
+  it("shows a failed conversion's bar on a wide row only", () => {
+    expect(showsProgressBar({ status: "FAILED" }, wide)).toBe(true);
+    expect(showsProgressBar({ status: "FAILED" }, phone)).toBe(false);
+  });
+
+  it("always shows the bar while a conversion is still in flight", () => {
+    for (const status of ["PENDING", "PROCESSING", "AWAITING_UPLOAD"]) {
+      expect(showsProgressBar({ status }, wide)).toBe(true);
+      expect(showsProgressBar({ status }, phone)).toBe(true);
+    }
+  });
+});
+
+describe("FINISHED_STATUSES", () => {
+  it("is exactly the two terminal outcomes the Convert page can act on", () => {
+    expect([...FINISHED_STATUSES].sort()).toEqual(["COMPLETED", "FAILED"]);
+  });
+
+  it("shares no member with the in-flight set", () => {
+    for (const status of FINISHED_STATUSES) {
+      expect(IN_FLIGHT_STATUSES.has(status)).toBe(false);
+    }
+  });
+});
+
+/*
+ * The Convert page's inline queue is split into "Active" and "Recently
+ * finished". The rules for the second half live in `recentFinishedJobs`, so they
+ * are pinned here — the page is only presentation.
+ */
+
+describe("recentFinishedJobs", () => {
+  const NOW = Date.parse("2026-09-22T12:00:00.000Z");
+  const iso = (offsetMs: number) => new Date(NOW + offsetMs).toISOString();
+  const ids = (list: UiJob[]) => list.map((j) => j.job_id);
+
+  /** A conversion this session watched finish `finishedAgoMs` ago. */
+  function completedJob(
+    jobId: string,
+    finishedAgoMs: number,
+    overrides: Partial<UiJob> = {},
+  ): UiJob {
+    return job({
+      job_id: jobId,
+      status: "COMPLETED",
+      finishedAt: iso(-finishedAgoMs),
+      ...overrides,
+    });
+  }
+
+  describe("the 30-minute window", () => {
+    it("includes a job that finished inside the window", () => {
+      const list = [completedJob("fresh", 5 * 60_000)];
+
+      expect(ids(recentFinishedJobs(list, { now: NOW }))).toEqual(["fresh"]);
+    });
+
+    it("excludes a job that finished exactly one window ago", () => {
+      // The boundary is exclusive: `now - finishedAt < WINDOW`.
+      const list = [completedJob("edge", RECENT_FINISHED_WINDOW_MS)];
+
+      expect(recentFinishedJobs(list, { now: NOW })).toEqual([]);
+    });
+
+    it("includes a job that finished one millisecond inside the window", () => {
+      const list = [completedJob("edge", RECENT_FINISHED_WINDOW_MS - 1)];
+
+      expect(ids(recentFinishedJobs(list, { now: NOW }))).toEqual(["edge"]);
+    });
+
+    it("counts a future timestamp as recent, not as stale", () => {
+      // Clock skew between the browser and the server. Hiding a conversion the
+      // user just watched finish is the worse error.
+      const list = [completedJob("ahead", -2 * 60_000)];
+
+      expect(ids(recentFinishedJobs(list, { now: NOW }))).toEqual(["ahead"]);
+    });
+  });
+
+  describe("status filtering", () => {
+    it("never returns an in-flight job", () => {
+      // These are Active's rows; listing them twice would be a lie about state.
+      const list = [
+        job({ job_id: "running", status: "PROCESSING", createdAt: iso(-1_000) }),
+        job({ job_id: "queued", status: "PENDING", createdAt: iso(-1_000) }),
+        job({ job_id: "uploading", status: "AWAITING_UPLOAD", createdAt: iso(-1_000) }),
+      ];
+
+      expect(recentFinishedJobs(list, { now: NOW })).toEqual([]);
+    });
+
+    it("includes a failed job, because the row carries its retry", () => {
+      // A failure is actionable from here: the row shows the reason and a Retry,
+      // so the user does not have to go to History to find out what happened.
+      // `finishedAt` is the failure's own timestamp, not its start.
+      const broke = job({
+        job_id: "broke",
+        status: "FAILED",
+        createdAt: iso(-20 * 60_000),
+        finishedAt: iso(-60_000),
+        errorMessage: "libreoffice exploded",
+      });
+
+      expect(ids(recentFinishedJobs([broke], { now: NOW }))).toEqual(["broke"]);
+    });
+
+    it("places a failure by when it failed, not when it started", () => {
+      // A 40-minute attempt that failed 1 minute ago is recent work; placed by
+      // its start it would fall outside the window the moment it failed.
+      const slowFailure = job({
+        job_id: "slow-fail",
+        status: "FAILED",
+        createdAt: iso(-40 * 60_000),
+        finishedAt: iso(-60_000),
+      });
+      // Same shape, but the session never saw the terminal event, so the only
+      // timestamp available is the start — which is outside the window.
+      const unknownFinish = job({
+        job_id: "restored-fail",
+        status: "FAILED",
+        createdAt: iso(-40 * 60_000),
+      });
+      const list = [slowFailure, unknownFinish];
+
+      expect(ids(recentFinishedJobs(list, { now: NOW }))).toEqual(["slow-fail"]);
+    });
+
+    it("keeps every finished row of a mixed list and drops the running ones", () => {
+      const list = [
+        completedJob("done", 60_000),
+        job({ job_id: "running", status: "PROCESSING", createdAt: iso(-1_000) }),
+        job({
+          job_id: "broke",
+          status: "FAILED",
+          finishedAt: iso(-2 * 60_000),
+          errorMessage: "boom",
+        }),
+      ];
+
+      expect(ids(recentFinishedJobs(list, { now: NOW }))).toEqual(["done", "broke"]);
+    });
+  });
+
+  describe("ordering and cap", () => {
+    it("orders newest finish first", () => {
+      const list = [
+        completedJob("oldest", 10 * 60_000),
+        completedJob("newest", 60_000),
+        completedJob("middle", 5 * 60_000),
+      ];
+
+      expect(ids(recentFinishedJobs(list, { now: NOW }))).toEqual([
+        "newest",
+        "middle",
+        "oldest",
+      ]);
+    });
+
+    it("caps the list at five by default", () => {
+      // Seven recent completions: only the five newest are listed inline.
+      const list = [1, 2, 3, 4, 5, 6, 7].map((n) => completedJob(`j${n}`, n * 60_000));
+
+      expect(ids(recentFinishedJobs(list, { now: NOW }))).toEqual([
+        "j1",
+        "j2",
+        "j3",
+        "j4",
+        "j5",
+      ]);
+    });
+
+    it("honours an explicit limit", () => {
+      const list = [1, 2, 3, 4, 5].map((n) => completedJob(`j${n}`, n * 60_000));
+
+      expect(ids(recentFinishedJobs(list, { now: NOW, limit: 2 }))).toEqual(["j1", "j2"]);
+      expect(recentFinishedJobs(list, { now: NOW, limit: 0 })).toEqual([]);
+    });
+
+    it("does not mutate the list it reads", () => {
+      const list = [completedJob("a", 60_000), completedJob("b", 120_000)];
+
+      recentFinishedJobs(list, { now: NOW });
+
+      expect(ids(list)).toEqual(["a", "b"]);
+    });
+  });
+
+  describe("which timestamp places a job in time", () => {
+    it("prefers when it finished over when it started", () => {
+      // A slow conversion: started over an hour ago (outside the window on its
+      // start time alone) but finished a minute ago. It is exactly what the
+      // user is waiting to see.
+      const slow = completedJob("slow", 60_000, { createdAt: iso(-60 * 60_000) });
+
+      expect(ids(recentFinishedJobs([slow], { now: NOW }))).toEqual(["slow"]);
+    });
+
+    it("places a server-restored completion by its row timestamp", () => {
+      // Rows loaded from the history endpoint carry only `created_at`; the
+      // server has no completion timestamp for the SPA to read.
+      const restored = job({
+        job_id: "restored",
+        status: "COMPLETED",
+        created_at: iso(-2 * 60_000),
+      });
+
+      expect(ids(recentFinishedJobs([restored], { now: NOW }))).toEqual(["restored"]);
+    });
+
+    it("uses createdAt when the server row has no timestamp", () => {
+      const local = job({
+        job_id: "local",
+        status: "COMPLETED",
+        createdAt: iso(-2 * 60_000),
+      });
+
+      expect(ids(recentFinishedJobs([local], { now: NOW }))).toEqual(["local"]);
+    });
+
+    it("excludes a job with no timestamp at all", () => {
+      // It cannot be placed in time, so calling it "recent" would be a guess.
+      expect(recentFinishedJobs([job({ status: "COMPLETED" })], { now: NOW })).toEqual([]);
+    });
+  });
+
+  describe("the Clear marker", () => {
+    const clearedAt = iso(-60_000);
+    const older = completedJob("older", 2 * 60_000);
+    const exactlyAtMarker = completedJob("exactly", 60_000);
+    const newer = completedJob("newer", 1_000);
+
+    it("hides jobs that finished at or before the marker", () => {
+      const list = [older, exactlyAtMarker, newer];
+
+      expect(ids(recentFinishedJobs(list, { now: NOW, clearedBefore: clearedAt }))).toEqual([
+        "newer",
+      ]);
+    });
+
+    it("still shows a job that finishes after the clear", () => {
+      // The whole reason the marker is a timestamp: a job finishing two seconds
+      // later is newer than the marker and must reappear. A list of ids would
+      // have to be extended on every future completion instead.
+      const justFinished = completedJob("just-finished", -2_000);
+
+      const result = recentFinishedJobs([older, exactlyAtMarker, justFinished], {
+        now: NOW,
+        clearedBefore: clearedAt,
+      });
+
+      expect(ids(result)).toEqual(["just-finished"]);
+    });
+
+    it("ignores an unparsable marker instead of clearing everything", () => {
+      const list = [older, exactlyAtMarker, newer];
+
+      expect(
+        ids(recentFinishedJobs(list, { now: NOW, clearedBefore: "{not json" })),
+      ).toEqual(["newer", "exactly", "older"]);
+    });
+
+    it("treats a missing marker as never cleared", () => {
+      const list = [older, newer];
+
+      expect(ids(recentFinishedJobs(list, { now: NOW, clearedBefore: null }))).toEqual([
+        "newer",
+        "older",
+      ]);
+    });
+  });
+});
+
+describe("readQueueClearedAt / markQueueCleared", () => {
+  const key = (userId: number | null) => storageKeyFor(userId, QUEUE_CLEARED_STORAGE_KEY);
+
+  it("round-trips the marker for one identity", () => {
+    const store = memoryStore();
+    const at = "2026-09-22T12:00:00.000Z";
+
+    markQueueCleared(7, at, store);
+
+    expect(readQueueClearedAt(7, store)).toBe(at);
+  });
+
+  it("keeps each identity's marker to itself", () => {
+    // Same reason the jobs cache is scoped: one account's clear must not hide
+    // another account's completions on a shared browser.
+    const store = memoryStore();
+    markQueueCleared(1, "2026-09-22T12:00:00.000Z", store);
+
+    expect(readQueueClearedAt(1, store)).toBe("2026-09-22T12:00:00.000Z");
+    expect(readQueueClearedAt(2, store)).toBeNull();
+    expect(readQueueClearedAt(null, store)).toBeNull();
+  });
+
+  it("gives anonymous sessions their own marker", () => {
+    const store = memoryStore();
+    markQueueCleared(null, "2026-09-22T12:00:00.000Z", store);
+
+    expect(readQueueClearedAt(null, store)).toBe("2026-09-22T12:00:00.000Z");
+    expect(readQueueClearedAt(7, store)).toBeNull();
+  });
+
+  it("writes to its own key, never into the jobs cache", () => {
+    const store = memoryStore();
+    markQueueCleared(7, "2026-09-22T12:00:00.000Z", store);
+
+    expect(store.getItem(key(7))).toBe("2026-09-22T12:00:00.000Z");
+    expect(store.getItem(storageKeyFor(7))).toBeNull();
+    expect(JOBS_STORAGE_KEY).not.toBe(QUEUE_CLEARED_STORAGE_KEY);
+  });
+
+  it("honours a custom base key", () => {
+    const store = memoryStore();
+
+    markQueueCleared(7, "2026-09-22T12:00:00.000Z", store, "other_key");
+
+    expect(readQueueClearedAt(7, store, "other_key")).toBe("2026-09-22T12:00:00.000Z");
+    expect(readQueueClearedAt(7, store)).toBeNull();
+  });
+
+  it("reports 'never cleared' for missing, empty, unparsable or non-string data", () => {
+    expect(readQueueClearedAt(7, memoryStore())).toBeNull();
+    expect(readQueueClearedAt(7, memoryStore({ [key(7)]: "" }))).toBeNull();
+    expect(readQueueClearedAt(7, memoryStore({ [key(7)]: "{not json" }))).toBeNull();
+    expect(readQueueClearedAt(7, memoryStore({ [key(7)]: "null" }))).toBeNull();
+    // A double that returns a non-string must not be trusted as a marker.
+    const wrongType = {
+      getItem: () => 42,
+      setItem: () => undefined,
+      removeItem: () => undefined,
+    } as unknown as KeyValueStore;
+    expect(readQueueClearedAt(7, wrongType)).toBeNull();
+  });
+
+  it("survives a storage backend that throws", () => {
+    // Private-mode browsers can throw on access; a failed clear must not take
+    // the page down, and must not look like a successful one either.
+    const hostile = {
+      getItem() {
+        throw new Error("blocked");
+      },
+      setItem() {
+        throw new Error("blocked");
+      },
+      removeItem() {},
+    } as KeyValueStore;
+
+    expect(() => markQueueCleared(7, "2026-09-22T12:00:00.000Z", hostile)).not.toThrow();
+    expect(readQueueClearedAt(7, hostile)).toBeNull();
   });
 });

@@ -24,6 +24,7 @@ import {
   Check,
   X,
   Download,
+  Eye,
   ArrowsClockwise,
   Star,
   SquaresFour,
@@ -39,6 +40,8 @@ import { FilesUploadModal } from "./FilesUploadModal";
 import { FilesConvertModal } from "./FilesConvertModal";
 import { FilesMassConvertModal } from "./FilesMassConvertModal";
 import { FilesMoveModal, type MoveItem } from "./FilesMoveModal";
+import { FilePreviewModal } from "@/components/FilePreviewModal";
+import { useUploads } from "@/uploads/uploadsContext";
 import type { FolderResponse, FileMetadataResponse } from "@/api/types";
 
 // Custom MIME type used to identify a draggable file in the page's HTML5 DnD.
@@ -88,6 +91,8 @@ export function FilesPage() {
   // Feature modals.
   const [uploadOpen, setUploadOpen] = useState(false);
   const [convertFile, setConvertFile] = useState<FileMetadataResponse | null>(null);
+  // File whose in-page preview modal is open (null = closed).
+  const [previewFile, setPreviewFile] = useState<FileMetadataResponse | null>(null);
   // Id of the file currently being dragged (null when no drag is active).
   const [draggedFileId, setDraggedFileId] = useState<string | null>(null);
   // Id of the folder currently being dragged (null when no drag is active).
@@ -154,10 +159,70 @@ export function FilesPage() {
     load();
   }, [load]);
 
+  // Refresh the listing when a background upload completes — the modal used to
+  // call `onUploaded` synchronously, but it now closes immediately and the
+  // transfer finishes later, possibly while the user is on another folder.
+  //
+  // Subscribing to the store (rather than polling) means the reload happens on
+  // the exact state transition. `seenCompleted` makes it fire once per upload
+  // rather than on every progress tick, and the folder check keeps a file that
+  // landed in a different folder from reloading the one on screen. `load`'s own
+  // request-id guard still drops any stale response.
+  const { uploads } = useUploads();
+  const seenCompleted = useRef<Map<string, string | null> | null>(null);
+  useEffect(() => {
+    const completed = new Map(
+      uploads.filter((u) => u.status === "done").map((u) => [u.id, u.folderId]),
+    );
+    if (seenCompleted.current === null) {
+      // Seeded on the first pass so uploads completed before this page mounted
+      // are not treated as new (mount already loads the folder). A `null` ref is
+      // the "not seeded yet" marker rather than an empty map, which would make
+      // the first completion of the session look pre-existing.
+      seenCompleted.current = completed;
+      return;
+    }
+    const previous = seenCompleted.current;
+    let landedHere = false;
+    for (const [id, folderId] of completed) {
+      if (!previous.has(id) && folderId === currentFolderId) landedHere = true;
+    }
+    seenCompleted.current = completed;
+    if (landedHere) load();
+  }, [uploads, currentFolderId, load]);
+
   // Focus the new-folder name input when it appears.
   useEffect(() => {
     if (newFolder) window.setTimeout(() => newFolderInput.current?.focus(), 60);
   }, [newFolder]);
+
+  // Hand focus back to the control that opened the upload dialog when it
+  // closes.
+  //
+  // `Modal` restores whatever `document.activeElement` was when it opened,
+  // which is the right intent but not a reliable source of truth for the
+  // opener: a click does not always leave the clicked control focused (Safari
+  // never focuses a `<button>` on click) and a programmatic `.click()` focuses
+  // nothing at all. When that happens the dialog captures `<body>` and then
+  // faithfully restores focus to `<body>` — which is exactly the live result:
+  // `document.activeElement` was the drop zone while the dialog was open and
+  // `BODY` once it closed, with the Upload button never refocused. The click
+  // event's `currentTarget` is the element the user actually activated, focused
+  // or not, so that is what gets remembered here.
+  //
+  // This runs in a plain effect, not in the dialog, because the trigger belongs
+  // to this page. React flushes passive effect *cleanups* (the dialog's own
+  // restore) before passive effect setups, so this is the last word on focus.
+  const uploadTriggerRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    if (uploadOpen) return;
+    const trigger = uploadTriggerRef.current;
+    uploadTriggerRef.current = null;
+    // `isConnected` guards the case where the trigger was re-rendered away
+    // while the dialog was up: focusing a detached node silently does nothing,
+    // which would leave focus on `<body>` and look like the bug again.
+    if (trigger?.isConnected) trigger.focus();
+  }, [uploadOpen]);
 
   async function saveNewFolder(e: FormEvent) {
     e.preventDefault();
@@ -516,7 +581,15 @@ export function FilesPage() {
           >
             <Plus size={16} /> New folder
           </Button>
-          <Button variant="secondary" onClick={() => setUploadOpen(true)}>
+          <Button
+            variant="secondary"
+            onClick={(event) => {
+              // Remember the opener here, where the user's activation is
+              // unambiguous — see the restore effect above.
+              uploadTriggerRef.current = event.currentTarget;
+              setUploadOpen(true);
+            }}
+          >
             <UploadSimple size={16} /> Upload
           </Button>
         </div>
@@ -760,6 +833,7 @@ export function FilesPage() {
                       onToggleSelect={() => toggleFile(file.id, false)}
                       onDownload={() => downloadFile(file)}
                       onConvert={() => setConvertFile(file)}
+                      onPreview={() => setPreviewFile(file)}
                       onRename={(name) => renameFile(file.id, name)}
                       onDelete={() => deleteFile(file.id)}
                       onToggleFavorite={() => toggleFavorite(file)}
@@ -795,7 +869,6 @@ export function FilesPage() {
         open={uploadOpen}
         onClose={() => setUploadOpen(false)}
         folderId={currentFolderId}
-        onUploaded={load}
       />
 
       {/* Convert-an-existing-file modal */}
@@ -803,6 +876,13 @@ export function FilesPage() {
         open={convertFile !== null}
         onClose={() => setConvertFile(null)}
         file={convertFile}
+      />
+
+      {/* In-page preview of a library file */}
+      <FilePreviewModal
+        open={previewFile !== null}
+        onClose={() => setPreviewFile(null)}
+        file={previewFile}
       />
 
       {/* Mass-convert selected files modal */}
@@ -1116,6 +1196,7 @@ function FileCard({
   onToggleSelect,
   onDownload,
   onConvert,
+  onPreview,
   onRename,
   onDelete,
   onToggleFavorite,
@@ -1130,6 +1211,7 @@ function FileCard({
   onToggleSelect: () => void;
   onDownload: () => void;
   onConvert: () => void;
+  onPreview: () => void;
   onRename: (name: string) => void;
   onDelete: () => void;
   onToggleFavorite: () => void;
@@ -1259,6 +1341,7 @@ function FileCard({
               )}
               {!selectable && (
                 <CardMenu
+                  onPreview={onPreview}
                   onDownload={onDownload}
                   onConvert={onConvert}
                   onRename={() => { setDraft(file.file_name); setEditing(true); }}
@@ -1275,12 +1358,14 @@ function FileCard({
 }
 
 function CardMenu({
+  onPreview,
   onRename,
   onDownload,
   onConvert,
   onMove,
   onDelete,
 }: {
+  onPreview?: () => void;
   onRename?: () => void;
   onDownload?: () => void;
   onConvert?: () => void;
@@ -1372,6 +1457,17 @@ function CardMenu({
               style={{ position: "fixed", top: pos.top, right: pos.right }}
               className="z-[70] w-44 overflow-hidden rounded-lg border border-outline bg-surface p-1 shadow-xl"
             >
+              {/* Files only: folders own no bytes to preview, so they never pass
+                  `onPreview` and never get this item. */}
+              {onPreview && (
+                <button
+                  role="menuitem"
+                  onClick={() => { setOpen(false); onPreview(); }}
+                  className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm text-on-background hover:bg-surface-variant"
+                >
+                  <Eye size={15} /> Preview
+                </button>
+              )}
               {onMove && (
                 <button
                   role="menuitem"

@@ -2,6 +2,18 @@ import { useEffect, useRef, type ReactNode } from "react";
 import { X } from "@phosphor-icons/react";
 import { AnimatePresence, motion } from "motion/react";
 
+/** Everything inside a panel a keyboard user can reach with Tab. */
+const FOCUSABLE_SELECTOR =
+  'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
+
+/** The focusable descendants of `root`, in document order, minus disabled ones. */
+function focusableWithin(root: HTMLElement | null): HTMLElement[] {
+  if (!root) return [];
+  return Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(
+    (el) => !el.hasAttribute("disabled"),
+  );
+}
+
 /** An accessible modal dialog: backdrop, focus-on-open, Escape to close,
  *  `role="dialog"` + `aria-modal`, and a scrollable body. */
 export function Modal({
@@ -20,31 +32,48 @@ export function Modal({
   maxWidth?: string;
 }) {
   const panelRef = useRef<HTMLDivElement>(null);
+  const bodyRef = useRef<HTMLDivElement>(null);
   const prevFocus = useRef<HTMLElement | null>(null);
+  // The latest `onClose` in a ref, so the effect below can depend on `open`
+  // alone. Callers pass a fresh closure on every render (they have to: closing
+  // must see the current `busy` flag), and an effect keyed on it re-runs on
+  // every keystroke inside the dialog — each re-run restores focus to the
+  // element that opened the dialog before moving it back in, which yanks focus
+  // out of the field being typed into. The effect is about the dialog's
+  // lifetime, not about the identity of a callback.
+  const onCloseRef = useRef(onClose);
+  // Assigned in an effect rather than during render: a render-time write to a
+  // ref is not safe when a render is discarded (concurrent rendering), and this
+  // costs one no-op effect run per render.
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  });
 
   // Focus management + Escape to close + focus trap.
   useEffect(() => {
     if (!open) return;
     prevFocus.current = document.activeElement as HTMLElement | null;
-    const t = window.setTimeout(() => panelRef.current?.focus(), 30);
-
-    function getFocusable(): HTMLElement[] {
-      const panel = panelRef.current;
-      if (!panel) return [];
-      return Array.from(
-        panel.querySelectorAll<HTMLElement>(
-          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
-        ),
-      ).filter((el) => !el.hasAttribute("disabled"));
-    }
+    const t = window.setTimeout(() => {
+      // Initial focus goes to the first control in the BODY, falling back to
+      // the panel when the body has none. Focusing the container makes a
+      // keyboard user Tab through the dialog's chrome (the close button) to
+      // reach the field they were asked to fill in, and `autoFocus` on a child
+      // cannot be relied on because this timer runs after it and would move
+      // focus back out again — which is why `DangerZoneSection`'s delete dialog
+      // opens with its password box unfocused. The panel is still the fallback,
+      // so a dialog with no controls at all receives focus (and therefore still
+      // traps it).
+      const target = focusableWithin(bodyRef.current)[0] ?? panelRef.current;
+      target?.focus();
+    }, 30);
 
     function onKey(e: KeyboardEvent) {
       if (e.key === "Escape") {
-        onClose();
+        onCloseRef.current();
         return;
       }
       if (e.key !== "Tab") return;
-      const focusable = getFocusable();
+      const focusable = focusableWithin(panelRef.current);
       if (focusable.length === 0) return;
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
@@ -72,7 +101,7 @@ export function Modal({
       document.removeEventListener("keydown", onKey);
       prevFocus.current?.focus?.();
     };
-  }, [open, onClose]);
+  }, [open]);
 
   return (
     <AnimatePresence>
@@ -116,8 +145,13 @@ export function Modal({
             </div>
             {/* `min-h-0` is required for a flex child to shrink below its
                 content height, which is what lets this scroll instead of pushing
-                the panel past the viewport on a short screen. */}
-            <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-4 pb-[max(1rem,env(safe-area-inset-bottom))] sm:p-5">
+                the panel past the viewport on a short screen. `bodyRef` is the
+                scope for initial focus: the first control a caller renders is
+                the one they expect the user to start in. */}
+            <div
+              ref={bodyRef}
+              className="min-h-0 flex-1 overflow-y-auto overscroll-contain p-4 pb-[max(1rem,env(safe-area-inset-bottom))] sm:p-5"
+            >
               {children}
             </div>
           </motion.div>

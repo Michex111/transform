@@ -43,6 +43,22 @@ def test_build_s3_cors_allows_methods_and_origins() -> None:
     assert set(rules[0]["AllowedMethods"]) == {"GET", "PUT", "POST", "HEAD"}
 
 
+def test_build_s3_cors_exposes_etag_for_multipart_uploads() -> None:
+    """MULTIPART REGRESSION GUARD.
+
+    A multipart upload is assembled from the ``ETag`` each part PUT returns. A
+    cross-origin browser cannot read a response header unless the bucket CORS
+    rule exposes it, so dropping ``ETag`` here makes every part upload succeed
+    and then fails the completion call with a confusing CORS error. It must be
+    present in BOTH the S3 and the native B2 rules.
+    """
+    assert "ETag" in _build_s3_cors(["http://localhost:5173"])[0]["ExposeHeaders"]
+
+
+def test_build_b2_cors_exposes_etag_for_multipart_uploads() -> None:
+    assert "ETag" in _build_b2_cors(["http://localhost:5173"])[0]["exposeHeaders"]
+
+
 def test_build_s3_cors_supports_the_separately_hosted_spa_origin() -> None:
     """The SPA is a distinct origin now — the bucket must allow it verbatim.
 

@@ -1,14 +1,13 @@
-import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
+import { NavLink, Outlet, useLocation } from "react-router-dom";
 import { useEffect, useRef, useState } from "react";
 import { motion } from "motion/react";
-import { DotsThree, SignOut } from "@phosphor-icons/react";
-import { useAuth } from "@/auth/AuthContext";
+import { DotsThree } from "@phosphor-icons/react";
 import { Logo } from "@/components/ui";
+import { ProfileMenu } from "@/components/ProfileMenu";
 import { MORE, NAV, PRIMARY } from "@/components/navItems";
+import { PHONE_MENU, SIDEBAR_MENU } from "@/lib/profileMenu";
 
 export function AppShell() {
-  const { user, logout } = useAuth();
-  const navigate = useNavigate();
   const location = useLocation();
   const [moreOpen, setMoreOpen] = useState(false);
   const moreRef = useRef<HTMLDivElement>(null);
@@ -29,11 +28,6 @@ export function AppShell() {
     document.addEventListener("pointerdown", onPointerDown);
     return () => document.removeEventListener("pointerdown", onPointerDown);
   }, [moreOpen]);
-
-  const handleLogout = () => {
-    logout();
-    navigate("/login", { replace: true });
-  };
 
   return (
     <div className="flex min-h-dvh bg-background">
@@ -77,28 +71,26 @@ export function AppShell() {
           ))}
         </nav>
         <div className="shrink-0 border-t border-outline p-3">
-          <div className="flex items-center gap-3 px-3 py-2">
-            <div className="flex h-9 w-9 items-center justify-center rounded-full bg-primary-container font-display text-sm font-semibold text-on-primary-container">
-              {user?.username?.slice(0, 2).toUpperCase() ?? "??"}
-            </div>
-            <div className="min-w-0 flex-1">
-              <p className="truncate text-sm font-medium text-on-background">{user?.username}</p>
-              <p className="truncate text-xs text-muted">{user?.email}</p>
-            </div>
-            <button
-              onClick={handleLogout}
-              aria-label="Log out"
-              title="Log out"
-              className="text-muted transition-colors hover:scale-110 hover:text-error"
-            >
-              <SignOut size={20} />
-            </button>
-          </div>
+          {/* The sidebar's menu is deliberately narrow: the rail to the left
+              already lists every destination, so the panel offers only what is
+              about the account — its settings — plus logout, which no longer
+              has its own icon button here. See `SIDEBAR_MENU`. */}
+          <ProfileMenu {...SIDEBAR_MENU} align="left" placement="up" showIdentity className="w-full" />
         </div>
       </aside>
 
       {/* Main content — only this animates between routes */}
       <div className="flex min-w-0 flex-1 flex-col">
+        {/* Phone top bar. The sidebar owns the desktop account affordances at
+            `lg`, so this is the only way to reach the account from a phone, and
+            it mirrors the public header's sticky/blur treatment so the two
+            headers do not read as two different products. The bottom nav below
+            is unchanged. */}
+        <header className="sticky top-0 z-30 flex h-14 shrink-0 items-center justify-between border-b border-outline bg-background/80 px-4 backdrop-blur lg:hidden">
+          <Logo />
+          <ProfileMenu {...PHONE_MENU} align="right" placement="down" />
+        </header>
+
         <main className="flex-1 px-4 py-6 sm:px-6 lg:px-8">
           {/* Animate each page in on mount. We deliberately do NOT use
               AnimatePresence mode="wait" here: when SSE job updates or the

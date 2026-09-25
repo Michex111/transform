@@ -164,3 +164,19 @@ def test_dispatch_applies_to_api_paths() -> None:
     assert first == "ok"
     # Second request within the window should be blocked with a 429.
     assert getattr(second, "status_code", None) == 429
+
+
+def test_password_reset_endpoints_use_the_strict_auth_bucket() -> None:
+    """Recovery is unauthenticated and either acts on a secret or sends mail.
+
+    `forgot-password` on the loose per-IP default would be a cheap mail-bomb
+    aimed at a third party, and `reset-password` is a token-guessing surface
+    exactly like `/verify-email`.
+    """
+    mw = _middleware()
+    mw._settings = type("S", (), {"RATE_LIMIT_AUTH": 10})()  # type: ignore[assignment]
+
+    for path in ("/api/users/forgot-password", "/api/users/reset-password"):
+        key, limit = mw._resolve_limit(_FakeRequest(path))  # type: ignore[arg-type]
+        assert key.endswith(":auth"), path
+        assert limit == 10, path

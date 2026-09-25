@@ -20,14 +20,17 @@ from src.application.exceptions.file_system_exceptions import (
     FileTypeMismatchError,
     FolderNameConflictError,
     FolderNotFoundError,
+    StorageQuotaExceededError,
 )
 from src.application.services.file_magic import validate_upload_signature
+from src.application.services.upload_limits import default_size_limits
+from src.domain.subscriptions.policies.storage_quota import evaluate_storage_quota
+from src.domain.subscriptions.policies.tier_policy import TierPolicy
 from src.domain.subscriptions.value_object.tier import SubscriptionTier
 from src.infrastructure.adapters.storage.sanitize import (
     extension_from_filename,
     normalize_extension,
 )
-from src.infrastructure.config.settings import get_settings
 from src.infrastructure.database.models import UserFileModel, UserFolderModel
 
 
@@ -66,6 +69,26 @@ class FileRepositoryPort(Protocol):
     async def delete_many(
         self, user_id: int, file_ids: list[str],
     ) -> list[UserFileModel]: ...
+
+    async def get_user_storage_used(self, user_id: int) -> int:
+        """SUM(file_size_bytes) across the user's files.
+
+        This is the number the dashboard shows; the quota checks must use the
+        same source, because a limit check that disagrees with the figure in the
+        UI is worse than no check at all. (Note: ``user_subscriptions
+        .used_storage_bytes`` is NOT this — nothing maintains it, so it reads 0.)
+        """
+        ...
+
+    async def lock_user_for_update(self, user_id: int) -> None:
+        """Serialise concurrent storage commits for one user.
+
+        Takes a row lock on the user so two finalizes cannot both read the same
+        pre-insert usage, both decide they fit, and both commit — which would
+        leave the account over quota. The lock is released when the enclosing
+        transaction commits (the insert) or rolls back.
+        """
+        ...
 
 
 class FolderRepositoryPort(Protocol):
@@ -110,17 +133,9 @@ class FileStorageOperations(Protocol):
     async def remove_object(self, object_key: str) -> bool: ...
 
 
-# Tier → max upload size (bytes). Values mirror the settings file-size limits.
-def _default_size_limits() -> dict[SubscriptionTier, int]:
-    settings = get_settings()
-    return {
-        SubscriptionTier.GUEST: settings.GUEST_MAX_FILE_SIZE,
-        SubscriptionTier.FREE: settings.FREE_MAX_FILE_SIZE,
-        SubscriptionTier.PREMIUM: settings.PRO_MAX_FILE_SIZE,
-        SubscriptionTier.PRO: settings.PRO_MAX_FILE_SIZE,
-        SubscriptionTier.PRO_PLUS: settings.PRO_PLUS_MAX_FILE_SIZE,
-        SubscriptionTier.ENTERPRISE: settings.PRO_PLUS_MAX_FILE_SIZE,
-    }
+# Tier → max upload size (bytes). Single source of truth lives in
+# ``application/services/upload_limits.py`` so the dashboard reports the same
+# number this service enforces.
 
 
 class FileService:
@@ -138,7 +153,7 @@ class FileService:
         self._folders = folder_repository
         self._storage = storage
         self._subscriptions = subscription_repository
-        self._size_limits = size_limits or _default_size_limits()
+        self._size_limits = size_limits or default_size_limits()
 
     # ------------------------------------------------------------------
     # Folders
@@ -348,19 +363,81 @@ class FileService:
     # Uploads
     # ------------------------------------------------------------------
 
+    async def authorize_upload_size(self, user_id: int, declared_size: int | None) -> int:
+        """Pre-flight cap + quota check for a DECLARED upload size.
+
+        Returns the caller's effective per-file cap in bytes (so the caller can
+        report it to the client) and raises
+        :class:`FileSizeLimitExceededError` / :class:`StorageQuotaExceededError`
+        when the declared size cannot be accepted.
+
+        This check is ADVISORY, not authoritative, and the distinction matters:
+        it exists so a 5 GB transfer is refused before it starts, but it trusts a
+        number the *client* supplied, so a client can declare one byte and then
+        upload a terabyte. The check that establishes the invariant lives in
+        :meth:`complete_upload`, which measures the object that actually landed
+        in storage and runs inside a locked transaction. Both use the same
+        arithmetic (:func:`evaluate_storage_quota`), so they cannot disagree
+        about the boundary.
+
+        ``declared_size=None`` (the client did not say) only returns the cap and
+        performs no pre-check, preserving the historical behaviour for older
+        clients and the guest flow.
+        """
+        tier = await self._subscriptions.get_tier_for_user(user_id)
+        max_size = self._size_limits[tier]
+        if declared_size is None:
+            return max_size
+
+        if declared_size > max_size:
+            raise FileSizeLimitExceededError(
+                f"File exceeds the maximum size for your tier "
+                f"({max_size // (1024 * 1024)} MB).",
+                max_file_size_bytes=max_size,
+                file_size=declared_size,
+            )
+
+        limit_bytes = TierPolicy.for_tier(tier).storage_quota_bytes
+        # Same source as the dashboard's ``used_bytes``. Using anything else
+        # (notably the unmaintained ``user_subscriptions.used_storage_bytes``,
+        # which is always 0) would let an upload pass a check that the UI
+        # contradicts.
+        used_bytes = await self._files.get_user_storage_used(user_id)
+        decision = evaluate_storage_quota(
+            limit_bytes=limit_bytes, used_bytes=used_bytes, file_size=declared_size,
+        )
+        if not decision.allowed:
+            raise StorageQuotaExceededError(
+                "Not enough storage left for this file.",
+                limit_bytes=decision.limit_bytes,
+                used_bytes=decision.used_bytes,
+                available_bytes=decision.available_bytes,
+                file_size=decision.file_size,
+            )
+        return max_size
+
     async def complete_upload(self, user_id: int, session: UploadSession) -> str:
         """
-        Finalize a verified upload: enforce the tier size limit, validate the
-        target folder, and persist the file record. Returns the new file id.
+        Finalize a verified upload: enforce the per-file cap and the account
+        storage quota, validate the target folder, and persist the file record.
+        Returns the new file id.
         """
         stats = await self._storage.stat_object(session.object_key) or {}
+        # The size is MEASURED here, not taken from the session. This is what
+        # makes the quota enforcement authoritative: the bytes now exist, and
+        # whatever the client declared at session creation is irrelevant.
         size = int(stats.get("size", 0))
 
         tier = await self._subscriptions.get_tier_for_user(user_id)
         max_size = self._size_limits[tier]
         if size > max_size:
+            # The object is already in the bucket, so a rejected upload must be
+            # removed here or every failed attempt leaks a full copy.
+            await self._storage.remove_object(session.object_key)
             raise FileSizeLimitExceededError(
-                f"File exceeds the maximum size for your tier ({max_size // (1024 * 1024)} MB)."
+                f"File exceeds the maximum size for your tier ({max_size // (1024 * 1024)} MB).",
+                max_file_size_bytes=max_size,
+                file_size=size,
             )
 
         # Reject extension-spoofed uploads (e.g. an executable named ".pdf")
@@ -380,7 +457,14 @@ class FileService:
             )
 
         if session.folder_id is not None:
-            await self.get_folder(user_id, session.folder_id)
+            try:
+                await self.get_folder(user_id, session.folder_id)
+            except FolderNotFoundError:
+                # Same no-orphan rule as the other rejections: the object is
+                # already in the bucket and, without a row referencing it, the
+                # cleanup worker would never find it again.
+                await self._storage.remove_object(session.object_key)
+                raise
 
         file_name = session.file_name or Path(session.object_key).name
         # Prefer the extension the client declared at upload time; fall back to
@@ -391,9 +475,40 @@ class FileService:
 
         # Idempotency: verifying the same upload session twice (double click or
         # client retry) must not create a second row for the same object key.
+        # This MUST come before the quota check: on a retry the first commit
+        # already counted these bytes, so charging them again would reject a
+        # perfectly valid repeat of a successful upload.
         existing = await self._files.find_by_key(user_id, session.object_key)
         if existing is not None:
             return existing.id
+
+        # Authoritative quota enforcement.
+        #
+        # The row lock on the user is what makes it correct under concurrency:
+        # without it two finalizes could both read the same pre-insert usage,
+        # both conclude they fit, and both commit — leaving the account over
+        # quota with no error anywhere. The lock is held until ``save`` commits
+        # (same session/transaction), so the second finalize re-reads the usage
+        # *after* the first one landed. SQLite (used by the test suite) ignores
+        # FOR UPDATE and serialises writes anyway, so behaviour is identical
+        # there; PostgreSQL — production — gets real serialisation.
+        await self._files.lock_user_for_update(user_id)
+        used_bytes = await self._files.get_user_storage_used(user_id)
+        decision = evaluate_storage_quota(
+            limit_bytes=TierPolicy.for_tier(tier).storage_quota_bytes,
+            used_bytes=used_bytes,
+            file_size=size,
+        )
+        if not decision.allowed:
+            # Same reasoning as the cap rejection: no orphan objects.
+            await self._storage.remove_object(session.object_key)
+            raise StorageQuotaExceededError(
+                "Not enough storage left for this file.",
+                limit_bytes=decision.limit_bytes,
+                used_bytes=decision.used_bytes,
+                available_bytes=decision.available_bytes,
+                file_size=decision.file_size,
+            )
 
         return await self._files.save(
             user_id=user_id,

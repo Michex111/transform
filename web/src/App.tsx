@@ -26,6 +26,12 @@ const RegisterPage = lazy(() =>
 const VerifyEmailPage = lazy(() =>
   import("@/pages/public/VerifyEmailPage").then((m) => ({ default: m.VerifyEmailPage })),
 );
+const ForgotPasswordPage = lazy(() =>
+  import("@/pages/public/ForgotPasswordPage").then((m) => ({ default: m.ForgotPasswordPage })),
+);
+const ResetPasswordPage = lazy(() =>
+  import("@/pages/public/ResetPasswordPage").then((m) => ({ default: m.ResetPasswordPage })),
+);
 // Single dynamic public route: `/{ext}-converter` and `/{from}-to-{to}`.
 // Static segments outrank it, so `/pricing`, `/convert`, `/login`, … still win.
 const FormatRoutePage = lazy(() =>
@@ -94,8 +100,20 @@ export default function App() {
         link silently did nothing. The page is idempotent and reveals nothing
         the holder of the link does not already have, so there is nothing to
         gate.
+
+        The password-reset pair below has the same constraint for the same
+        reason, and it matters just as much: `/reset-password` is reached from
+        the link in the reset email, so inside `PublicOnlyRoute` a signed-in
+        browser (a shared machine, a stale tab, the webmail client that opened
+        the link) would be sent to the dashboard and the emailed link would
+        silently never consume its token. `/forgot-password` is the destination
+        that page's "request a new link" recovery action points at, so gating it
+        would strand exactly the user who just needed it — and neither page
+        reveals anything the holder of the link does not already have.
       */}
       <Route path="/verify-email" element={<VerifyEmailPage />} />
+      <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+      <Route path="/reset-password" element={<ResetPasswordPage />} />
 
       {/* Authenticated app routes */}
       <Route element={<ProtectedRoute />}>
