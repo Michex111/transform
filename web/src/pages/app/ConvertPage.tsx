@@ -7,11 +7,13 @@ import {
   CircleNotch,
   CloudArrowUp,
   DownloadSimple,
+  Eye,
   FolderSimplePlus,
   UploadSimple,
   Swap,
   ArrowCounterClockwise,
 } from "@phosphor-icons/react";
+import { jobOutputFilename } from "@/api/client";
 import { useAuth } from "@/auth/AuthContext";
 import { useToast } from "@/auth/ToastContext";
 import { useJobs, type UiJob } from "@/jobs/JobsContext";
@@ -19,11 +21,13 @@ import { activeJobs, jobProgress, recentFinishedJobs, showsProgressBar } from "@
 import { cacheFileForJob } from "@/lib/fileCache";
 import { friendlyErrorMessage } from "@/lib/errorMessages";
 import { fileNameExtension } from "@/lib/format";
+import { isPreviewable } from "@/lib/filePreview";
 import { canSaveToDrive } from "@/lib/saveToDrive";
 import { useRetryConversion } from "@/lib/useRetryConversion";
 import { useSaveToDrive } from "@/lib/useSaveToDrive";
 import { useConversionMap } from "@/lib/useConversionMap";
 import { useNarrowViewport } from "@/lib/useMediaQuery";
+import { FilePreviewModal } from "@/components/FilePreviewModal";
 import { FolderPickerModal } from "@/components/FolderPickerModal";
 import { ErrorButton } from "@/components/ErrorButton";
 import { FormatPicker } from "@/components/FormatPicker";
@@ -121,6 +125,8 @@ export function ConvertPage() {
   const { savingId, saveToDefaultFolder, saveToFolder } = useSaveToDrive();
   // The completed row whose destination dialog is open, if any.
   const [pickJob, setPickJob] = useState<UiJob | null>(null);
+  // The completed row whose output is open in the preview modal, if any.
+  const [previewJob, setPreviewJob] = useState<UiJob | null>(null);
 
   // Load server history on mount so the inline queue isn't empty on a fresh
   // session.
@@ -479,7 +485,35 @@ export function ConvertPage() {
                     const name = job.fileName ?? job.input_file;
                     const failed = job.status === "FAILED";
 
+                    // Whether this job's *output* can be rendered in-page. Read
+                    // from `jobOutputFilename`, never `target_format`: a
+                    // multi-page `pdf -> jpg` conversion emits a `.zip`, so a
+                    // jpg target would promise a preview of bytes that are not an
+                    // image. A row whose output key has not arrived yet falls back
+                    // to the target format here, and the modal's own authoritative
+                    // check then shows its "Preview isn't available" copy rather
+                    // than a broken image.
+                    const previewable = isPreviewable(jobOutputFilename(job));
+
                     // ---- Completed: get the file, or file it away ----
+                    const previewButton = (
+                      /* Deliberately not tied to `busy`, unlike Download and Save
+                          to Drive: those share the single-value
+                          `savingId`/`downloadingId` state and would otherwise
+                          fight over one spinner, while the preview's loading
+                          state lives in the modal this row does not own, so it
+                          cannot conflict with a transfer. */
+                      <button
+                        type="button"
+                        onClick={() => setPreviewJob(job)}
+                        aria-label={`Preview ${name}`}
+                        title="Preview"
+                        className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-outline-strong text-muted transition-colors hover:bg-surface-variant hover:text-primary pointer-coarse:min-h-11 pointer-coarse:min-w-11"
+                      >
+                        <Eye size={16} aria-hidden />
+                      </button>
+                    );
+
                     const downloadButton = (
                       /* The finish-line action, so it carries the row's only
                           emphasis: getting the file is what a completed row is
@@ -575,20 +609,39 @@ export function ConvertPage() {
                         // the action most completions want and still fits.
                         <>
                           {downloadButton}
+                          {/* The trigger stays ENABLED while a transfer runs and
+                              the transfer items carry the disable instead, so
+                              Preview keeps the same reachability it has on
+                              desktop. Gating the whole menu on `busy` made the
+                              preview unreachable on a phone for the few seconds
+                              of any save or download — a layout difference the
+                              desktop button does not have, since it is
+                              deliberately not tied to `busy` either. */}
                           <RowMenu
                             label={`More options for ${name}`}
-                            disabled={busy}
                             items={[
+                              ...(previewable
+                                ? [
+                                    {
+                                      key: "preview",
+                                      label: "Preview",
+                                      icon: <Eye size={15} aria-hidden />,
+                                      onSelect: () => setPreviewJob(job),
+                                    },
+                                  ]
+                                : []),
                               {
                                 key: "save",
                                 label: saving ? "Saving…" : "Save to Drive",
                                 icon: <CloudArrowUp size={15} aria-hidden />,
+                                disabled: busy,
                                 onSelect: () => void saveToDefaultFolder(job),
                               },
                               {
                                 key: "choose",
                                 label: "Choose where to save",
                                 icon: <FolderSimplePlus size={15} aria-hidden />,
+                                disabled: busy,
                                 onSelect: () => setPickJob(job),
                               },
                             ]}
@@ -596,6 +649,7 @@ export function ConvertPage() {
                         </>
                       ) : (
                         <>
+                          {previewable && previewButton}
                           {downloadButton}
                           {saveToDriveButton}
                           {chooseFolderButton}
@@ -643,6 +697,25 @@ export function ConvertPage() {
           if (!pickJob) return;
           await saveToFolder(pickJob, folderId, { useAsDefault });
         }}
+      />
+
+      {/* In-page preview of a completed conversion's output. The name is the
+          output's, never the row's `target_format`, so a `.zip` container is
+          classified as the container it is and refused (see
+          `jobOutputFilename`). */}
+      <FilePreviewModal
+        open={previewJob !== null}
+        onClose={() => setPreviewJob(null)}
+        target={
+          previewJob
+            ? {
+                kind: "job",
+                id: previewJob.job_id,
+                file_name: jobOutputFilename(previewJob),
+                mime_type: null,
+              }
+            : null
+        }
       />
     </div>
   );
