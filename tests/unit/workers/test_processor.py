@@ -251,6 +251,9 @@ def test_process_job_reports_file_sizes_in_the_terminal_event(
     assert completed[0]["output_size_bytes"] == len(b"a much longer output than the input")
     # The two are genuinely different, so a swap between them would fail here.
     assert completed[0]["input_size_bytes"] != completed[0]["output_size_bytes"]
+    # The terminal event also names the stored object, so the client can build
+    # the download without waiting for a history refresh.
+    assert completed[0]["output_file"] == "output/user/guest/job/job-1/input.md"
 
 
 def test_process_job_uploads_a_container_under_its_declared_extension(
@@ -292,6 +295,50 @@ def test_process_job_uploads_a_container_under_its_declared_extension(
     # The hook receives the downloaded plaintext input, not the object key.
     assert len(seen_input_paths) == 1
     assert Path(seen_input_paths[0]).name == "input.txt"
+
+
+def test_process_job_reports_the_stored_object_key_on_the_terminal_event(
+    conversion_job,
+    fake_storage_port,
+    fake_queue_port,
+    fake_event_publisher,
+    fake_converter_registry,
+) -> None:
+    """The COMPLETED event must carry the object key of what was really
+    stored. A multi-page pdf -> jpg emits a .zip, so a client that only sees
+    the target format names the download .jpg and the upload magic-byte check
+    then rejects it."""
+
+    @fake_converter_registry.register(conversion_job.conversion)
+    def converter(input_path: str, output_path: str) -> None:
+        Path(output_path).write_bytes(b"PK\x03\x04zip of pages")
+
+    converter.output_extension = lambda input_path: "zip"  # type: ignore[attr-defined]
+
+    context = _build_context(
+        fake_storage_port,
+        fake_queue_port,
+        fake_event_publisher,
+        fake_converter_registry,
+    )
+
+    conversion_job.pending_processing()
+    asyncio.run(process_job(context, conversion_job))
+
+    expected_key = "output/user/guest/job/job-1/input.zip"
+    completed = [
+        e for e in fake_event_publisher.published_events if e.get("status") == "COMPLETED"
+    ]
+    assert len(completed) == 1
+    assert completed[0]["output_file"] == expected_key
+    assert fake_storage_port.objects[expected_key] == b"PK\x03\x04zip of pages"
+    # The progress-only events must not advertise an output key (0/None means
+    # "not produced yet"), or a client could try to download before it exists.
+    progress_only = [
+        e for e in fake_event_publisher.published_events if e.get("status") != "COMPLETED"
+    ]
+    assert progress_only
+    assert all(e.get("output_file") is None for e in progress_only)
 
 
 def test_process_job_raises_and_marks_failed_when_converter_missing(

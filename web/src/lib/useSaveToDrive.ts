@@ -9,7 +9,6 @@
 // is exactly the part that would rot first.
 
 import { useCallback, useMemo, useState } from "react";
-import { jobOutputFilename } from "@/api/client";
 import { useAuth } from "@/auth/AuthContext";
 import { useToast } from "@/auth/ToastContext";
 import { useUploads } from "@/uploads/uploadsContext";
@@ -59,18 +58,21 @@ export function useSaveToDrive(): SaveToDrive {
    * manager, which owns the upload session, the quota checks, the transfer and
    * the dock — the browser cannot write into a library folder by itself.
    *
-   * `jobOutputFilename` is reused rather than re-derived: it prefers the
-   * extension the worker actually produced, so a multi-page `pdf → png` job is
-   * saved as the `.zip` container it really is instead of a corrupt `.png`.
+   * The name the file is stored under comes from the authoritative job record
+   * returned alongside the bytes rather than from the client-side row: a
+   * converter may emit a container rather than the target format (a multi-page
+   * `pdf → png` job produces a `.zip` of page images), and a row that has not
+   * received the terminal SSE event yet would name those `.zip` bytes `.png` —
+   * which the upload's magic-byte validator correctly rejects.
    */
   const queue = useCallback(
     async (job: UiJob, folderId: string | null): Promise<boolean> => {
       setSavingId(job.job_id);
       try {
-        const blob = await client.fetchConversionOutputBlob(job.job_id);
+        const { blob, filename } = await client.fetchConversionOutput(job.job_id);
         addFiles(
           [
-            new File([blob], jobOutputFilename(job), {
+            new File([blob], filename, {
               type: blob.type || "application/octet-stream",
             }),
           ],
