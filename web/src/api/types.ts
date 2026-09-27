@@ -699,4 +699,8 @@ export interface JobProgressEvent {
   credits_used?: number
   input_size_bytes?: number
   output_size_bytes?: number
+  // The terminal (COMPLETED) event carries the stored object key, because a
+  // converter may emit a container rather than the target format
+  // (`pdf -> jpg` on a multi-page PDF emits a `.zip`).
+  output_file?: string | null
 }

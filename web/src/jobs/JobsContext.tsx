@@ -10,6 +10,7 @@ import {
 import { api } from "@/api/client";
 import { useAuth } from "@/auth/AuthContext";
 import { clearCachedFiles, dropCachedFile, releaseCachedFile } from "@/lib/fileCache";
+import { clearCachedPreviews } from "@/lib/previewCache";
 import {
   FINISHED_STATUSES,
   LEGACY_JOBS_STORAGE_KEY,
@@ -161,6 +162,7 @@ function JobsStore({ userId, children }: { userId: number | null; children: Reac
                     compute_duration_ms: evt.compute_duration_ms ?? j.compute_duration_ms,
                     input_size_bytes: evt.input_size_bytes ?? j.input_size_bytes,
                     output_size_bytes: evt.output_size_bytes ?? j.output_size_bytes,
+                    output_file: evt.output_file ?? j.output_file,
                     // Stamp when this session saw the job reach a terminal
                     // state, so the Convert page can order its "recently
                     // finished" list by *finish* time rather than start time.
@@ -178,6 +180,24 @@ function JobsStore({ userId, children }: { userId: number | null; children: Reac
                 : j,
             ),
           );
+
+          if (FINISHED_STATUSES.has(evt.status)) {
+            // A terminal event changed the server's history, and a successful
+            // one also changed the credit balance and the storage totals. Two
+            // things follow.
+            //
+            // 1. Drop cached reads. Without this the refetch below would be
+            //    answered from the cache with the PRE-completion numbers — the
+            //    cache would faithfully undo the very update being announced.
+            // 2. Announce it. `DashboardPage` and `BillingPage` have listened for
+            //    `credits:updated` since they were written, but nothing ever
+            //    dispatched it, so a balance on screen stayed at its
+            //    pre-conversion value until the page was remounted. Dispatching
+            //    on a FAILED event too is deliberate: the stats those listeners
+            //    also refresh (total conversions, success rate) changed as well.
+            api.invalidateCache();
+            window.dispatchEvent(new CustomEvent('credits:updated'));
+          }
         },
         onError: () => {
           // A transport failure (dropped stream, proxy hiccup, redeploy) is not
@@ -225,6 +245,9 @@ function JobsStore({ userId, children }: { userId: number | null; children: Reac
       for (const cleanup of openSubscriptions.values()) cleanup();
       openSubscriptions.clear();
       clearCachedFiles();
+      // Preview bytes go with them: they are whole documents, and one account's
+      // file must never be readable from another's session.
+      clearCachedPreviews();
     };
   }, []);
 

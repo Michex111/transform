@@ -1,4 +1,5 @@
 import { downloadFromUrl, isTrustedDownloadUrl, saveBlob } from '@/lib/download'
+import { createRequestCache } from '@/lib/requestCache'
 import { encryptFileToFencr, fencrDataKeyToBase64 } from '@/lib/fencr'
 import { joinValidationMessages, validationErrorsFrom } from '@/lib/apiErrors'
 import {
@@ -241,7 +242,43 @@ async function readErrorBody(
   return { detail: response.statusText || fallback }
 }
 
+/** A request, with an optional cache window for GETs. */
+interface RequestOptions extends RequestInit {
+  /**
+   * How long a GET response may be reused, in milliseconds. Omit to leave that
+   * call uncached. `0` coalesces concurrent identical requests but retains
+   * nothing.
+   */
+  cacheTtlMs?: number
+}
+
 class ApiClient {
+  /**
+   * Short-lived cache for repeatable GETs.
+   *
+   * WHY: every SPA navigation used to refetch the same payloads. Measured on the
+   * running app, a single Dashboard load issued six `/user/dashboard` requests
+   * (three independent callers) and four return visits to the Dashboard issued
+   * four identical ones.
+   *
+   * ACCURACY: an entry lives only for its TTL, and **any successful non-GET
+   * clears the whole cache** (see `request`), so a mutation can never be
+   * followed by a stale read. The cache is also dropped on a token change, so
+   * one account can never read another's data.
+   */
+  private readonly cache = createRequestCache()
+
+  /**
+   * Forget every cached read.
+   *
+   * Called by the job stream when a conversion finishes (the balance and the
+   * history both changed) so the listeners that refresh on `credits:updated`
+   * cannot be served the pre-completion value they were just told to replace.
+   */
+  invalidateCache(): void {
+    this.cache.invalidateAll()
+  }
+
   private get token() {
     return localStorage.getItem(TOKEN_KEY)
   }
@@ -253,11 +290,14 @@ class ApiClient {
   setTokens(auth: TokenResponse) {
     localStorage.setItem(TOKEN_KEY, auth.access_token)
     if (auth.refresh_token) localStorage.setItem(REFRESH_KEY, auth.refresh_token)
+    // The identity may have changed, so anything cached belongs to someone else.
+    this.cache.invalidateAll()
   }
 
   clearTokens() {
     localStorage.removeItem(TOKEN_KEY)
     localStorage.removeItem(REFRESH_KEY)
+    this.cache.invalidateAll()
   }
 
   isAuthenticated() {
@@ -282,7 +322,45 @@ class ApiClient {
     }
   }
 
-  private async request<T>(path: string, options: RequestInit = {}): Promise<T> {
+  /**
+   * A request with an optional cache window.
+   *
+   * `cacheTtlMs` opts a **GET** into the read cache: concurrent callers for the
+   * same path share one round trip, and the response is reused for the TTL.
+   * Omit it and the request behaves exactly as before (no dedupe, no reuse),
+   * which keeps the change opt-in and reviewable per endpoint.
+   *
+   * `0` means "coalesce only": callers on one page load share a single request
+   * but nothing is retained. That is the setting for identity-critical reads
+   * such as `/users/me`, where holding a value would be a correctness risk
+   * rather than a staleness one.
+   */
+  private async request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+    const { cacheTtlMs, ...init } = options
+    const method = (init.method ?? 'GET').toUpperCase()
+
+    if (method === 'GET' && cacheTtlMs !== undefined) {
+      return this.cache.run(path, cacheTtlMs, () => this.send<T>(path, init))
+    }
+
+    const result = await this.send<T>(path, init)
+    if (method !== 'GET') {
+      // Any successful write changes server state, so nothing we remembered
+      // about it can still be trusted. Clearing the whole cache rather than
+      // tracking which reads a mutation affects is the choice that cannot be
+      // wrong: the cost is a refetch, which is what happened before anyway.
+      this.cache.invalidateAll()
+    }
+    return result
+  }
+
+  /**
+   * Perform one HTTP request: auth header, one silent refresh on 401, and error
+   * mapping. Kept separate from `request` so the cache wrapper measures only
+   * the network work, and so a cached read is indistinguishable from a live one
+   * to every caller.
+   */
+  private async send<T>(path: string, options: RequestInit = {}): Promise<T> {
     const headers: Record<string, string> = {
       ...((options.headers as Record<string, string>) ?? {}),
     }
@@ -313,7 +391,6 @@ class ApiClient {
       this.clearTokens()
       window.dispatchEvent(new CustomEvent('auth:unauthorized'))
     }
-
     if (!res.ok) {
       const { detail, code, details, validationErrors } = await readErrorBody(res, res.statusText)
       throw new ApiError(detail, res.status, code, details, validationErrors)
@@ -401,7 +478,10 @@ class ApiClient {
     return data
   }
 
-  me = () => this.request<unknown>('/users/me').then(normalizeUser)
+  // `0`: coalesce the concurrent `/users/me` calls a single page load makes,
+  // but never retain the result. This is the identity every guard reads, so a
+  // remembered value is a correctness risk rather than a staleness one.
+  me = () => this.request<unknown>('/users/me', { cacheTtlMs: 0 }).then(normalizeUser)
 
   /**
    * Update the editable profile fields.
@@ -487,7 +567,17 @@ class ApiClient {
     this.request<void>('/users/me', { method: 'DELETE', body: JSON.stringify(body) })
 
   // ---- Dashboard ----
-  dashboard = () => this.request<unknown>('/v1/user/dashboard').then(normalizeDashboard)
+  /**
+   * Storage, credits and conversion stats.
+   *
+   * Cached briefly because three independent callers want it on one page load
+   * (`DashboardPage`'s mount effect, its `credits:updated` listener, and
+   * `UploadsContext.refreshLimits`) and every return visit to the Dashboard
+   * fetched it again. 15s is short enough that a balance is never meaningfully
+   * stale, and a mutation or a finished conversion clears it outright.
+   */
+  dashboard = () =>
+    this.request<unknown>('/v1/user/dashboard', { cacheTtlMs: 15_000 }).then(normalizeDashboard)
   profile = () => this.request<unknown>('/v1/user/profile').then(normalizeUser)
 
   // ---- Upload (presigned URL flow) ----
@@ -596,10 +686,19 @@ class ApiClient {
     }).then(normalizeConversionJob)
   getJob = (id: string) =>
     this.request<unknown>(`/conversions/jobs/${id}`).then(normalizeConversionJob)
-  /** Paginated conversion history for the current user, optionally time-ranged. */
+  /**
+   * Paginated conversion history for the current user, optionally time-ranged.
+   *
+   * Cached briefly because the Jobs provider AND every page's mount effect ask
+   * for it, so navigating between Queue, History and Convert re-fetched an
+   * identical list each time. Live progress does not depend on this: the job
+   * rows come from the store and are updated by the SSE stream, and a finished
+   * conversion clears the cache outright.
+   */
   conversionHistory = (page = 1, pageSize = 20, range?: string) =>
     this.request<unknown>(
       `/conversions/history?page=${page}&page_size=${pageSize}${range ? `&range=${encodeURIComponent(range)}` : ''}`,
+      { cacheTtlMs: 10_000 },
     ).then(normalizeConversionHistory)
   /** Delete a single history record owned by the current user. */
   deleteHistoryJob = (id: string) =>
@@ -1026,7 +1125,8 @@ class ApiClient {
   }
 
   /**
-   * Fetch a completed conversion's output bytes as a Blob.
+   * Fetch a completed conversion's output bytes, together with the name those
+   * bytes must be stored under.
    *
    * A job is NOT a library file: its ids live in a different space, so
    * `fetchLibraryFileBlob(jobId)` answers `404 File not found` (and the two id
@@ -1043,15 +1143,23 @@ class ApiClient {
    *
    * Same allowlist, same fallback and the same silent 401 refresh as
    * `fetchLibraryFileBlob` — one auth path, not a second one.
+   *
+   * The filename comes from *here*, alongside the bytes, because the name a
+   * file is stored under must match its content: a converter may emit a
+   * container rather than the target format (a multi-page `pdf -> jpg` job
+   * produces a `.zip`), so the authoritative job record decides the name — a
+   * client-side row may not have received the terminal SSE event yet and would
+   * name those `.zip` bytes `.jpg`.
    */
-  async fetchConversionOutputBlob(jobId: string): Promise<Blob> {
+  async fetchConversionOutput(jobId: string): Promise<{ blob: Blob; filename: string }> {
     const job = await this.getJob(jobId)
     const url = job.download_url ?? this.getJobDownloadUrl(jobId)
+    const filename = jobOutputFilename(job)
 
     if (isTrustedDownloadUrl(url)) {
       const res = await fetch(url)
       if (!res.ok) throw new Error(`Could not read that file (${res.status})`)
-      return res.blob()
+      return { blob: await res.blob(), filename }
     }
 
     // A relative streaming path is used as-is; an absolute URL we refuse to
@@ -1059,14 +1167,29 @@ class ApiClient {
     const path = ABSOLUTE_URL.test(url) ? this.getJobDownloadUrl(jobId) : url
     const res = await this.authedFetch(resolveServerPath(path))
     if (!res.ok) throw new Error(`Could not read that file (${res.status})`)
-    return res.blob()
+    return { blob: await res.blob(), filename }
+  }
+
+  /**
+   * The output bytes of a completed conversion.
+   *
+   * Thin wrapper over `fetchConversionOutput`, which owns the URL allowlist,
+   * the fallback and the silent 401 refresh; callers that also need the
+   * authoritative filename should call that method directly.
+   */
+  async fetchConversionOutputBlob(jobId: string): Promise<Blob> {
+    const { blob } = await this.fetchConversionOutput(jobId)
+    return blob
   }
 
   // ---- Files ----
-  listFolders = () => this.request<unknown>('/v1/files/folders').then(normalizeFolderList)
+  listFolders = () =>
+    this.request<unknown>('/v1/files/folders', { cacheTtlMs: 10_000 }).then(normalizeFolderList)
   /** Get the subfolders + files directly inside a folder. */
   getFolderContents = (folderId: string) =>
-    this.request<unknown>(`/v1/files/folders/${folderId}`).then(normalizeFolderContents)
+    this.request<unknown>(`/v1/files/folders/${folderId}`, { cacheTtlMs: 10_000 }).then(
+      normalizeFolderContents,
+    )
   createFolder = (name: string, parentId?: string | null) =>
     this.request<unknown>('/v1/files/folders', {
       method: 'POST',
@@ -1078,8 +1201,11 @@ class ApiClient {
       body: JSON.stringify({ name }),
     }).then(normalizeFolder)
   deleteFolder = (id: string) => this.request<void>(`/v1/files/folders/${id}`, { method: 'DELETE' })
-  listFiles = (folderId?: string) =>
-    this.request<unknown>(`/v1/files${folderId ? `?folder_id=${encodeURIComponent(folderId)}` : ''}`).then(
+  listFiles = (folderId?: string | null) =>
+    this.request<unknown>(
+      `/v1/files${folderId ? `?folder_id=${encodeURIComponent(folderId)}` : ''}`,
+      { cacheTtlMs: 10_000 },
+    ).then(
       normalizeFileList,
     )
   getFile = (id: string) => this.request<unknown>(`/v1/files/${id}`).then(normalizeFile)
@@ -1123,19 +1249,24 @@ class ApiClient {
     }).then(normalizeFolder)
 
   // ---- Credits ----
-  creditBalance = () => this.request<unknown>('/v1/credits/balance').then(normalizeCreditBalance)
-  creditHistory = () => this.request<unknown>('/v1/credits/history').then(normalizeCreditHistory)
+  creditBalance = () =>
+    this.request<unknown>('/v1/credits/balance', { cacheTtlMs: 30_000 }).then(normalizeCreditBalance)
+  creditHistory = () =>
+    this.request<unknown>('/v1/credits/history', { cacheTtlMs: 30_000 }).then(normalizeCreditHistory)
   purchaseCredits = (amount: number) =>
     this.request<unknown>('/v1/credits/purchase', {
       method: 'POST',
       body: JSON.stringify({ amount } satisfies CreditPurchaseRequest),
     }).then(normalizeCheckout)
-  creditPricing = () => this.request<unknown>('/v1/credits/pricing').then(normalizeCreditPricing)
+  creditPricing = () =>
+    this.request<unknown>('/v1/credits/pricing', { cacheTtlMs: 300_000 }).then(normalizeCreditPricing)
   // ---- Subscription ----
   subscriptionPlans = () =>
     this.request<unknown>('/v1/subscription/plans').then(normalizeSubscriptionPlans)
   subscriptionStatus = () =>
-    this.request<unknown>('/v1/subscription/status').then(normalizeSubscriptionStatus)
+    this.request<unknown>('/v1/subscription/status', { cacheTtlMs: 30_000 }).then(
+      normalizeSubscriptionStatus,
+    )
   /** Open a Stripe Customer Portal session for self-service billing management. */
   createPortalSession = () =>
     this.request<unknown>('/v1/subscription/portal', { method: 'POST' }).then(normalizePortal)
@@ -1154,7 +1285,8 @@ class ApiClient {
     this.request<unknown>('/v1/api-keys', { method: 'POST', body: JSON.stringify(body) }).then(
       normalizeApiKeyCreate,
     )
-  listApiKeys = () => this.request<unknown>('/v1/api-keys').then(normalizeApiKeyList)
+  listApiKeys = () =>
+    this.request<unknown>('/v1/api-keys', { cacheTtlMs: 30_000 }).then(normalizeApiKeyList)
   deleteApiKey = (id: string) => this.request<void>(`/v1/api-keys/${id}`, { method: 'DELETE' })
 
   /**

@@ -42,6 +42,7 @@ async def stream_job_events(
     Event format:
         event: progress
         data: {"job_id": "...", "status": "PROCESSING", "progress": 50, "message": "converting file"}
+        A COMPLETED event additionally carries output_file, the stored object key.
     """
     # Ownership check: an authenticated user may only watch their own jobs.
     job = await repository.get_conversion_job(job_id)
@@ -71,6 +72,8 @@ async def stream_job_events(
                     payload["input_size_bytes"] = fields["input_size_bytes"]
                 if "output_size_bytes" in fields:
                     payload["output_size_bytes"] = fields["output_size_bytes"]
+                if fields.get("output_file"):
+                    payload["output_file"] = fields["output_file"]
                 if "credits_remaining" in fields:
                     payload["credits_remaining"] = fields["credits_remaining"]
 

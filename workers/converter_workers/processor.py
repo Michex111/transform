@@ -309,6 +309,9 @@ async def process_job(context: WorkerContext, job: ConversionJob) -> None:
             # terminal event would otherwise never learn them.
             input_size_bytes=persisted.input_size_bytes,
             output_size_bytes=persisted.output_size_bytes,
+            # Same for the stored object key, so a replayed terminal event is
+            # not less informative than a fresh one.
+            output_file=persisted.output_file,
         )
         return
 
@@ -438,6 +441,7 @@ async def process_job(context: WorkerContext, job: ConversionJob) -> None:
                 credits_used=credits_used,
                 input_size_bytes=input_size_bytes,
                 output_size_bytes=output_size_bytes,
+                output_file=output_dest,
             ).to_dict()
             if credits_remaining is not None:
                 completed_fields["credits_remaining"] = credits_remaining

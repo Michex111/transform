@@ -15,6 +15,11 @@ class EventContext:
     # terminal event carries a real value.
     input_size_bytes: int = 0
     output_size_bytes: int = 0
+    # Stored object key of the produced output, carried only on the terminal
+    # event: a converter may emit a container (e.g. a multi-page pdf -> jpg
+    # emits a .zip), and a client that cannot see the real key names the
+    # download after the target format, whose magic-byte check then rejects it.
+    output_file: str | None = None
 
     def downloading(self):
         self.status = JobStatus.PROCESSING
@@ -40,6 +45,7 @@ class EventContext:
         credits_used: int = 0,
         input_size_bytes: int = 0,
         output_size_bytes: int = 0,
+        output_file: str | None = None,
     ):
         self.status = JobStatus.COMPLETED
         self.progress = 100
@@ -48,6 +54,7 @@ class EventContext:
         self.credits_used = credits_used
         self.input_size_bytes = input_size_bytes
         self.output_size_bytes = output_size_bytes
+        self.output_file = output_file
         return self
 
     def failed(self, error_message: str):
