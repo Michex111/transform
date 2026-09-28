@@ -44,8 +44,7 @@ async def stream_job_events(
         data: {"job_id": "...", "status": "PROCESSING", "progress": 50, "message": "converting file"}
     """
     # Ownership check: an authenticated user may only watch their own jobs.
-    job = await repository.get_conversion_job(job_id)
-    assert_job_owner(job, current_user.id)
+    assert_job_owner(await repository.get_conversion_job(job_id), current_user.id)
 
     async def event_generator():
         try:

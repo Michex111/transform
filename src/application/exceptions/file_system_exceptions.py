@@ -1,5 +1,7 @@
 """Application-layer exceptions for the user file system."""
 
+from typing import Any
+
 
 class FileSystemError(Exception):
     """Base error for file-system operations. Carries the HTTP status code
@@ -7,7 +9,7 @@ class FileSystemError(Exception):
 
     status_code = 400
 
-    def http_detail(self) -> object:
+    def http_detail(self) -> str | dict[str, Any]:
         """The ``detail`` payload the router should put in the HTTPException.
 
         Defaults to the plain message string, which is the historical shape of
@@ -61,7 +63,7 @@ class FileSizeLimitExceededError(FileSystemError):
         self.max_file_size_bytes = max_file_size_bytes
         self.file_size = file_size
 
-    def http_detail(self) -> object:
+    def http_detail(self) -> str | dict[str, Any]:
         if self.max_file_size_bytes is None:
             return self.message
         return {
@@ -100,7 +102,7 @@ class StorageQuotaExceededError(FileSystemError):
         self.available_bytes = available_bytes
         self.file_size = file_size
 
-    def http_detail(self) -> object:
+    def http_detail(self) -> dict[str, Any]:
         return {
             "code": self.code,
             "message": self.message,

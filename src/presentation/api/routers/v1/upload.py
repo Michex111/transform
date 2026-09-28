@@ -165,7 +165,7 @@ async def verify_upload_session(
 			# The job must belong to the caller: without this check any
 			# authenticated user could re-point and re-enqueue another user's
 			# (or an ownerless guest) job via the job_id query param.
-			assert_job_owner(job, current_user.id)
+			job = assert_job_owner(job, current_user.id)
 			# Point the job at the object key that was actually uploaded so the
 			# worker reads the correct file.
 			job.object_key = session.object_key

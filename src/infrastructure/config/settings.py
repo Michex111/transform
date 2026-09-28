@@ -14,9 +14,9 @@ logger = logging.getLogger(__name__)
 _SUPPORTED_ENVIRONMENTS = frozenset({"development", "production"})
 
 # The single authoritative ceiling for a single authenticated upload. Every
-# per-tier cap defaults to this (and ``validate()`` refuses to start if a tier
-# is configured above it), so "what can the store actually accept" is expressed
-# in exactly one place rather than repeated per tier.
+# per-tier cap defaults to this (and ``validate_settings()`` refuses to start
+# if a tier is configured above it), so "what can the store actually accept" is
+# expressed in exactly one place rather than repeated per tier.
 #
 # 5 GiB is also the *single-PUT* ceiling for Backblaze B2 and AWS S3: a
 # presigned PUT above it is rejected by the provider, and a real 5 GiB transfer
@@ -26,8 +26,8 @@ _SUPPORTED_ENVIRONMENTS = frozenset({"development", "production"})
 _MAX_UPLOAD_FILE_SIZE_CEILING: int = 5 * 1024 * 1024 * 1024  # 5 GiB
 
 # S3/S3-compatible providers cap a multipart upload at 10 000 parts; exceeding
-# it fails only at the END of a multi-gigabyte transfer. ``validate()`` asserts
-# the configured part size keeps the ceiling under the limit.
+# it fails only at the END of a multi-gigabyte transfer. ``validate_settings()``
+# asserts the configured part size keeps the ceiling under the limit.
 _S3_MAX_MULTIPART_PARTS: int = 10_000
 
 
@@ -120,9 +120,9 @@ class Settings(BaseSettings):
     #
     # Accepted values: auto | console | smtp | resend. A value that names a
     # transport whose credentials are missing is a configuration error and is
-    # rejected in ``validate()`` rather than silently degrading — an explicit
-    # choice must not be quietly ignored. ``auto`` is never rejected, because
-    # its whole purpose is to resolve to whatever is available.
+    # rejected in ``validate_settings()`` rather than silently degrading — an
+    # explicit choice must not be quietly ignored. ``auto`` is never rejected,
+    # because its whole purpose is to resolve to whatever is available.
     EMAIL_BACKEND: str = "auto"
 
     # Envelope sender. Must be a domain you control and have verified with your
@@ -485,8 +485,13 @@ class Settings(BaseSettings):
                 "window issues multipart URLs that are dead on arrival."
             )
 
-    def validate(self) -> None:
-        """Fail fast at startup when the configuration is unsafe for production."""
+    def validate_settings(self) -> None:
+        """Fail fast at startup when the configuration is unsafe for production.
+
+        Named ``validate_settings`` and NOT ``validate``: ``BaseSettings`` has a
+        (deprecated) ``validate`` classmethod, so a same-named instance method
+        silently shadows a pydantic API.
+        """
         environment = self.ENVIRONMENT.strip().lower()
 
         # Email transport. An explicit choice is honoured or rejected — never
@@ -673,5 +678,5 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     settings = Settings()  # type: ignore[call-arg]
-    settings.validate()
+    settings.validate_settings()
     return settings

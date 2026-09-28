@@ -80,14 +80,21 @@ def _run(engine: sa.Engine, fn) -> None:
 
 def _columns(engine: sa.Engine) -> set[str]:
     with engine.connect() as connection:
-        return {col["name"] for col in sa.inspect(connection).get_columns("users")}
+        # Reflection types an attribute name as optional; a real row always has
+        # one, so drop the impossible ``None`` rather than widening the result.
+        return {
+            name
+            for col in sa.inspect(connection).get_columns("users")
+            if (name := col["name"]) is not None
+        }
 
 
 def _indexes(engine: sa.Engine) -> dict[str, bool]:
     with engine.connect() as connection:
         return {
-            idx["name"]: bool(idx.get("unique"))
+            name: idx.get("unique")
             for idx in sa.inspect(connection).get_indexes("users")
+            if (name := idx["name"]) is not None
         }
 
 

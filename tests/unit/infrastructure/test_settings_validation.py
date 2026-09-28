@@ -28,19 +28,19 @@ def _settings(**overrides) -> Settings:
 
 
 def test_production_with_secure_config_validates() -> None:
-    _settings().validate()  # should not raise
+    _settings().validate_settings()  # should not raise
 
 
 def test_production_rejects_weak_secret_key() -> None:
     with pytest.raises(RuntimeError, match="SECRET_KEY"):
-        _settings(SECRET_KEY="change-me-to-a-random-secret-key").validate()
+        _settings(SECRET_KEY="change-me-to-a-random-secret-key").validate_settings()
     with pytest.raises(RuntimeError, match="SECRET_KEY"):
-        _settings(SECRET_KEY="short").validate()
+        _settings(SECRET_KEY="short").validate_settings()
 
 
 def test_production_rejects_wildcard_cors() -> None:
     with pytest.raises(RuntimeError, match="ALLOWED_ORIGINS"):
-        _settings(ALLOWED_ORIGINS=["*"]).validate()
+        _settings(ALLOWED_ORIGINS=["*"]).validate_settings()
 
 
 def test_frontend_dist_dir_defaults_to_none() -> None:
@@ -70,18 +70,18 @@ def test_env_example_allows_the_separately_hosted_spa_origin(key: str) -> None:
 
 def test_production_rejects_plaintext_object_storage() -> None:
     with pytest.raises(RuntimeError, match="BACKBLAZE_USE_SSL"):
-        _settings(BACKBLAZE_USE_SSL=False).validate()
+        _settings(BACKBLAZE_USE_SSL=False).validate_settings()
 
 
 def test_development_allows_weak_secret() -> None:
     dev = _settings(ENVIRONMENT="development", SECRET_KEY="change-me-to-a-random-secret-key")
-    dev.validate()  # should not raise
+    dev.validate_settings()  # should not raise
 
 
 def test_unknown_environment_fails_closed() -> None:
     """SEC-8: a typo like 'prod' must not silently skip the production checks."""
     with pytest.raises(RuntimeError, match="Unsupported ENVIRONMENT"):
-        _settings(ENVIRONMENT="prod", SECRET_KEY="change-me-to-a-random-secret-key").validate()
+        _settings(ENVIRONMENT="prod", SECRET_KEY="change-me-to-a-random-secret-key").validate_settings()
 
 
 # ---------------------------------------------------------------------------
@@ -115,28 +115,28 @@ def test_auto_falls_back_to_smtp_when_only_smtp_is_configured() -> None:
 def test_explicit_resend_without_a_key_is_a_startup_error() -> None:
     """An explicit choice must never be silently downgraded to the log sink."""
     with pytest.raises(RuntimeError, match="RESEND_API_KEY"):
-        _settings(EMAIL_BACKEND="resend").validate()
+        _settings(EMAIL_BACKEND="resend").validate_settings()
 
 
 def test_explicit_smtp_without_a_host_is_a_startup_error() -> None:
     with pytest.raises(RuntimeError, match="SMTP_HOST"):
-        _settings(EMAIL_BACKEND="smtp").validate()
+        _settings(EMAIL_BACKEND="smtp").validate_settings()
 
 
 def test_unknown_email_backend_is_rejected() -> None:
     with pytest.raises(RuntimeError, match="Unsupported EMAIL_BACKEND"):
-        _settings(EMAIL_BACKEND="sendgrid").validate()
+        _settings(EMAIL_BACKEND="sendgrid").validate_settings()
 
 
 def test_ssl_and_starttls_together_are_rejected() -> None:
     """Both at once means "connect with TLS, then upgrade to TLS"."""
     with pytest.raises(RuntimeError, match="mutually exclusive"):
-        _settings(SMTP_USE_SSL=True, SMTP_USE_STARTTLS=True).validate()
+        _settings(SMTP_USE_SSL=True, SMTP_USE_STARTTLS=True).validate_settings()
 
 
 def test_non_positive_verification_ttl_is_rejected() -> None:
     with pytest.raises(RuntimeError, match="EMAIL_VERIFICATION_TTL_HOURS"):
-        _settings(EMAIL_VERIFICATION_TTL_HOURS=0).validate()
+        _settings(EMAIL_VERIFICATION_TTL_HOURS=0).validate_settings()
 
 
 def test_production_does_not_require_an_email_transport() -> None:
@@ -147,7 +147,7 @@ def test_production_does_not_require_an_email_transport() -> None:
     `email_verification_is_enforced`) so new sign-ups are not locked out of an
     inbox that can never receive the link.
     """
-    _settings().validate()  # should not raise
+    _settings().validate_settings()  # should not raise
 
 
 def test_console_transport_in_production_logs_an_error(caplog) -> None:
@@ -155,7 +155,7 @@ def test_console_transport_in_production_logs_an_error(caplog) -> None:
     import logging
 
     with caplog.at_level(logging.ERROR):
-        _settings(EMAIL_VERIFICATION_REQUIRED=True).validate()
+        _settings(EMAIL_VERIFICATION_REQUIRED=True).validate_settings()
 
     assert any(
         "email verification is SUSPENDED" in record.message.lower()
@@ -170,7 +170,7 @@ def test_localhost_app_base_url_in_production_logs_an_error(caplog) -> None:
     import logging
 
     with caplog.at_level(logging.ERROR):
-        _settings(RESEND_API_KEY="re_123", APP_BASE_URL="http://localhost:5173").validate()
+        _settings(RESEND_API_KEY="re_123", APP_BASE_URL="http://localhost:5173").validate_settings()
 
     assert any("APP_BASE_URL" in record.getMessage() for record in caplog.records)
 
@@ -182,7 +182,7 @@ def test_configured_transport_logs_no_degraded_error(caplog) -> None:
         _settings(
             RESEND_API_KEY="re_123",
             APP_BASE_URL="https://transform-web.onrender.com",
-        ).validate()
+        ).validate_settings()
 
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
 
@@ -262,7 +262,7 @@ def test_guest_ceiling_stays_small() -> None:
 def test_a_tier_cap_above_the_ceiling_is_rejected(key: str) -> None:
     """The invariant that stops a tier advertising a file the store cannot take."""
     with pytest.raises(RuntimeError, match=key):
-        _settings(**{key: 5 * 1024**3 + 1}).validate()
+        _settings(**{key: 5 * 1024**3 + 1}).validate_settings()
 
 
 @pytest.mark.parametrize(
@@ -277,14 +277,14 @@ def test_a_tier_cap_above_the_ceiling_is_rejected(key: str) -> None:
 )
 def test_non_positive_upload_values_are_rejected(key: str) -> None:
     with pytest.raises(RuntimeError, match=key):
-        _settings(**{key: 0}).validate()
+        _settings(**{key: 0}).validate_settings()
 
 
 def test_threshold_above_the_ceiling_is_rejected() -> None:
     """Otherwise a file between the ceiling and the threshold would be neither
     accepted whole nor routed to multipart — a dead zone."""
     with pytest.raises(RuntimeError, match="MULTIPART_THRESHOLD_BYTES"):
-        _settings(MULTIPART_THRESHOLD_BYTES=5 * 1024**3 + 1).validate()
+        _settings(MULTIPART_THRESHOLD_BYTES=5 * 1024**3 + 1).validate_settings()
 
 
 def test_part_size_keeping_the_ceiling_under_ten_thousand_parts_is_accepted() -> None:
@@ -294,18 +294,18 @@ def test_part_size_keeping_the_ceiling_under_ten_thousand_parts_is_accepted() ->
 
     assert settings.MULTIPART_PART_SIZE_BYTES == 64 * 1024 * 1024
     assert -(-settings.MAX_UPLOAD_FILE_SIZE_BYTES // settings.MULTIPART_PART_SIZE_BYTES) == 80
-    settings.validate()  # must not raise
+    settings.validate_settings()  # must not raise
 
 
 def test_part_size_too_small_for_the_ceiling_is_rejected() -> None:
     """A part size that needs more than 10 000 parts would fail only at the END
     of a maximal transfer, so it is rejected at boot instead."""
     with pytest.raises(RuntimeError, match="MULTIPART_PART_SIZE_BYTES"):
-        _settings(MULTIPART_PART_SIZE_BYTES=1024).validate()
+        _settings(MULTIPART_PART_SIZE_BYTES=1024).validate_settings()
 
 
 def test_part_size_at_exactly_the_required_boundary_is_accepted() -> None:
     """ceil(ceiling / 10 000) parts is exactly at the limit, which is allowed."""
     required = -(-5 * 1024**3 // 10_000)
-    _settings(MULTIPART_PART_SIZE_BYTES=required).validate()  # must not raise
+    _settings(MULTIPART_PART_SIZE_BYTES=required).validate_settings()  # must not raise
 

@@ -69,7 +69,7 @@ async def lifespan(_: FastAPI):
     else:
         logger.info("Skipping database migrations (RUN_MIGRATIONS=false)")
 
-    # Announce how verification email is being delivered. `Settings.validate()`
+    # Announce how verification email is being delivered. `Settings.validate_settings()`
     # already logs an ERROR when no transport is configured; this line names the
     # resolved transport on every boot so "are we actually sending?" is
     # answerable from the log alone, instead of by registering a test account.
@@ -79,7 +79,7 @@ async def lifespan(_: FastAPI):
         "enforced"
         if settings.EMAIL_VERIFICATION_REQUIRED
         and settings._resolve_email_backend() != "console"
-        else "SUSPENDED — see Settings.validate()",
+        else "SUSPENDED — see Settings.validate_settings()",
     )
 
     # Same idea for SMS. Unlike email there is no sign-in gate to report — phone

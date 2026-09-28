@@ -197,6 +197,9 @@ def seconds_until_resend_allowed(
     and so a suppressed resend is still visibly a *throttled* one rather than
     an unexplained no-op.
     """
+    if sent_at is None:
+        # Never sent: there is no cooldown to count down.
+        return None
     if cooldown_elapsed(sent_at, now=now, cooldown_seconds=cooldown_seconds):
         return None
     reference = now or datetime.now(UTC)

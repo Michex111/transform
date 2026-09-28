@@ -129,7 +129,7 @@ own use of produced files (see `isms-overview.md` §3.2).
   deployment (avoiding concurrent upgrades) — `settings.py`.
 - **Boot-time validation** fails fast on an insecure production config
   (weak `SECRET_KEY`, wildcard CORS + credentials, plaintext object storage) —
-  `settings.validate()`.
+  `settings.validate_settings()`.
 
 ### 4.7 Incident response
 
@@ -199,7 +199,7 @@ must be recorded in the risk register with a compensating control.
 ## 6. Enforcement & non-compliance
 
 - **Monitoring:** compliance is reviewed via the ISMS management review and
-  periodic control verification (e.g. confirming `settings.validate()` blocks an
+  periodic control verification (e.g. confirming `settings.validate_settings()` blocks an
   insecure config).
 - **Violations:** a security violation or policy breach is handled as a security
   incident (see `incident-response-plan.md`) and may escalate to disciplinary

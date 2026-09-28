@@ -1,0 +1,53 @@
+# Pyrefly configuration.
+#
+# Enforced in CI by the `Type check (pyrefly)` step in
+# `.github/workflows/ci.yml`. The project is clean under the `default` preset
+# with no error-kind suppressions, so the gate is simply `uv run pyrefly check`
+# and exits non-zero on any new diagnostic.
+#
+# Why this file exists: without it, Pyrefly finds only `pyproject.toml` as a
+# project marker, falls back to the `basic` preset, and the search-path
+# heuristic picks `src/` as the "import root". That is wrong for this repo.
+#
+# Every project import is written workspace-root-relative with an explicit
+# prefix -- `from src.…`, `from workers.…`, `from tests.…` -- so the workspace
+# root is the import root, NOT `src/`. Leaving `src/` as the import root makes
+# every `from src.…` import fail with `missing-import`.
+
+# ---------------------------------------------------------------------------
+# What to type check: the three folders that hold project code.
+# `include`-style scoping means the workspace root is NOT implicit, so every
+# folder must be listed. Dot-directories (e.g. `.venv`, `.github`) are filtered
+# out automatically at the glob layer, so tooling under `.github/skills` is not
+# picked up.
+# ---------------------------------------------------------------------------
+project-includes = ["src", "tests", "workers"]
+
+# Explicit for documentation/CI portability; Pyrefly's defaults already cover
+# these, and the defaults are appended to this list.
+project-excludes = ["**/.venv", "**/env", "**/node_modules", "**/build", "**/dist", "**/__pycache__"]
+
+# ---------------------------------------------------------------------------
+# Where imports resolve from. The workspace root ("." relative to this file)
+# is what makes `from src.…` / `from workers.…` / `from tests.…` resolve.
+# ---------------------------------------------------------------------------
+search-path = ["."]
+
+# ---------------------------------------------------------------------------
+# Python environment. The project targets Python >= 3.14 (see pyproject.toml
+# and .python-version) and the interpreter below is the project venv, which is
+# what supplies third-party types (fastapi, sqlalchemy, stripe, ...).
+# ---------------------------------------------------------------------------
+python-interpreter-path = ".venv/bin/python"
+python-version = "3.14"
+python-platform = "linux"
+
+# The `default` preset (Pyrefly's own defaults): no error kind is disabled and
+# no severity is downgraded. A new error kind that Pyrefly enables by default
+# will therefore surface here first, which is intentional — the alternative is a
+# config that silently drifts away from what the checker actually knows.
+#
+# If a *future* preset bump produces a large batch of unrelated diagnostics,
+# prefer fixing them or adding a narrowly-scoped `[[sub-config]]` for the path
+# in question over disabling the kind project-wide.
+preset = "default"

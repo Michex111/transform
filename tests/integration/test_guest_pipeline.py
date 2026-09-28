@@ -11,7 +11,7 @@ import io
 import json
 from contextlib import contextmanager
 from datetime import timedelta
-from typing import Generator
+from typing import Any, Generator
 
 from fastapi.testclient import TestClient
 
@@ -188,7 +188,14 @@ class FakeStreamingStorage(MinioFileStorageAdapter):
         super().__init__(bucket_name="test", s3_client=None)  # type: ignore[arg-type]
         self._payload = payload
 
-    def get_object_stream(self, key: str):
+    def get_object_stream(self, key: str) -> Any:
+        """Return an in-memory stand-in for the provider's stream.
+
+        ``MinioFileStorageAdapter`` declares ``BaseHTTPResponse | HTTPResponse``,
+        but this double only implements ``read``/``close`` — the entire surface
+        the SSE download path touches — so the return is typed ``Any`` to keep
+        the override consistent.
+        """
         del key
         return FakeStreamResponse(self._payload)
 

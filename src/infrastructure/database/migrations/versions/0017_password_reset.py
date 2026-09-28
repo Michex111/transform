@@ -23,7 +23,8 @@ Revises: 0016_user_profile_phone
 Create Date: 2026-09-22
 """
 
-from typing import Sequence, Union
+from collections.abc import Callable
+from typing import Any, Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
@@ -39,7 +40,7 @@ _TABLE = "users"
 _TOKEN_INDEX = "ix_users_password_reset_token_hash"
 
 #: ``(column, type factory)`` pairs added by this revision.
-_COLUMNS: tuple[tuple[str, callable], ...] = (
+_COLUMNS: tuple[tuple[str, Callable[[], Any]], ...] = (
     (
         "password_reset_token_hash",
         lambda: sa.Column("password_reset_token_hash", sa.String(length=64), nullable=True),

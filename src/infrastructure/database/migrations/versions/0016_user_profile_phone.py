@@ -47,7 +47,8 @@ Revises: 0015_email_verification
 Create Date: 2026-09-22
 """
 
-from typing import Sequence, Union
+from collections.abc import Callable
+from typing import Any, Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
@@ -64,7 +65,7 @@ _PHONE_UNIQUE_INDEX = "uq_users_phone_number"
 _CODE_HASH_INDEX = "ix_users_phone_verification_code_hash"
 
 #: ``(column, type factory)`` pairs added by this revision.
-_COLUMNS: tuple[tuple[str, callable], ...] = (
+_COLUMNS: tuple[tuple[str, Callable[[], Any]], ...] = (
     ("first_name", lambda: sa.Column("first_name", sa.String(length=50), nullable=True)),
     ("last_name", lambda: sa.Column("last_name", sa.String(length=50), nullable=True)),
     ("avatar_data", lambda: sa.Column("avatar_data", sa.LargeBinary(), nullable=True)),

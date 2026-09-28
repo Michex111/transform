@@ -14,9 +14,13 @@ pin the properties that keep that safe:
 
 import asyncio
 import types
+from typing import cast
 
 import pytest
+from redis.asyncio import Redis
 
+from src.domain.conversions.entities.conversion_job import ConversionJob
+from src.domain.conversions.value_object.conversion_type import ConversionType
 from src.infrastructure.adapters.queues import (
     redis_stream_job_queue as jsq,
     redis_stream_status_queue as ssq,
@@ -34,7 +38,11 @@ from src.infrastructure.adapters.queues.stream_names import (
 
 
 class _FakeRedis:
-    """Records the stream names the adapter passes to Redis."""
+    """Records the stream names the adapter passes to Redis.
+
+    Only the stream commands the adapters issue are modelled, so each instance
+    is cast to the real client type where it is injected.
+    """
 
     def __init__(self):
         self.xgroup_created: list[str] = []
@@ -127,7 +135,7 @@ def test_qualify_is_idempotent(prefix):
 
 def test_consumer_reads_the_qualified_streams(prefix):
     prefix("dev:")
-    consumer = jsq.JobStreamConsumer("conversion-workers", "worker-a", _FakeRedis())
+    consumer = jsq.JobStreamConsumer("conversion-workers", "worker-a", cast(Redis, _FakeRedis()))
 
     assert consumer.streams == (
         "dev:conversion_jobs:high",
@@ -143,7 +151,7 @@ def test_consumer_reads_the_qualified_streams(prefix):
 def test_consumer_group_is_created_on_qualified_streams(prefix):
     prefix("dev:")
     redis = _FakeRedis()
-    consumer = jsq.JobStreamConsumer("conversion-workers", "worker-a", redis)
+    consumer = jsq.JobStreamConsumer("conversion-workers", "worker-a", cast(Redis, redis))
 
     asyncio.run(consumer._ensure_consumer_group())
 
@@ -160,7 +168,7 @@ def test_ack_routing_understands_qualified_delivery_keys(prefix):
     """
     prefix("dev:")
     redis = _FakeRedis()
-    consumer = jsq.JobStreamConsumer("conversion-workers", "worker-a", redis)
+    consumer = jsq.JobStreamConsumer("conversion-workers", "worker-a", cast(Redis, redis))
 
     asyncio.run(consumer.acknowledge_job("dev:conversion_jobs:high:1700000000000-0"))
 
@@ -172,7 +180,7 @@ def test_ack_routing_understands_qualified_delivery_keys(prefix):
 def test_dead_letter_uses_the_qualified_stream(prefix, monkeypatch):
     prefix("dev:")
     redis = _FakeRedis()
-    consumer = jsq.JobStreamConsumer("conversion-workers", "worker-a", redis)
+    consumer = jsq.JobStreamConsumer("conversion-workers", "worker-a", cast(Redis, redis))
 
     # Stub the message serialisation; only the target stream name is under test.
     monkeypatch.setattr(
@@ -183,7 +191,18 @@ def test_dead_letter_uses_the_qualified_stream(prefix, monkeypatch):
         ),
     )
 
-    asyncio.run(consumer.dead_letter_job("dev:conversion_jobs:high:1-0", "boom", object()))
+    asyncio.run(
+        consumer.dead_letter_job(
+            "dev:conversion_jobs:high:1-0",
+            "boom",
+            ConversionJob(
+                job_id="j1",
+                conversion=ConversionType("pdf", "docx"),
+                input_file="j1.pdf",
+                object_key="upload/j1.pdf",
+            ),
+        )
+    )
 
     assert redis.xadd_calls == [
         (
@@ -224,7 +243,7 @@ def test_tier_router_defaults_to_production_names(prefix):
     # nobody ever reads.
     produced = {router.stream_for_tier(t) for t in SubscriptionTier}
     assert produced <= set(JOB_TIER_STREAMS)
-    assert produced <= set(jsq.JobStreamConsumer("g", "n", _FakeRedis()).streams)
+    assert produced <= set(jsq.JobStreamConsumer("g", "n", cast(Redis, _FakeRedis())).streams)
 
 
 def test_tier_router_targets_the_qualified_streams_consumer_reads(prefix):
@@ -234,7 +253,7 @@ def test_tier_router_targets_the_qualified_streams_consumer_reads(prefix):
 
     prefix("dev:")
     router = QueuePriorityRouter()
-    consumer = jsq.JobStreamConsumer("conversion-workers", "worker-a", _FakeRedis())
+    consumer = jsq.JobStreamConsumer("conversion-workers", "worker-a", cast(Redis, _FakeRedis()))
 
     produced = {router.stream_for_tier(t) for t in SubscriptionTier}
     assert produced <= set(consumer.streams)
@@ -248,14 +267,14 @@ def test_tier_router_targets_the_qualified_streams_consumer_reads(prefix):
 
 def test_event_publisher_uses_the_qualified_stream(prefix):
     prefix("dev:")
-    publisher = ssq.JobEventPublisher(_FakeRedis())
+    publisher = ssq.JobEventPublisher(cast(Redis, _FakeRedis()))
 
     assert publisher.stream_name == "dev:conversion_job_events"
 
 
 def test_event_subscriber_uses_the_qualified_stream(prefix):
     prefix("dev:")
-    subscriber = ssq.JobEventSubscriber(_FakeRedis())
+    subscriber = ssq.JobEventSubscriber(cast(Redis, _FakeRedis()))
 
     assert subscriber.stream_name == "dev:conversion_job_events"
 
@@ -263,6 +282,6 @@ def test_event_subscriber_uses_the_qualified_stream(prefix):
 def test_event_subscriber_honours_an_explicit_stream_name(prefix):
     """An explicit name (tests, replay tooling) must win over the default."""
     prefix("dev:")
-    subscriber = ssq.JobEventSubscriber(_FakeRedis(), stream_name="custom:events")
+    subscriber = ssq.JobEventSubscriber(cast(Redis, _FakeRedis()), stream_name="custom:events")
 
     assert subscriber.stream_name == "custom:events"

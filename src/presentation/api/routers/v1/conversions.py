@@ -358,7 +358,7 @@ async def get_conversion_job(
 ) -> ConversionJobResponse:
     job = await repository.get_conversion_job(job_id)
     # Authenticated users may only inspect their own jobs (guest jobs included).
-    assert_job_owner(job, current_user.id)
+    job = assert_job_owner(job, current_user.id)
 
     download_url = None
     if str(job.status).lower() == "completed" and job.output_file:
@@ -414,7 +414,7 @@ async def download_conversion_output(
     job = await repository.get_conversion_job(job_id)
     # Ownership check: authenticated users may only read their own outputs
     # (never an ownerless guest job's output).
-    assert_job_owner(job, current_user.id)
+    job = assert_job_owner(job, current_user.id)
     if str(job.status).lower() != "completed" or not job.output_file:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job output not found")
 
