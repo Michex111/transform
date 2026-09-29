@@ -327,7 +327,12 @@ class Settings(BaseSettings):
     # budget is what actually bounds the prompt; the byte budget is a cheaper,
     # earlier guard so a huge upload is refused before it is read into memory.
     AI_SUMMARY_MAX_INPUT_CHARS: int = 48000
-    AI_MAX_DOCUMENT_BYTES: int = 10 * 1024 * 1024
+    # Deployment ceiling on one document read, applied as
+    # ``min(this, the tier's allowance)`` (see ``assistant_policy``). Keep it at
+    # or above the largest plan allowance: a ceiling below that silently caps
+    # the paid plans while ``/subscription/plans`` goes on advertising the
+    # larger number they are entitled to. Matches the paid-plan value (25 MB).
+    AI_MAX_DOCUMENT_BYTES: int = 25 * 1024 * 1024
 
     # Frontend (SPA) static serving
     # DEPRECATED / NO-OP: the API no longer serves the SPA. The React app is

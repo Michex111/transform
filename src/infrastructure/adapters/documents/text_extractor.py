@@ -52,6 +52,19 @@ _SUPPORTED_HINT = "readable formats are plain text, PDF, .docx, .xlsx and .pptx"
 #: ``zipfile`` reads at most that many decompressed bytes.
 _MAX_ZIP_EXPANSION_RATIO = 16
 
+#: Hard ceiling on ONE decompressed ZIP member, whatever the byte budget.
+#:
+#: The ratio above scales with ``AI_MAX_DOCUMENT_BYTES``, which is not a
+#: constant of nature but plan configuration an operator (or a pricing change)
+#: can raise. Leaning on the ratio alone would therefore let a bigger plan
+#: allowance raise the process's worst-case allocation with it, which is the
+#: one thing a bomb guard exists to prevent. 160 MB is where the ratio already
+#: landed at the previously shipped 10 MB budget: pinning it there means no
+#: document that parsed before stops parsing now, and peak memory stays put.
+#: It dwarfs anything we would extract from — the prompt keeps 48k characters
+#: of whatever is found — while staying clear of a free instance's RAM.
+_MAX_MEMBER_BYTES = 160 * 1024 * 1024
+
 
 def _local_name(tag: object) -> str:
     """Local name of an XML tag, with the namespace stripped.
@@ -127,9 +140,14 @@ class DocumentTextExtractor:
 
         Allows a generous expansion over the compressed budget (see
         :data:`_MAX_ZIP_EXPANSION_RATIO`) so a genuine document is never
-        rejected, while making a decompression bomb fail closed.
+        rejected, while making a decompression bomb fail closed. Capped by
+        :data:`_MAX_MEMBER_BYTES` so the allowance cannot scale with a plan's
+        byte budget (see that constant).
         """
-        return max(1, self._max_document_bytes) * _MAX_ZIP_EXPANSION_RATIO
+        return min(
+            max(1, self._max_document_bytes) * _MAX_ZIP_EXPANSION_RATIO,
+            _MAX_MEMBER_BYTES,
+        )
 
     def extract(self, *, file_name: str, data: bytes) -> ExtractedDocument:
         """Extract text from ``data``; never raises (see the module docstring)."""

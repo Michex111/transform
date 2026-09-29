@@ -10,6 +10,7 @@ sanity check that the extraction found the *text* and not the markup.
 import io
 import zipfile
 
+from src.infrastructure.adapters.documents import text_extractor
 from src.infrastructure.adapters.documents.text_extractor import DocumentTextExtractor
 from tests.fixtures.documents import (
     docx_bytes,
@@ -182,3 +183,51 @@ def test_a_decompression_bomb_member_is_refused_before_it_is_read() -> None:
 
     assert result.supported is False
     assert result.text == ""
+
+
+def test_the_absolute_member_ceiling_outranks_the_ratio(monkeypatch) -> None:
+    """A raised plan budget must not raise the worst-case allocation.
+
+    The expansion ratio is a *multiple of the byte budget*, and the byte budget
+    is plan configuration an operator can raise, so leaning on the ratio alone
+    would let a pricing change enlarge what a hostile document can allocate. An
+    absolute ceiling of 1 KB is pinned here so a member the ratio would happily
+    allow — 2 KB inside a 512-byte budget (16x = 8 KB) — is refused anyway.
+    """
+    body = (
+        b"<w:document xmlns:w='x'><w:body><w:p><w:r><w:t>"
+        + b"a" * 2_000
+        + b"</w:t></w:r></w:p></w:body></w:document>"
+    )
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("word/document.xml", body)
+    data = buffer.getvalue()
+
+    monkeypatch.setattr(text_extractor, "_MAX_MEMBER_BYTES", 1024)
+
+    # The premise: the ratio alone would accept this member, so what refuses it
+    # has to be the absolute ceiling.
+    assert len(body) < 512 * text_extractor._MAX_ZIP_EXPANSION_RATIO
+
+    result = extractor(max_document_bytes=512).extract(file_name="doc.docx", data=data)
+
+    assert result.supported is False
+    assert result.text == ""
+
+
+def test_the_shipped_budget_is_capped_by_the_absolute_ceiling() -> None:
+    """The two constants must compose to the absolute ceiling, not the ratio.
+
+    A regression here is silent and only shows on a plan change: with the
+    shipped 25 MB budget the ratio would allow 16x the previously shipped
+    allocation, which is the memory a free instance cannot spare.
+    """
+    shipped_budget = 25 * 1024 * 1024
+    ratio_cap = shipped_budget * text_extractor._MAX_ZIP_EXPANSION_RATIO
+
+    assert text_extractor._MAX_MEMBER_BYTES < ratio_cap
+    assert (
+        extractor(max_document_bytes=shipped_budget)._member_cap
+        == text_extractor._MAX_MEMBER_BYTES
+    )

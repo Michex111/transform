@@ -79,6 +79,12 @@ def test_legacy_premium_matches_pro() -> None:
     assert max_tool_iterations_for_tier(
         SubscriptionTier.PREMIUM
     ) == max_tool_iterations_for_tier(SubscriptionTier.PRO)
+    # The document budget is the dimension where a drift is invisible: PREMIUM
+    # is not sold any more, so a legacy row silently reading less than the Pro
+    # plan it was sold as would never show up on the pricing page.
+    assert max_document_bytes_for_tier(
+        SubscriptionTier.PREMIUM
+    ) == max_document_bytes_for_tier(SubscriptionTier.PRO)
 
 
 def test_unknown_tier_is_unavailable() -> None:
@@ -176,9 +182,9 @@ def test_entitlement_values() -> None:
     assert max_attachments_for_tier(enterprise) == 5
 
     assert max_document_bytes_for_tier(free) == 2 * 1024 * 1024
-    assert max_document_bytes_for_tier(pro) == 5 * 1024 * 1024
-    assert max_document_bytes_for_tier(pro_plus) == 10 * 1024 * 1024
-    assert max_document_bytes_for_tier(enterprise) == 10 * 1024 * 1024
+    assert max_document_bytes_for_tier(pro) == 25 * 1024 * 1024
+    assert max_document_bytes_for_tier(pro_plus) == 25 * 1024 * 1024
+    assert max_document_bytes_for_tier(enterprise) == 25 * 1024 * 1024
 
     assert max_actions_per_turn(free) == 1
     assert max_actions_per_turn(pro) == 3
