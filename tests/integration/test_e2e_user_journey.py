@@ -18,7 +18,7 @@ import json
 import os
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Generator
+from typing import Generator, cast
 
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -33,7 +33,9 @@ import stripe  # noqa: E402
 
 import src.application.services.conversion_service as conversion_service_module  # noqa: E402
 import src.presentation.api.main as api_main  # noqa: E402
+from src.application.ports.object_storage_port import StorageUrlGateway  # noqa: E402
 from src.application.services.file_transfer_service import TransferService  # noqa: E402
+from src.domain.conversions.entities.conversion_job import ConversionJob  # noqa: E402
 from src.domain.conversions.value_object.conversion_type import ConversionType  # noqa: E402
 from src.infrastructure.adapters.repository.sql_conversion_job_repo import SQLConversionJobRepository  # noqa: E402
 from src.infrastructure.converters.converter_registry import ConverterRegistry  # noqa: E402
@@ -227,6 +229,12 @@ class SqliteJobRepository:
         async with factory() as session:
             await SQLConversionJobRepository(session=session).update_conversion_job(job)
 
+    async def get_conversion_job(self, job_id: str) -> ConversionJob | None:
+        """Read the stored row, so the processor's idempotency guard is active."""
+        factory = await self._backend.ensure()
+        async with factory() as session:
+            return await SQLConversionJobRepository(session=session).get_conversion_job(job_id)
+
 
 @contextmanager
 def e2e_app(tmp_path) -> Generator[tuple[TestClient, dict], None, None]:
@@ -247,7 +255,11 @@ def e2e_app(tmp_path) -> Generator[tuple[TestClient, dict], None, None]:
             yield session
 
     async def override_transfer():
-        return TransferService(storage_port=store, cache_port=cache, ttl_minutes=15)
+        # The in-memory store implements the single-PUT half of the gateway; the
+        # journey never crosses the multipart threshold.
+        return TransferService(
+            storage_port=cast(StorageUrlGateway, store), cache_port=cache, ttl_minutes=15
+        )
 
     async def override_storage_url():
         return store

@@ -2,6 +2,7 @@
 
 import asyncio
 import io
+from typing import Any
 
 import pytest
 
@@ -37,7 +38,14 @@ class FakeStreamingStorage(MinioFileStorageAdapter):
         self._payload = payload
         self.last_response: FakeStreamResponse | None = None
 
-    def get_object_stream(self, key: str):
+    def get_object_stream(self, key: str) -> Any:
+        """Return an in-memory stand-in for the provider's stream.
+
+        ``MinioFileStorageAdapter`` declares ``BaseHTTPResponse | HTTPResponse``,
+        but this double only implements ``read``/``close`` — the entire surface
+        ``iter_decrypted_object`` touches — so the return is typed ``Any`` to
+        keep the override consistent.
+        """
         self.last_response = FakeStreamResponse(self._payload)
         return self.last_response
 

@@ -34,6 +34,22 @@ class ConversionJobRepositoryPort(ConversionJobWriteRepositoryPort, Protocol):
         """
         ...
 
+    async def search_jobs(
+        self,
+        user_id: int,
+        *,
+        query: str | None = None,
+        fmt: str | None = None,
+        limit: int = 10,
+    ) -> list[ConversionJob]:
+        """Return the user's jobs matching a name substring and/or a format.
+
+        ``query`` matches ``input_file`` or ``output_file``
+        (case-insensitive substring); ``fmt`` matches ``source_format`` or
+        ``target_format``. Newest first, unpaginated (bounded by ``limit``).
+        """
+        ...
+
     async def delete_job(self, job_id: str, user_id: int) -> bool:
         """Delete a single job owned by ``user_id``. Returns True when a row was
         removed; False when the job is missing or not owned by the caller."""

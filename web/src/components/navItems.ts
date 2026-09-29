@@ -19,6 +19,7 @@ import {
   GearSix,
   Lifebuoy,
   List,
+  Sparkle,
 } from "@phosphor-icons/react";
 
 import { withTimeline } from "@/lib/historyFilters";
@@ -41,6 +42,9 @@ export type NavItem = {
 /** Every destination in the shell, in display order. */
 export const NAV: NavItem[] = [
   { to: "/app/dashboard", label: "Dashboard", icon: ChartBar },
+  // Second, and therefore in the phone bar's primary four: the assistant is a
+  // top-level way to work with a file, not a settings-page extra.
+  { to: "/app/assistant", label: "Assistant", icon: Sparkle },
   { to: "/app/convert", label: "Convert", icon: ArrowsClockwise },
   { to: "/app/queue", label: "Queue", icon: List },
   // Entering History from the navigation means "show me my history", so it asks

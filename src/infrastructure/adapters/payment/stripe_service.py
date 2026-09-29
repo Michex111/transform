@@ -11,9 +11,16 @@ configuration stay on a single client.
 
 import asyncio
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from src.infrastructure.config.settings import get_settings
+
+if TYPE_CHECKING:
+    # Imported for typing only: `stripe` is imported lazily inside the methods
+    # below so that merely constructing this service does not pull in the SDK.
+    # A local-variable annotation is never evaluated at runtime, so this stays
+    # free.
+    from stripe.params.checkout import SessionCreateParams
 
 logger = logging.getLogger(__name__)
 
@@ -115,21 +122,28 @@ class StripeService:
 
         try:
             client = self._get_client()
-            session = await asyncio.to_thread(client.v1.checkout.sessions.create, {
+            params: SessionCreateParams = {
                 # NOTE: Omit `payment_method_types` so Stripe dynamically selects
                 # eligible payment methods from Dashboard settings.
                 "line_items": [{"price": price_id, "quantity": 1}],
                 "mode": "subscription",
                 "success_url": success_url,
                 "cancel_url": cancel_url,
-                "customer_email": email if not customer_id else None,
-                "customer": customer_id,
                 "metadata": {"user_id": user_id, "tier": tier, "kind": "subscription"},
                 "subscription_data": {
                     "metadata": {"user_id": user_id, "tier": tier, "kind": "subscription"}
                 },
                 "integration_identifier": self._integration_identifier(),
-            })
+            }
+            # Stripe treats an explicit null and an absent field identically, but
+            # the SDK types both fields as `NotRequired[str]`; set only the one
+            # that applies instead of passing `None`.
+            if customer_id:
+                params["customer"] = customer_id
+            else:
+                params["customer_email"] = email
+
+            session = await asyncio.to_thread(client.v1.checkout.sessions.create, params)
 
             logger.info(
                 "Created Stripe subscription checkout session",
@@ -174,7 +188,7 @@ class StripeService:
 
         try:
             client = self._get_client()
-            session = await asyncio.to_thread(client.v1.checkout.sessions.create, {
+            params: SessionCreateParams = {
                 # Omit `payment_method_types` for dynamic payment methods.
                 "line_items": [{
                     "price_data": {
@@ -187,15 +201,21 @@ class StripeService:
                 "mode": "payment",
                 "success_url": success_url,
                 "cancel_url": cancel_url,
-                "customer_email": email if not customer_id else None,
-                "customer": customer_id,
                 "metadata": {
                     "user_id": user_id,
                     "kind": "credit_purchase",
                     "credits": str(credits),
                 },
                 "integration_identifier": self._integration_identifier(),
-            })
+            }
+            # See the note in `create_checkout_session`: the SDK's TypedDict
+            # rejects `None` for these fields, so set only the applicable one.
+            if customer_id:
+                params["customer"] = customer_id
+            else:
+                params["customer_email"] = email
+
+            session = await asyncio.to_thread(client.v1.checkout.sessions.create, params)
 
             logger.info(
                 "Created Stripe credit-purchase checkout session",

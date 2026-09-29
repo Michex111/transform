@@ -51,6 +51,7 @@ export const SPA_ROUTES = [
   "/reset-password",
   // Authenticated app routes
   "/app/dashboard",
+  "/app/assistant",
   "/app/convert",
   "/app/queue",
   "/app/history",

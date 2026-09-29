@@ -28,7 +28,8 @@ Revises: 0014_add_job_file_sizes
 Create Date: 2026-09-22
 """
 
-from typing import Sequence, Union
+from collections.abc import Callable
+from typing import Any, Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
@@ -44,7 +45,7 @@ _TABLE = "users"
 _TOKEN_INDEX = "ix_users_email_verification_token_hash"
 
 #: ``(column, type factory)`` pairs added by this revision.
-_COLUMNS: tuple[tuple[str, callable], ...] = (
+_COLUMNS: tuple[tuple[str, Callable[[], Any]], ...] = (
     (
         "email_verified",
         lambda: sa.Column(

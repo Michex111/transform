@@ -5,6 +5,10 @@ Split by concern into submodules; re-exported here so existing imports
 """
 
 from src.infrastructure.database.models.api_key import APIKeyModel
+from src.infrastructure.database.models.assistant import (
+    AiConversationModel,
+    AiMessageModel,
+)
 from src.infrastructure.database.models.conversion_job import ConversionJobModel
 from src.infrastructure.database.models.credit import (
     CreditTransactionModel,
@@ -16,6 +20,8 @@ from src.infrastructure.database.models.user import UserModel
 
 __all__ = [
     "APIKeyModel",
+    "AiConversationModel",
+    "AiMessageModel",
     "ConversionJobModel",
     "CreditTransactionModel",
     "MonthlyCreditModel",

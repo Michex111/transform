@@ -25,6 +25,20 @@
 import type {
   APIKeyCreateResponse,
   APIKeyListResponse,
+  AiEntitlement,
+  AssistantArtifact,
+  AssistantAttachment,
+  AssistantConversation,
+  AssistantConversationDetailResponse,
+  AssistantConversationListResponse,
+  AssistantMessage,
+  AssistantMessageRole,
+  AssistantRecommendation,
+  AssistantRecommendResponse,
+  AssistantStatus,
+  AssistantStreamEvent,
+  AssistantSummaryResponse,
+  AssistantToolEvent,
   BatchDeleteResponse,
   CancelSubscriptionResponse,
   CheckoutResponse,
@@ -64,7 +78,8 @@ import type {
   UserResponse,
   VerifyEmailResponse,
 } from "./types"
-import { HISTORY_DELETE_RANGES } from "./types"
+import { ASSISTANT_INTERNAL_ERROR, HISTORY_DELETE_RANGES } from "./types"
+import { MAX_ASSISTANT_ATTACHMENTS } from "@/lib/assistantAttachments"
 
 /* ------------------------------------------------------------------ *
  * Primitives
@@ -98,6 +113,31 @@ export function asNullableNumber(value: unknown): number | null {
 
 export function asBoolean(value: unknown, fallback = false): boolean {
   return typeof value === "boolean" ? value : fallback
+}
+
+/**
+ * A non-empty string, or `undefined`.
+ *
+ * Used for the additive assistant fields: an absent key and a blank value both
+ * mean "the API did not say", and staying `undefined` lets a caller branch on
+ * presence instead of special-casing `""`.
+ */
+function asOptionalText(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined
+  const trimmed = value.trim()
+  return trimmed === "" ? undefined : trimmed
+}
+
+/**
+ * A finite number clamped to `>= 0`, or `undefined` when absent/malformed.
+ *
+ * The clamp is a guard against a negative count reaching copy like "-3 left";
+ * the fallback is left to the caller because a missing count means different
+ * things per field (see `max_attachments` below).
+ */
+function asOptionalCount(value: unknown): number | undefined {
+  const n = asNullableNumber(value)
+  return n === null ? undefined : Math.max(0, n)
 }
 
 /** A plain-object view of `value`; `{}` for null, arrays, and primitives. */
@@ -490,13 +530,19 @@ export function normalizeUploadSessionParts(value: unknown): UploadSessionPartsR
 
 export function normalizeUploadSession(value: unknown): UploadSession {
   const o = asObject(value)
-  return {
+  const session: UploadSession = {
     upload_id: asString(o.upload_id),
     object_key: asString(o.object_key),
     status: asString(o.status),
     file_name: asNullableString(o.file_name),
     folder_id: asNullableString(o.folder_id),
   }
+  // Additive: a session verified against an older API carries no `file_id`, so
+  // it stays absent rather than becoming `""` (which a caller would treat as a
+  // real, empty file id).
+  const fileId = asNullableString(o.file_id)
+  if (fileId) session.file_id = fileId
+  return session
 }
 
 /* ------------------------------------------------------------------ *
@@ -550,6 +596,38 @@ export function normalizeSubscriptionPlan(value: unknown): SubscriptionPlanRespo
     storage_gb: asNumber(o.storage_gb),
     monthly_credits: asNullableNumber(o.monthly_credits),
     features: asStringArray(o.features),
+    // `null` (not `undefined`) for "no assistant": it is the one value the
+    // pricing page branches on, and an API that never sends `ai` degrades to
+    // exactly the same rendering as a plan that genuinely has none.
+    ai: normalizeAiEntitlement(o.ai),
+  }
+}
+
+/**
+ * The assistant entitlements of a plan, or `null` when the payload is unusable.
+ *
+ * "Unusable" means not a plain object, or an object with no `model_label` — the
+ * one field the pricing group needs in order to say anything true. Returning
+ * `null` rather than a half-built `{ model_label: "", requests_per_hour: 0 }`
+ * keeps "this plan has no assistant" and "this API is older" visually identical
+ * (no group at all) and never prints a fabricated zero.
+ *
+ * Every field is read tolerantly because the plans endpoint ships independently
+ * of the SPA; the numbers clamp to `>= 0` and a missing one reads as `0`, which
+ * the feature builder then omits rather than rendering.
+ */
+export function normalizeAiEntitlement(value: unknown): AiEntitlement | null {
+  const o = asNullableRecord(value)
+  if (!o) return null
+  const model_label = asOptionalText(o.model_label)
+  if (!model_label) return null
+  return {
+    model_level: asOptionalText(o.model_level) ?? "",
+    model_label,
+    requests_per_hour: asOptionalCount(o.requests_per_hour) ?? 0,
+    max_attachments: asOptionalCount(o.max_attachments) ?? 0,
+    max_document_mb: asOptionalCount(o.max_document_mb) ?? 0,
+    max_actions_per_turn: asOptionalCount(o.max_actions_per_turn) ?? 0,
   }
 }
 
@@ -639,5 +717,301 @@ export function normalizeCancelSubscription(value: unknown): CancelSubscriptionR
   return {
     message: asString(o.message),
     tier_after_cancel: asString(o.tier_after_cancel),
+  }
+}
+
+/* ------------------------------------------------------------------ *
+ * Transform AI (assistant)
+ * ------------------------------------------------------------------ */
+
+/** A plain object, or `null` — never `{}`, so "the API didn't say" stays distinct. */
+function asNullableRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null
+}
+
+/**
+ * `POST /assistant/chat` answers `{"enabled": …, "backend": …, "model": …}`.
+ *
+ * The backend string degrades to `"unknown"` rather than to `"openai"`: a
+ * fabricated vendor name would make the UI state something the server never
+ * said, and only an exact `"echo"` may light up the demo-mode badge.
+ */
+export function normalizeAssistantStatus(value: unknown): AssistantStatus {
+  const o = asObject(value)
+  const backend: AssistantStatus["backend"] =
+    o.backend === "openai" || o.backend === "echo" ? o.backend : "unknown"
+  return {
+    enabled: asBoolean(o.enabled),
+    backend,
+    model: asString(o.model),
+    // Plan entitlements. Every field stays `undefined` when absent so consumers
+    // branch on presence (`if (status.requests_per_hour != null)`), never on a
+    // fabricated zero that would render as "0/0 this hour".
+    tier: asOptionalText(o.tier),
+    model_level: asOptionalText(o.model_level),
+    model_label: asOptionalText(o.model_label),
+    requests_per_hour: asOptionalCount(o.requests_per_hour),
+    used_this_hour: asOptionalCount(o.used_this_hour),
+    remaining_this_hour: asOptionalCount(o.remaining_this_hour),
+    // CRITICAL: a missing value falls back to the client's own cap, never to 0.
+    // An older API omits this field, and a `0` here would make the composer
+    // refuse every attachment on that API — a lock-out, not a degradation.
+    max_attachments: asOptionalCount(o.max_attachments) ?? MAX_ASSISTANT_ATTACHMENTS,
+    max_actions_per_turn: asOptionalCount(o.max_actions_per_turn),
+    max_document_bytes: asOptionalCount(o.max_document_bytes),
+  }
+}
+
+export function normalizeAssistantConversation(value: unknown): AssistantConversation {
+  const o = asObject(value)
+  const conversation: AssistantConversation = {
+    id: asString(o.id),
+    title: asString(o.title),
+    created_at: asString(o.created_at),
+  }
+  // `updated_at` is absent on the create response, so a missing value must stay
+  // missing rather than becoming `""` (which would sort as a valid timestamp).
+  const updated = asNullableString(o.updated_at)
+  if (updated !== null) conversation.updated_at = updated
+  return conversation
+}
+
+/** `{conversations: [...]}` — always an array, so `conversations.map` is safe. */
+export function normalizeAssistantConversationList(
+  value: unknown,
+): AssistantConversationListResponse {
+  const o = asObject(value)
+  return { conversations: asArray<unknown>(o.conversations).map(normalizeAssistantConversation) }
+}
+
+function asAssistantRole(value: unknown): AssistantMessageRole {
+  const role = asString(value)
+  return role === "user" || role === "assistant" || role === "tool" ? role : "assistant"
+}
+
+/**
+ * `meta.artifacts`, parsed into typed artifacts and tolerant of junk.
+ *
+ * A malformed entry (not an object, or with neither an id nor a name) cannot be
+ * linked to anything and would render as a nameless "Item" chip, so it is
+ * dropped. Everything else keeps the `normalizeAssistantArtifact` defaults.
+ */
+function asAssistantArtifacts(value: unknown): AssistantArtifact[] {
+  return asArray<unknown>(value)
+    .map(normalizeAssistantArtifact)
+    .filter((artifact) => artifact.id !== "" || artifact.name !== "")
+}
+
+/**
+ * `meta.attachments`, parsed into typed attachments and tolerant of junk.
+ *
+ * An entry with no id is useless — the API keys attachments by `user_files.id`,
+ * so an id-less chip could never be sent back or removed. Entries with an id
+ * but no name survive with an empty name (the chip falls back to the id).
+ */
+function asAssistantAttachments(value: unknown): AssistantAttachment[] {
+  return asArray<unknown>(value)
+    .map((entry) => {
+      const a = asObject(entry)
+      const attachment: AssistantAttachment = {
+        id: asString(a.id),
+        name: asString(a.name),
+      }
+      const extension = asString(a.extension)
+      if (extension) attachment.extension = extension
+      return attachment
+    })
+    .filter((attachment) => attachment.id !== "")
+}
+
+/**
+ * One message of a conversation.
+ *
+ * The typed `label`/`summary`/`artifacts` are lifted out of `meta` so the
+ * transcript builder does not index into an untyped bag. They are set only when
+ * the payload actually carries them, which keeps the normaliser lossless: a
+ * legacy row (no `meta`, or a `meta` without these keys) round-trips exactly as
+ * it always did, while a richer row gains the fields the UI now reads.
+ */
+export function normalizeAssistantMessage(value: unknown): AssistantMessage {
+  const o = asObject(value)
+  const message: AssistantMessage = {
+    id: asString(o.id),
+    role: asAssistantRole(o.role),
+    content: asString(o.content),
+    tool_name: asNullableString(o.tool_name),
+    meta: asNullableRecord(o.meta),
+    ...(typeof o.created_at === "string" ? { created_at: o.created_at } : {}),
+  }
+
+  // Read `meta` through `asObject` (not the stored `meta`) so a non-object
+  // `meta` yields no fields rather than throwing on a property read.
+  const meta = asObject(o.meta)
+  const label = asString(meta.label)
+  if (label) message.label = label
+  const summary = asString(meta.summary)
+  if (summary) message.summary = summary
+  const artifacts = asAssistantArtifacts(meta.artifacts)
+  if (artifacts.length > 0) message.artifacts = artifacts
+  // `meta.attachments` appears on a persisted USER row so a reopened
+  // conversation keeps its chips. Read through `asObject` like the rest.
+  const attachments = asAssistantAttachments(meta.attachments)
+  if (attachments.length > 0) message.attachments = attachments
+
+  return message
+}
+
+/**
+ * `{conversation, messages}` — both always present, so a partial body cannot
+ * crash the message list on `messages.map`.
+ */
+export function normalizeAssistantConversationDetail(
+  value: unknown,
+): AssistantConversationDetailResponse {
+  const o = asObject(value)
+  return {
+    conversation: normalizeAssistantConversation(o.conversation),
+    messages: asArray<unknown>(o.messages).map(normalizeAssistantMessage),
+  }
+}
+
+export function normalizeAssistantSummary(value: unknown): AssistantSummaryResponse {
+  const o = asObject(value)
+  return {
+    file_id: asString(o.file_id),
+    file_name: asString(o.file_name),
+    summary: asString(o.summary),
+    // `key_points` is iterated, so it is forced to an array of strings.
+    key_points: asStringArray(o.key_points),
+    model: asString(o.model),
+  }
+}
+
+function normalizeAssistantRecommendation(value: unknown): AssistantRecommendation {
+  const r = asObject(value)
+  return {
+    target_format: asString(r.target_format).toLowerCase(),
+    label: asString(r.label),
+    category: asString(r.category),
+    reason: asString(r.reason),
+    // Clamped to 0..1: the contract promises that range, and a caller drawing a
+    // confidence meter must not be handed 7 (or NaN) to render as a width.
+    confidence: Math.min(1, Math.max(0, asNumber(r.confidence))),
+  }
+}
+
+export function normalizeAssistantRecommend(value: unknown): AssistantRecommendResponse {
+  const o = asObject(value)
+  return {
+    source_format: asString(o.source_format).toLowerCase(),
+    use_case: asString(o.use_case),
+    recommendations: asArray<unknown>(o.recommendations)
+      .map(normalizeAssistantRecommendation)
+      // A recommendation with no target format cannot be selected, so it would
+      // render as an empty chip — drop it instead.
+      .filter((rec) => rec.target_format.length > 0),
+  }
+}
+
+export function normalizeAssistantArtifact(value: unknown): AssistantArtifact {
+  const o = asObject(value)
+  const rawType = asString(o.type)
+  return {
+    // Every kind this bundle knows is passed through verbatim; anything else —
+    // a kind added by a newer API, or plain junk — degrades to `unknown`
+    // rather than being dropped, so the chip still renders something.
+    type:
+      rawType === "file" || rawType === "job" || rawType === "folder" ? rawType : "unknown",
+    id: asString(o.id),
+    name: asString(o.name),
+    meta: asNullableRecord(o.meta),
+  }
+}
+
+/** The `data:` payload of a frame is a JSON string; be tolerant of a raw fallback. */
+function parseSseData(data: unknown): { value: unknown; raw: string } {
+  if (typeof data !== "string") return { value: data, raw: "" }
+  const trimmed = data.trim()
+  if (!trimmed) return { value: {}, raw: "" }
+  try {
+    return { value: JSON.parse(trimmed), raw: trimmed }
+  } catch {
+    return { value: {}, raw: trimmed }
+  }
+}
+
+/**
+ * Turn one parsed SSE frame into a typed stream event, or `null` when the frame
+ * is unrecognised or unusable.
+ *
+ * Returning `null` rather than throwing is the point: the stream is long-lived
+ * and a single malformed frame (a heartbeat, a field the server added later, a
+ * truncated payload) must not tear down the whole response.
+ */
+export function normalizeAssistantStreamEvent(
+  eventName: string,
+  data: unknown,
+): AssistantStreamEvent | null {
+  const { value, raw } = parseSseData(data)
+  const o = asObject(value)
+
+  switch (eventName) {
+    case "status":
+      return { type: "status", stage: asString(o.stage, "thinking") }
+
+    case "delta":
+      return { type: "delta", text: asString(o.text) }
+
+    case "tool": {
+      const name = asString(o.name)
+      if (!name) return null
+      const rawStatus = asString(o.status)
+      const tool: AssistantToolEvent = {
+        name,
+        status: rawStatus === "done" ? "done" : rawStatus === "running" ? "running" : "unknown",
+      }
+      const label = asString(o.label)
+      if (label) tool.label = label
+      if (rawStatus === "done") {
+        const summary = asString(o.summary)
+        if (summary) tool.summary = summary
+      }
+      if (Array.isArray(o.artifacts)) {
+        tool.artifacts = asArray<unknown>(o.artifacts).map(normalizeAssistantArtifact)
+      }
+      return { type: "tool", tool }
+    }
+
+    case "artifact":
+      return { type: "artifact", artifact: normalizeAssistantArtifact(o) }
+
+    case "done": {
+      // Additive and optional: an older API never sends it, and an absent id
+      // must not become `""` — the edit flow treats "no id" as "nothing on the
+      // server to truncate yet", which an empty string cannot express.
+      const userId = asString(o.user_message_id)
+      return {
+        type: "done",
+        conversation_id: asString(o.conversation_id),
+        message_id: asString(o.message_id),
+        content: asString(o.content),
+        artifacts: asArray<unknown>(o.artifacts).map(normalizeAssistantArtifact),
+        ...(userId ? { user_message_id: userId } : {}),
+      }
+    }
+
+    case "error":
+      return {
+        type: "error",
+        code: asString(o.code, ASSISTANT_INTERNAL_ERROR),
+        // Fall back to `error`, then to the raw payload text: an error frame we
+        // cannot parse must still say something rather than show a blank alert.
+        message: asString(o.message) || asString(o.error) || raw || "The assistant failed.",
+      }
+
+    default:
+      return null
   }
 }

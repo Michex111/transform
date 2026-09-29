@@ -17,13 +17,18 @@ from src.application.services.file_transfer_service import TransferService
 from src.infrastructure.adapters.repository.sql_conversion_job_repo import SQLConversionJobRepository
 from src.infrastructure.adapters.security.encryption import FileEncryptionService
 from src.infrastructure.adapters.storage.minio_storage_adapter import MinioFileStorageAdapter
-from src.infrastructure.adapters.storage.sanitize import extension_from_filename
+from src.infrastructure.adapters.storage.sanitize import (
+    UnsafeObjectKeyError,
+    extension_from_filename,
+    sanitize_filename,
+)
 from src.infrastructure.logging.audit import log_data_access
 from src.infrastructure.converters.conversion_map import build_conversion_map
 from src.infrastructure.converters.converter_registry import get_registry
 from src.presentation.api.dependencies.auth_dependencies import CurrentUser
 from src.presentation.api.dependencies.download_stream import iter_decrypted_object
 from src.presentation.api.dependencies.job_access import assert_job_owner
+from src.presentation.api.http_headers import content_disposition_attachment
 from src.presentation.api.dependencies.service_dependencies import (
     get_conversion_repository,
     get_conversion_service,
@@ -76,6 +81,27 @@ def _to_response(job: ConversionJob, download_url: str | None = None) -> Convers
         data_key_wrapped=job.data_key_wrapped,
         client_encrypted=job.client_encrypted,
     )
+
+
+def _safe_display_name(value: str) -> str:
+    """Reduce a client-supplied ``input_key`` to a safe display filename.
+
+    WHY this is a security control and not cosmetic: ``input_key`` is persisted
+    as ``ConversionJob.input_file``. For a job that is never verified its
+    ``object_key`` stays NULL, and the cleanup worker resolves the object to
+    delete with ``object_key or input_file`` — so a path-shaped ``input_key``
+    became an arbitrary object-deletion target. Reducing it to a single leaf
+    segment closes that: every object key this service writes is prefixed (it
+    contains a "/"), which a bare leaf name can never match. It also keeps the
+    stored display name, and the worker's local download path, free of traversal
+    sequences. Legitimate clients send a plain file name, which is unchanged.
+    """
+    try:
+        return sanitize_filename(value)
+    except UnsafeObjectKeyError:
+        # "." / ".." / empty: not a usable name. A generic label keeps the row
+        # displayable without ever storing something that could address a key.
+        return "file"
 
 
 def _apply_client_encryption(
@@ -330,7 +356,8 @@ async def create_conversion_job(
                 source_format=payload.source_format.lower().strip(),
                 target_format=payload.target_format.lower().strip(),
             ),
-            input_file=payload.input_key,
+            # Reduced to a leaf display name — see ``_safe_display_name``.
+            input_file=_safe_display_name(payload.input_key),
             user_id=current_user.id,
         )
         # Register client-side (FENCR) encryption: the browser-uploaded object
@@ -358,7 +385,7 @@ async def get_conversion_job(
 ) -> ConversionJobResponse:
     job = await repository.get_conversion_job(job_id)
     # Authenticated users may only inspect their own jobs (guest jobs included).
-    assert_job_owner(job, current_user.id)
+    job = assert_job_owner(job, current_user.id)
 
     download_url = None
     if str(job.status).lower() == "completed" and job.output_file:
@@ -414,7 +441,7 @@ async def download_conversion_output(
     job = await repository.get_conversion_job(job_id)
     # Ownership check: authenticated users may only read their own outputs
     # (never an ownerless guest job's output).
-    assert_job_owner(job, current_user.id)
+    job = assert_job_owner(job, current_user.id)
     if str(job.status).lower() != "completed" or not job.output_file:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job output not found")
 
@@ -431,7 +458,9 @@ async def download_conversion_output(
         iter_decrypted_object(storage, job.output_file, encryption_service, actor_key),
         media_type="application/octet-stream",
         headers={
-            "Content-Disposition": f'attachment; filename="{job.output_file.split("/")[-1]}"',
+            "Content-Disposition": content_disposition_attachment(
+                job.output_file.split("/")[-1]
+            ),
             "X-Content-Type-Options": "nosniff",
         },
     )

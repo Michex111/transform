@@ -20,7 +20,7 @@ def build_sms_sender(settings):
     The ``SMS_BACKEND`` value is resolved through ``settings._resolve_sms_backend()``
     rather than read directly, so the ``auto`` rule lives in exactly one place.
 
-    ``Settings.validate()`` already refuses an explicit ``twilio`` that is
+    ``Settings.validate_settings()`` already refuses an explicit ``twilio`` that is
     missing credentials, so the ``twilio`` branch here can assume they exist —
     but the assertion is not duplicated: a missing credential raises at boot,
     which is the only place it can be reported usefully.

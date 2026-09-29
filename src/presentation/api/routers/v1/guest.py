@@ -46,6 +46,7 @@ from src.infrastructure.adapters.storage.minio_storage_adapter import (
 from src.infrastructure.config.settings import get_settings
 from src.infrastructure.converters.conversion_map import build_conversion_map
 from src.presentation.api.dependencies.download_stream import iter_decrypted_object
+from src.presentation.api.http_headers import content_disposition_attachment
 from src.presentation.api.dependencies.service_dependencies import (
     get_conversion_repository,
     get_conversion_service,
@@ -56,7 +57,11 @@ from src.presentation.api.dependencies.service_dependencies import (
     get_minio_url_storage,
     get_transfer_service,
 )
-from src.presentation.api.routers.v1.conversions import _apply_client_encryption, _to_response
+from src.presentation.api.routers.v1.conversions import (
+    _apply_client_encryption,
+    _safe_display_name,
+    _to_response,
+)
 from src.presentation.schemas.conversion import (
     ConversionMapResponse,
     ConversionJobResponse,
@@ -134,7 +139,8 @@ async def create_conversion_job(
                 source_format=payload.source_format.lower().strip(),
                 target_format=payload.target_format.lower().strip(),
             ),
-            input_file=payload.input_key,
+            # Reduced to a leaf display name — see ``_safe_display_name``.
+            input_file=_safe_display_name(payload.input_key),
             user_id=None,
         )
         # Guest jobs are ownerless; the data key is wrapped under the fixed
@@ -218,6 +224,16 @@ async def verify_upload_session(
 
     try:
         session = await transfer_service.verify_upload_completion(upload_id)
+
+        # The session must be a guest session. Guest sessions are created
+        # ownerless under the literal "guest", while an authenticated user's
+        # session carries their numeric id; without this check a guest who
+        # learned such an upload id could complete it and point their own job at
+        # that user's object. Refused with a 404 (the same answer as "not
+        # found"), mirroring the authenticated endpoint's refusal of guest
+        # sessions.
+        if session.user_id is not None and session.user_id != "guest":
+            raise UploadSessionNotFoundError("Upload session not found")
 
         # Enforce the guest-tier size limit before pointing the job at the
         # uploaded object (guest files are ephemeral and never persisted to a
@@ -317,7 +333,9 @@ async def download_conversion_output(
         iter_decrypted_object(storage, job.output_file, encryption_service, "guest"),
         media_type="application/octet-stream",
         headers={
-            "Content-Disposition": f'attachment; filename="{job.output_file.split("/")[-1]}"',
+            "Content-Disposition": content_disposition_attachment(
+                job.output_file.split("/")[-1]
+            ),
             "X-Content-Type-Options": "nosniff",
         },
     )

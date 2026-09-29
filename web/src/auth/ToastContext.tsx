@@ -63,7 +63,10 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   return (
     <ToastContext.Provider value={value}>
       {children}
-      <div className="pointer-events-none fixed bottom-4 right-4 z-50 flex w-80 flex-col gap-2">
+      {/* `z-[60]`: above modals and the floating Transform AI panel, both of
+          which are `z-50`. Without this the launcher's body-level portal (a
+          later child of <body>) would paint over every toast. */}
+      <div className="pointer-events-none fixed bottom-4 right-4 z-[60] flex w-80 flex-col gap-2">
         {toasts.map((t) => (
           <div
             key={t.id}

@@ -45,14 +45,28 @@ describe("History entry", () => {
   });
 
   it("is reachable from the phone bar, not only the desktop sidebar", () => {
-    // It sits in PRIMARY, which both the sidebar and the bottom bar render —
-    // so the request has to be on the model, not attached to one render site.
-    expect(PRIMARY.some((item) => item.to === "/app/history")).toBe(true);
+    // It sits in MORE now that the Assistant takes a primary slot, and the
+    // bottom bar renders MORE inside its "More" popover — so it is still
+    // reachable from a phone, which is the invariant this pins.
+    expect(MORE.some((item) => item.to === "/app/history")).toBe(true);
   });
 
   it("carries the request under the key the page reads", () => {
     const history = NAV.find((item) => item.to === "/app/history");
     expect(history?.state).toHaveProperty(HISTORY_TIMELINE_STATE_KEY, "all");
+  });
+});
+
+describe("Assistant entry", () => {
+  it("sits directly after Dashboard, so it takes a primary slot", () => {
+    // The assistant is a top-level way to work with a file, not a settings-page
+    // extra: it is second in the model and therefore in the phone bar's four.
+    expect(NAV[1].to).toBe("/app/assistant");
+    expect(PRIMARY.some((item) => item.to === "/app/assistant")).toBe(true);
+  });
+
+  it("carries no router state", () => {
+    expect(NAV.find((item) => item.to === "/app/assistant")?.state).toBeUndefined();
   });
 });
 

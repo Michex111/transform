@@ -13,7 +13,7 @@ class FakeEventPublisher:
         self.published_events.append(
             {
                 "job_id": job_id,
-                "status": str(status),
+                "status": status,
                 "progress": progress,
                 "message": message,
                 **{k: v for k, v in kwargs.items()},

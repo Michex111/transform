@@ -31,6 +31,7 @@ from src.infrastructure.adapters.storage.sanitize import (
 from src.infrastructure.logging.audit import log_data_access
 from src.presentation.api.dependencies.auth_dependencies import CurrentUser
 from src.presentation.api.dependencies.download_stream import iter_decrypted_object
+from src.presentation.api.http_headers import content_disposition_attachment
 from src.presentation.api.dependencies.service_dependencies import (
     get_conversion_repository,
     get_encryption_service,
@@ -539,7 +540,10 @@ async def stream_file(
         iter_decrypted_object(storage, row.file_key, encryption_service, str(current_user.id)),
         media_type=_stream_media_type(row.file_name, row.mime_type),
         headers={
-            "Content-Disposition": f'attachment; filename="{row.file_name}"',
+            # The name is user-supplied (upload or rename), so it is encoded
+            # rather than interpolated: a quote or CR/LF in it must not be able
+            # to break the header (response splitting).
+            "Content-Disposition": content_disposition_attachment(row.file_name),
             "X-Content-Type-Options": "nosniff",
         },
     )

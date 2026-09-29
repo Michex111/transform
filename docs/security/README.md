@@ -41,7 +41,7 @@ planned. It documents application changes; it does not make them.
    quickly during an evidence trace.
 5. **Be ready to demonstrate during Stage 2**, at minimum:
    - The app **refusing to boot** with a weak `SECRET_KEY` / wildcard CORS /
-     plaintext object storage in production (`settings.validate()`).
+     plaintext object storage in production (`settings.validate_settings()`).
    - **Structured audit events** on a failed login, a rate-limit hit, a webhook
      signature failure, and a permission denial.
    - The **rate-limiter** returning `429` with `Retry-After` and emitting a

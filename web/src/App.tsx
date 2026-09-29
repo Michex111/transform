@@ -40,6 +40,9 @@ const FormatRoutePage = lazy(() =>
 const DashboardPage = lazy(() =>
   import("@/pages/app/DashboardPage").then((m) => ({ default: m.DashboardPage })),
 );
+const AssistantPage = lazy(() =>
+  import("@/pages/app/AssistantPage").then((m) => ({ default: m.AssistantPage })),
+);
 const ConvertPage = lazy(() =>
   import("@/pages/app/ConvertPage").then((m) => ({ default: m.ConvertPage })),
 );
@@ -119,6 +122,7 @@ export default function App() {
       <Route element={<ProtectedRoute />}>
         <Route element={<AppShell />}>
           <Route path="/app/dashboard" element={<DashboardPage />} />
+          <Route path="/app/assistant" element={<AssistantPage />} />
           <Route path="/app/convert" element={<ConvertPage />} />
           <Route path="/app/queue" element={<QueuePage />} />
           <Route path="/app/history" element={<HistoryPage />} />

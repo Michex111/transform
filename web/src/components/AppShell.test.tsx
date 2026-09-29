@@ -38,6 +38,7 @@ vi.mock("@/jobs/JobsContext", () => ({
 }));
 
 const { AppShell } = await import("@/components/AppShell");
+const { NAV } = await import("@/components/navItems");
 
 // `renderToString` on an effectful tree logs a `useLayoutEffect` warning
 // (react-router, motion). Expected here; silence just that message.
@@ -107,7 +108,9 @@ describe("AppShell mobile bottom nav", () => {
 
   it("keeps all four primary destinations reachable", () => {
     const nav = mobileNavHtml(renderShell());
-    for (const path of ["/app/dashboard", "/app/convert", "/app/queue", "/app/history"]) {
+    // Assistant was added second in the nav model, so it takes the fourth
+    // primary slot and History moves into the "More" popover.
+    for (const path of ["/app/dashboard", "/app/assistant", "/app/convert", "/app/queue"]) {
       expect(nav).toContain(`href="${path}"`);
     }
   });
@@ -133,10 +136,12 @@ describe("AppShell desktop sidebar", () => {
     expect(aside).toContain("hidden");
   });
 
-  it("lists all eight destinations", () => {
+  it("lists every destination in the nav model", () => {
     const sidebar = sidebarNavHtml(renderShell());
     const links = sidebar.match(/href="\/app\//g) ?? [];
-    expect(links).toHaveLength(8);
+    // Asserted against the model rather than a literal count, so adding a
+    // destination does not require editing this test — dropping one still fails.
+    expect(links).toHaveLength(NAV.length);
   });
 
   it("replaces the bare logout button with the account menu", () => {

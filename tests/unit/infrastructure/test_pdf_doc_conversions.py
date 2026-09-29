@@ -226,7 +226,14 @@ class TestPdfTextExtraction:
                 self.closed = True
 
         module = types.ModuleType("pypdfium2")
-        module.PdfDocument = lambda path: FakeDocument(path, [FakePage("page one"), FakePage("page two")])
+        # `setattr` rather than attribute assignment: typeshed's `ModuleType`
+        # has no `PdfDocument`, and the stub module is only ever reached through
+        # `import pypdfium2` inside the converter.
+        setattr(
+            module,
+            "PdfDocument",
+            lambda path: FakeDocument(path, [FakePage("page one"), FakePage("page two")]),
+        )
         monkeypatch.setitem(sys.modules, "pypdfium2", module)
         return module
 

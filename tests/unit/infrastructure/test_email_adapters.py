@@ -8,6 +8,8 @@ which is the part that is otherwise only discoverable from a real inbox.
 
 import asyncio
 import smtplib
+from email.message import Message
+from typing import cast
 
 import httpx
 import pytest
@@ -95,7 +97,7 @@ class RecordingSMTP:
         self.context = context
         self.calls: list[str] = []
         self.logins: list[tuple[str, str]] = []
-        self.message = None
+        self.message: Message | None = None
         RecordingSMTP.instances.append(self)
 
     def ehlo(self) -> None:
@@ -108,12 +110,24 @@ class RecordingSMTP:
         self.calls.append("login")
         self.logins.append((username, password))
 
-    def send_message(self, message) -> None:
+    def send_message(self, message: Message) -> None:
         self.calls.append("send_message")
         self.message = message
 
     def quit(self) -> None:
         self.calls.append("quit")
+
+
+def _sent_message(index: int = 0) -> Message:
+    """The message handed to the ``index``-th SMTP connection.
+
+    ``RecordingSMTP.message`` starts as ``None`` (it is set by
+    ``send_message``), so the send sites assert it was handed something rather
+    than subscripting a possibly-empty attribute.
+    """
+    message = RecordingSMTP.instances[index].message
+    assert message is not None, "no message was sent through SMTP"
+    return message
 
 
 @pytest.fixture(autouse=True)
@@ -146,21 +160,25 @@ def test_smtp_sends_a_multipart_alternative_with_text_before_html(monkeypatch) -
     _patch_smtp(monkeypatch)
 
     asyncio.run(_smtp_adapter().send(_message()))
-    sent = RecordingSMTP.instances[0].message
+    sent = _sent_message()
 
     assert sent.get_content_type() == "multipart/alternative"
-    parts = sent.get_payload()
+    # `get_payload()` is typed as a union over every message shape (a str for a
+    # simple message, a list of parts for a multipart one); this message is a
+    # multipart/alternative, so its payload is the list of parts.
+    parts = cast(list[Message], sent.get_payload())
     assert len(parts) == 2
     assert parts[0].get_content_type() == "text/plain"
     assert parts[1].get_content_type() == "text/html"
-    assert "token=abc" in parts[0].get_payload()
+    text_body = cast(str, parts[0].get_payload())
+    assert "token=abc" in text_body
 
 
 def test_smtp_sets_the_envelope_and_content_headers(monkeypatch) -> None:
     _patch_smtp(monkeypatch)
 
     asyncio.run(_smtp_adapter().send(_message()))
-    sent = RecordingSMTP.instances[0].message
+    sent = _sent_message()
 
     assert sent["To"] == "user@example.com"
     assert sent["From"] == "Transform <no-reply@example.com>"
@@ -232,7 +250,7 @@ def test_smtp_honours_a_per_message_reply_to(monkeypatch) -> None:
 
     asyncio.run(_smtp_adapter().send(_message(reply_to="support@example.com")))
 
-    assert RecordingSMTP.instances[0].message["Reply-To"] == "support@example.com"
+    assert _sent_message()["Reply-To"] == "support@example.com"
 
 
 # ---------------------------------------------------------------------------

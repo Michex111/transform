@@ -5,6 +5,7 @@ import { useAuth } from "@/auth/AuthContext";
 import { useToast } from "@/auth/ToastContext";
 import { Button, Card, Skeleton, SkeletonText } from "@/components/ui";
 import { Modal } from "@/components/Modal";
+import { trustedExternalUrl } from "@/lib/download";
 import { formatDate, formatDateOrNull } from "@/lib/format";
 import type {
   CreditBalanceResponse,
@@ -88,7 +89,12 @@ export function BillingPage() {
       // Credit packs go through Stripe-hosted Checkout. Credits are granted by
       // the backend only after the payment confirms (checkout webhook).
       const { checkout_url } = await client.purchaseCredits(amount);
-      window.location.assign(checkout_url);
+      // Never assign an API-supplied URL straight to `location`: a `javascript:`
+      // value would execute in this origin. `trustedExternalUrl` returns the URL
+      // only when its scheme/host passes the same allowlist downloads use.
+      const target = trustedExternalUrl(checkout_url);
+      if (!target) throw new Error("The checkout link was not valid. Please try again.");
+      window.location.assign(target);
     } catch (err) {
       error(err instanceof Error ? err.message : "Could not start credit purchase");
     }
@@ -98,7 +104,9 @@ export function BillingPage() {
     setPortalLoading(true);
     try {
       const { portal_url } = await client.createPortalSession();
-      window.location.assign(portal_url);
+      const target = trustedExternalUrl(portal_url);
+      if (!target) throw new Error("The billing portal link was not valid. Please try again.");
+      window.location.assign(target);
     } catch (err) {
       // The portal requires an existing Stripe customer. A user with no paid
       // subscription (Free tier) has no customer yet, so guide them to upgrade

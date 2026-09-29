@@ -18,6 +18,16 @@ import {
   asStringArray,
   normalizeApiKeyCreate,
   normalizeApiKeyList,
+  normalizeAiEntitlement,
+  normalizeAssistantArtifact,
+  normalizeAssistantConversation,
+  normalizeAssistantConversationDetail,
+  normalizeAssistantConversationList,
+  normalizeAssistantMessage,
+  normalizeAssistantRecommend,
+  normalizeAssistantStatus,
+  normalizeAssistantStreamEvent,
+  normalizeAssistantSummary,
   normalizeBatchDelete,
   normalizeCancelSubscription,
   normalizeCheckout,
@@ -55,7 +65,7 @@ import {
   normalizeUser,
   normalizeVerifyEmail,
 } from "@/api/normalize";
-
+import { MAX_ASSISTANT_ATTACHMENTS } from "@/lib/assistantAttachments";
 describe("primitive guards", () => {
   it("asArray only accepts arrays", () => {
     expect(asArray([1, 2])).toEqual([1, 2]);
@@ -301,11 +311,59 @@ describe("normalizeCreditHistory / normalizeCreditPricing / normalizeSubscriptio
     const p = normalizeSubscriptionPlan({ tier: "PRO", name: "Pro" });
     expect(p.features).toEqual([]);
     expect(() => p.features.map((f) => f)).not.toThrow();
+    // No assistant on the payload → no AI group (not zeros, not undefined).
+    expect(p.ai).toBeNull();
   });
 
   it("preserves valid plan features", () => {
     const p = normalizeSubscriptionPlan({ tier: "PRO", name: "Pro", features: ["a"] });
     expect(p.features).toEqual(["a"]);
+  });
+
+  it("passes a plan's AI entitlements through losslessly", () => {
+    const ai = {
+      model_level: "advanced",
+      model_label: "Advanced",
+      requests_per_hour: 60,
+      max_attachments: 3,
+      max_document_mb: 25,
+      max_actions_per_turn: 8,
+    };
+    expect(normalizeSubscriptionPlan({ tier: "PRO_PLUS", ai }).ai).toEqual(ai);
+  });
+
+  it("turns an absent or unusable `ai` into null, not a half-built object", () => {
+    expect(normalizeSubscriptionPlan({ tier: "FREE" }).ai).toBeNull();
+    expect(normalizeSubscriptionPlan({ tier: "FREE", ai: null }).ai).toBeNull();
+    expect(normalizeSubscriptionPlan({ tier: "FREE", ai: "standard" }).ai).toBeNull();
+    // An object with no label cannot be described, so it is not rendered.
+    expect(normalizeSubscriptionPlan({ tier: "FREE", ai: {} }).ai).toBeNull();
+    expect(normalizeSubscriptionPlan({ tier: "FREE", ai: { model_label: "  " } }).ai).toBeNull();
+  });
+});
+
+describe("normalizeAiEntitlement", () => {
+  it("returns null for anything that is not a usable object", () => {
+    expect(normalizeAiEntitlement(undefined)).toBeNull();
+    expect(normalizeAiEntitlement(null)).toBeNull();
+    expect(normalizeAiEntitlement([])).toBeNull();
+    expect(normalizeAiEntitlement({})).toBeNull();
+  });
+
+  it("defaults missing numbers to 0 and clamps negatives", () => {
+    const ai = normalizeAiEntitlement({
+      model_label: "Standard",
+      requests_per_hour: -5,
+      max_attachments: "many",
+    });
+    expect(ai).toEqual({
+      model_level: "",
+      model_label: "Standard",
+      requests_per_hour: 0,
+      max_attachments: 0,
+      max_document_mb: 0,
+      max_actions_per_turn: 0,
+    });
   });
 });
 
@@ -465,6 +523,16 @@ describe("single-object normalizers", () => {
     const s = normalizeUploadSession({ upload_id: "u1" });
     expect(s.file_name).toBeNull();
     expect(s.folder_id).toBeNull();
+  });
+
+  it("normalizeUploadSession passes through the created file_id", () => {
+    // `verify` now returns the library file id so an uploaded attachment can be
+    // sent as `file_ids`. It is additive: absent on an older API.
+    expect(normalizeUploadSession({ upload_id: "u1", file_id: "f9" }).file_id).toBe("f9");
+    // Absent (older API) must stay absent, not become `""`.
+    expect("file_id" in normalizeUploadSession({ upload_id: "u1" })).toBe(false);
+    // An empty string is the API's "no file" value, not a usable id.
+    expect(normalizeUploadSession({ upload_id: "u1", file_id: "" }).file_id).toBeUndefined();
   });
 
   it("normalizeFileDownload keeps the download URL a string", () => {
@@ -644,5 +712,459 @@ describe("password reset normalizers", () => {
       message: "Your password has been updated. Sign in with your new password.",
     };
     expect(normalizeResetPassword(valid)).toEqual(valid);
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * Transform AI
+ * ------------------------------------------------------------------ */
+
+describe("normalizeAssistantStatus", () => {
+  it("degrades a missing body to disabled with an unknown backend", () => {
+    // Never guess a vendor name: only an exact `"echo"` may light the demo badge.
+    expect(normalizeAssistantStatus(undefined)).toEqual({
+      enabled: false,
+      backend: "unknown",
+      model: "",
+      // The client's own cap, NOT 0: an older API omits the field and a 0 would
+      // make the composer refuse every attachment on that API.
+      max_attachments: MAX_ASSISTANT_ATTACHMENTS,
+    });
+    expect(normalizeAssistantStatus({ backend: "something-new" }).backend).toBe("unknown");
+  });
+
+  it("passes a well-formed body through, filling only the attachment cap", () => {
+    expect(
+      normalizeAssistantStatus({ enabled: true, backend: "openai", model: "gpt-4o-mini" }),
+    ).toEqual({
+      enabled: true,
+      backend: "openai",
+      model: "gpt-4o-mini",
+      max_attachments: MAX_ASSISTANT_ATTACHMENTS,
+    });
+  });
+
+  it("keeps every absent entitlement absent, except max_attachments", () => {
+    const status = normalizeAssistantStatus({ enabled: true, backend: "openai" });
+    expect(status.tier).toBeUndefined();
+    expect(status.model_label).toBeUndefined();
+    expect(status.requests_per_hour).toBeUndefined();
+    expect(status.used_this_hour).toBeUndefined();
+    expect(status.remaining_this_hour).toBeUndefined();
+    expect(status.max_actions_per_turn).toBeUndefined();
+    expect(status.max_document_bytes).toBeUndefined();
+    expect(status.max_attachments).toBe(MAX_ASSISTANT_ATTACHMENTS);
+  });
+
+  it("parses a full entitlement payload and clamps negatives", () => {
+    const status = normalizeAssistantStatus({
+      enabled: true,
+      backend: "openai",
+      model: "gpt-4o-mini",
+      tier: "PRO_PLUS",
+      model_level: "advanced",
+      model_label: "Advanced",
+      requests_per_hour: 60,
+      used_this_hour: 3,
+      remaining_this_hour: 57,
+      max_attachments: 3,
+      max_actions_per_turn: 8,
+      max_document_bytes: 26214400,
+    });
+    expect(status).toMatchObject({
+      tier: "PRO_PLUS",
+      model_level: "advanced",
+      model_label: "Advanced",
+      requests_per_hour: 60,
+      used_this_hour: 3,
+      remaining_this_hour: 57,
+      max_attachments: 3,
+      max_actions_per_turn: 8,
+      max_document_bytes: 26214400,
+    });
+    const clamped = normalizeAssistantStatus({ used_this_hour: -2, max_attachments: -1 });
+    expect(clamped.used_this_hour).toBe(0);
+    expect(clamped.max_attachments).toBe(0);
+  });
+
+  it("treats a blank or non-string label as absent", () => {
+    const status = normalizeAssistantStatus({ model_label: "   ", tier: 7 });
+    expect(status.model_label).toBeUndefined();
+    expect(status.tier).toBeUndefined();
+  });
+});
+
+describe("normalizeAssistantConversationList", () => {
+  it("always yields an array", () => {
+    expect(normalizeAssistantConversationList({}).conversations).toEqual([]);
+    expect(normalizeAssistantConversationList(null).conversations).toEqual([]);
+  });
+
+  it("lets a conversation updated_at stay absent", () => {
+    // `POST /assistant/conversations` does not return it; `""` would read as a
+    // real timestamp to any date formatter.
+    expect(normalizeAssistantConversation({ id: "c1", title: "Hi" }).updated_at).toBeUndefined();
+    expect(normalizeAssistantConversation({ id: "c1", updated_at: "2026-01-01" }).updated_at).toBe(
+      "2026-01-01",
+    );
+  });
+
+  it("keeps a well-formed list unchanged", () => {
+    const conversations = [
+      {
+        id: "c1",
+        title: "Summaries",
+        created_at: "2026-01-01T00:00:00Z",
+        updated_at: "2026-01-02T00:00:00Z",
+      },
+    ];
+    expect(normalizeAssistantConversationList({ conversations }).conversations).toEqual(
+      conversations,
+    );
+  });
+});
+
+describe("normalizeAssistantConversationDetail", () => {
+  it("survives a body missing both keys", () => {
+    const detail = normalizeAssistantConversationDetail({});
+    expect(detail.messages).toEqual([]);
+    expect(detail.conversation.id).toBe("");
+  });
+
+  it("coerces an unrecognised role to assistant", () => {
+    expect(normalizeAssistantMessage({ role: "system", content: "x" }).role).toBe("assistant");
+    expect(normalizeAssistantMessage({ role: "user", content: "x" }).role).toBe("user");
+  });
+
+  it("passes a well-formed body through unchanged", () => {
+    const body = {
+      conversation: { id: "c1", title: "T", created_at: "2026-01-01", updated_at: "2026-01-02" },
+      messages: [
+        { id: "m1", role: "user", content: "hi", tool_name: null, meta: null, created_at: "2026-01-01" },
+        { id: "m2", role: "assistant", content: "hello" },
+      ],
+    };
+    const detail = normalizeAssistantConversationDetail(body);
+    expect(detail.conversation).toEqual(body.conversation);
+    expect(detail.messages[0]).toEqual(body.messages[0]);
+    expect(detail.messages[1].content).toBe("hello");
+  });
+});
+
+describe("normalizeAssistantMessage — persisted meta", () => {
+  it("is lossless for a legacy row (no new keys appear)", () => {
+    // The important half: a row written before the richer meta existed must
+    // normalise to exactly the shape it always did, so nothing downstream has
+    // to tell "absent" apart from "empty".
+    expect(normalizeAssistantMessage({ id: "m2", role: "assistant", content: "hello" })).toEqual({
+      id: "m2",
+      role: "assistant",
+      content: "hello",
+      tool_name: null,
+      meta: null,
+    });
+    const legacyTool = normalizeAssistantMessage({
+      id: "t2",
+      role: "tool",
+      content: '{"ok":true}',
+      tool_name: "list_files",
+      meta: { tool_call_id: "c2" },
+    });
+    expect(legacyTool.label).toBeUndefined();
+    expect(legacyTool.summary).toBeUndefined();
+    expect(legacyTool.artifacts).toBeUndefined();
+  });
+
+  it("lifts label, summary and artifacts out of meta losslessly", () => {
+    const row = {
+      id: "t1",
+      role: "tool",
+      content: '{"matches":[]}',
+      tool_name: "list_files",
+      meta: {
+        tool_call_id: "c1",
+        label: "Looking through your files",
+        summary: "Found 1 file",
+        artifacts: [{ type: "file", id: "f1", name: "report.pdf", meta: {} }],
+      },
+    };
+    const out = normalizeAssistantMessage(row);
+    expect(out.label).toBe("Looking through your files");
+    expect(out.summary).toBe("Found 1 file");
+    expect(out.artifacts).toEqual([{ type: "file", id: "f1", name: "report.pdf", meta: {} }]);
+    // `meta` itself is untouched, so nothing that still reads the bag breaks.
+    expect(out.meta).toEqual(row.meta);
+  });
+
+  it("reads artifacts off a final assistant message too", () => {
+    const out = normalizeAssistantMessage({
+      id: "a1",
+      role: "assistant",
+      content: "Here you go.",
+      meta: { artifacts: [{ type: "job", id: "j1", name: "convert" }] },
+    });
+    expect(out.artifacts).toEqual([{ type: "job", id: "j1", name: "convert", meta: null }]);
+    expect(out.label).toBeUndefined();
+  });
+
+  it("ignores a malformed meta rather than throwing", () => {
+    const out = normalizeAssistantMessage({
+      id: "t3",
+      role: "tool",
+      content: "{}",
+      meta: { label: 7, summary: ["x"], artifacts: "not a list" },
+    });
+    expect(out.label).toBeUndefined();
+    expect(out.summary).toBeUndefined();
+    expect(out.artifacts).toBeUndefined();
+  });
+
+  it("drops artifact entries that name nothing", () => {
+    const out = normalizeAssistantMessage({
+      id: "t4",
+      role: "tool",
+      content: "{}",
+      meta: { artifacts: [null, "x", {}, { type: "file", id: "f9", name: "a.pdf" }] },
+    });
+    expect(out.artifacts).toEqual([{ type: "file", id: "f9", name: "a.pdf", meta: null }]);
+  });
+
+  it("tolerates a non-object meta", () => {
+    const out = normalizeAssistantMessage({
+      id: "t5",
+      role: "tool",
+      content: "{}",
+      meta: "nope",
+    });
+    expect(out.meta).toBeNull();
+    expect(out.artifacts).toBeUndefined();
+  });
+
+  it("lifts meta.attachments off a user row losslessly", () => {
+    // The backend echoes the turn's attachments on the user message so a
+    // REVISITED conversation renders its chips.
+    const out = normalizeAssistantMessage({
+      id: "u1",
+      role: "user",
+      content: "convert this",
+      meta: {
+        attachments: [
+          { id: "f1", name: "resume.pdf", extension: "pdf" },
+          { id: "f2", name: "notes.docx" },
+        ],
+      },
+    });
+    expect(out.attachments).toEqual([
+      { id: "f1", name: "resume.pdf", extension: "pdf" },
+      { id: "f2", name: "notes.docx" },
+    ]);
+  });
+
+  it("drops malformed attachments and keeps the message usable", () => {
+    const out = normalizeAssistantMessage({
+      id: "u2",
+      role: "user",
+      content: "hi",
+      meta: {
+        attachments: [null, "x", { name: "nameless.pdf" }, { id: "f3", name: 9 }, { id: "ok" }],
+      },
+    });
+    // Only entries with an id survive; a missing name stays an empty string so
+    // the chip can fall back to the id.
+    expect(out.attachments).toEqual([{ id: "f3", name: "" }, { id: "ok", name: "" }]);
+  });
+
+  it("omits attachments when meta has none (legacy row unchanged)", () => {
+    const out = normalizeAssistantMessage({ id: "u3", role: "user", content: "hi" });
+    expect(out.attachments).toBeUndefined();
+    expect("attachments" in out).toBe(false);
+  });
+});
+
+describe("normalizeAssistantSummary", () => {
+  it("forces key_points to a string array", () => {
+    expect(normalizeAssistantSummary({ key_points: "not a list" }).key_points).toEqual([]);
+    expect(normalizeAssistantSummary({ key_points: ["a", 2, null] }).key_points).toEqual(["a"]);
+  });
+
+  it("passes a well-formed body through unchanged", () => {
+    const body = {
+      file_id: "f1",
+      file_name: "report.pdf",
+      summary: "A short report.",
+      key_points: ["one", "two"],
+      model: "gpt-4o-mini",
+    };
+    expect(normalizeAssistantSummary(body)).toEqual(body);
+  });
+});
+
+describe("normalizeAssistantRecommend", () => {
+  it("survives a body with no recommendations", () => {
+    expect(normalizeAssistantRecommend({ recommendations: null }).recommendations).toEqual([]);
+  });
+
+  it("clamps confidence into 0..1 and drops a target-less entry", () => {
+    const res = normalizeAssistantRecommend({
+      recommendations: [
+        { target_format: "DOCX", label: "DOCX", confidence: 7 },
+        { target_format: "PDF", confidence: -3 },
+        { label: "No format" },
+      ],
+    });
+    expect(res.recommendations.map((r) => r.target_format)).toEqual(["docx", "pdf"]);
+    expect(res.recommendations.map((r) => r.confidence)).toEqual([1, 0]);
+  });
+
+  it("passes well-formed recommendations through unchanged", () => {
+    const body = {
+      source_format: "pdf",
+      use_case: "resume",
+      recommendations: [
+        {
+          target_format: "docx",
+          label: "DOCX",
+          category: "document",
+          reason: "Editable",
+          confidence: 0.82,
+        },
+      ],
+    };
+    expect(normalizeAssistantRecommend(body)).toEqual(body);
+  });
+});
+
+describe("normalizeAssistantArtifact", () => {
+  it("degrades an unknown type rather than guessing", () => {
+    expect(normalizeAssistantArtifact({ type: "spreadsheet", id: "x" }).type).toBe("unknown");
+    expect(normalizeAssistantArtifact({ type: "job", id: "j1", name: "n" }).type).toBe("job");
+  });
+
+  it("keeps a folder artifact and its meta intact", () => {
+    expect(normalizeAssistantArtifact({ type: "folder", id: "f1", name: "Invoices" })).toEqual({
+      type: "folder",
+      id: "f1",
+      name: "Invoices",
+      meta: null,
+    });
+  });
+
+  it("keeps meta only when it is a plain object", () => {
+    expect(normalizeAssistantArtifact({ id: "x" }).meta).toBeNull();
+    expect(normalizeAssistantArtifact({ id: "x", meta: ["a"] }).meta).toBeNull();
+    expect(normalizeAssistantArtifact({ id: "x", meta: { status: "COMPLETED" } }).meta).toEqual({
+      status: "COMPLETED",
+    });
+  });
+});
+
+describe("normalizeAssistantStreamEvent", () => {
+  it("parses each frame of the frozen contract", () => {
+    expect(normalizeAssistantStreamEvent("status", '{"stage":"thinking"}')).toEqual({
+      type: "status",
+      stage: "thinking",
+    });
+    expect(normalizeAssistantStreamEvent("delta", '{"text":"hi"}')).toEqual({
+      type: "delta",
+      text: "hi",
+    });
+    expect(
+      normalizeAssistantStreamEvent("tool", '{"name":"search","label":"Searching","status":"running"}'),
+    ).toEqual({
+      type: "tool",
+      tool: { name: "search", label: "Searching", status: "running" },
+    });
+    expect(
+      normalizeAssistantStreamEvent(
+        "tool",
+        '{"name":"search","status":"done","summary":"3 hits","artifacts":[{"type":"file","id":"f1","name":"a.pdf"}]}',
+      ),
+    ).toEqual({
+      type: "tool",
+      tool: {
+        name: "search",
+        status: "done",
+        summary: "3 hits",
+        artifacts: [{ type: "file", id: "f1", name: "a.pdf", meta: null }],
+      },
+    });
+    expect(
+      normalizeAssistantStreamEvent("artifact", '{"type":"job","id":"j1","name":"conv"}'),
+    ).toEqual({
+      type: "artifact",
+      artifact: { type: "job", id: "j1", name: "conv", meta: null },
+    });
+    expect(
+      normalizeAssistantStreamEvent(
+        "done",
+        '{"conversation_id":"c1","message_id":"m1","content":"answer","artifacts":[]}',
+      ),
+    ).toEqual({
+      type: "done",
+      conversation_id: "c1",
+      message_id: "m1",
+      content: "answer",
+      artifacts: [],
+    });
+    expect(normalizeAssistantStreamEvent("error", '{"code":"QUOTA_EXCEEDED","message":"slow down"}')).toEqual(
+      { type: "error", code: "QUOTA_EXCEEDED", message: "slow down" },
+    );
+  });
+
+  it("drops an unknown event name instead of throwing", () => {
+    expect(normalizeAssistantStreamEvent("telemetry", "{}")).toBeNull();
+  });
+
+  it("drops a tool frame with no name", () => {
+    expect(normalizeAssistantStreamEvent("tool", '{"status":"running"}')).toBeNull();
+  });
+
+  it("degrades malformed JSON to an empty payload per event", () => {
+    expect(normalizeAssistantStreamEvent("delta", "{not json")).toEqual({ type: "delta", text: "" });
+    // An unparseable error still says something rather than blanking the alert.
+    expect(normalizeAssistantStreamEvent("error", "boom")?.type).toBe("error");
+    const error = normalizeAssistantStreamEvent("error", "boom");
+    expect(error && error.type === "error" ? error.message : "").toBe("boom");
+  });
+
+  it("defaults an error code to INTERNAL_ERROR", () => {
+    const event = normalizeAssistantStreamEvent("error", '{"message":"x"}');
+    expect(event && event.type === "error" ? event.code : "").toBe("INTERNAL_ERROR");
+  });
+
+  it("accepts an already-parsed object payload", () => {
+    expect(normalizeAssistantStreamEvent("delta", { text: "obj" })).toEqual({
+      type: "delta",
+      text: "obj",
+    });
+  });
+
+  it("carries the optional user_message_id on a done frame", () => {
+    expect(
+      normalizeAssistantStreamEvent(
+        "done",
+        '{"conversation_id":"c1","message_id":"m1","content":"answer","artifacts":[],"user_message_id":"u1"}',
+      ),
+    ).toEqual({
+      type: "done",
+      conversation_id: "c1",
+      message_id: "m1",
+      content: "answer",
+      artifacts: [],
+      user_message_id: "u1",
+    });
+  });
+
+  it("leaves user_message_id absent when the API does not send one", () => {
+    const event = normalizeAssistantStreamEvent(
+      "done",
+      '{"conversation_id":"c1","message_id":"m1","content":"answer"}',
+    );
+    expect(event && event.type === "done" ? event.user_message_id : "missing").toBeUndefined();
+  });
+
+  it("normalises an unknown tool status to running rather than dropping it", () => {
+    const event = normalizeAssistantStreamEvent("tool", '{"name":"t","status":"weird"}');
+    expect(event && event.type === "tool" ? event.tool.status : "").toBe("unknown");
   });
 });

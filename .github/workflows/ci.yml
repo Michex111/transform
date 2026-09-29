@@ -38,6 +38,16 @@ jobs:
       - name: Install dependencies
         run: uv sync --frozen --group dev
 
+      - name: Type check (pyrefly)
+        # Static type checking over `src`, `tests` and `workers` (see
+        # `pyrefly.toml`, which also pins the workspace root as the import root
+        # and the `default` preset). This runs BEFORE the tests so a type error
+        # is reported as itself rather than as a downstream test failure.
+        #
+        # No environment variables are needed: type checking never imports the
+        # application, so it does not read `.env` or touch Postgres/Redis/S3.
+        run: uv run pyrefly check
+
       - name: Run tests
         # These are placeholder values for CI only. The test suite never talks
         # to a real Postgres/Redis/S3 instance; it uses fakes and aiosqlite.
