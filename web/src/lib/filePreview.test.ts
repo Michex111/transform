@@ -11,6 +11,7 @@ import {
   PREVIEW_TEXT_MAX_BYTES,
   extensionOf,
   isTextPreviewOversize,
+  previewBlobType,
   previewKind,
   previewUnavailableMessage,
   type PreviewKind,
@@ -208,5 +209,20 @@ describe("previewUnavailableMessage", () => {
       expect(message).toMatch(/[Dd]ownload it to open it\.$/);
     }
     expect(new Set(messages).size).toBe(kinds.length);
+  });
+});
+
+// Regression: a file named `.pdf` whose bytes are HTML was handed to an
+// `<iframe>` as a blob URL with no declared type, which the browser could sniff
+// and run as a same-origin document. The preview stamps the classified type so
+// only the PDF viewer can render it.
+describe("previewBlobType", () => {
+  it("forces application/pdf for the pdf kind", () => {
+    expect(previewBlobType("pdf")).toBe("application/pdf");
+  });
+
+  it("leaves every other kind untouched (null = keep the fetched type)", () => {
+    const others: PreviewKind[] = ["image", "video", "audio", "text", "none"];
+    for (const kind of others) expect(previewBlobType(kind)).toBeNull();
   });
 });

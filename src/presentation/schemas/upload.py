@@ -21,7 +21,14 @@ class CreateUploadSessionRequest(BaseModel):
 
 class UploadPartEtag(BaseModel):
     part_number: int = Field(ge=1)
-    etag: str = Field(min_length=1, description="The ETag response header of the part PUT")
+    # S3 part ETags are short (well under 100 chars). Bounding the length keeps a
+    # client from smuggling a large blob through a field the server forwards
+    # into the provider's CompleteMultipartUpload XML.
+    etag: str = Field(
+        min_length=1,
+        max_length=128,
+        description="The ETag response header of the part PUT",
+    )
 
 
 class UploadVerifyRequest(BaseModel):
@@ -34,6 +41,12 @@ class UploadVerifyRequest(BaseModel):
 
     parts: list[UploadPartEtag] | None = Field(
         default=None,
+        # S3 accepts at most 10 000 parts, so anything larger is invalid input
+        # rather than a bigger upload. Bounded here because the list is sorted
+        # and serialised into the CompleteMultipartUpload request: an unbounded
+        # list from an unauthenticated client body is a cheap memory/CPU
+        # exhaustion vector.
+        max_length=10_000,
         description="Part number/ETag pairs for a multipart upload",
     )
 

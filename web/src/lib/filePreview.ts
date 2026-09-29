@@ -192,3 +192,19 @@ const UNAVAILABLE_MESSAGES: Record<PreviewKind, string> = {
 export function previewUnavailableMessage(kind: PreviewKind): string {
   return UNAVAILABLE_MESSAGES[kind];
 }
+
+/**
+ * The MIME type to stamp on a preview's blob URL, or `null` to keep the fetched
+ * bytes unchanged.
+ *
+ * A `blob:` URL inherits the Blob's own type, and an `<iframe>` pointed at a
+ * `text/html` blob renders it as a document — so a file whose NAME classifies as
+ * `pdf` but whose BYTES are HTML would run as a same-origin document inside the
+ * preview. (`<img>`/`<video>`/`<audio>` cannot execute markup, so only the PDF
+ * frame is exposed, which is why only this kind is typed.) Stamping
+ * `application/pdf` routes the bytes to the browser's PDF viewer and prevents
+ * content sniffing from turning them into a live document.
+ */
+export function previewBlobType(kind: PreviewKind): string | null {
+  return kind === "pdf" ? "application/pdf" : null;
+}

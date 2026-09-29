@@ -155,8 +155,9 @@ async def verify_upload_session(
 
 		# Enforce the per-file cap and the storage quota, then persist the file
 		# record. A rejection here also removes the object, so a refused upload
-		# leaves no orphan behind.
-		await file_service.complete_upload(current_user.id, session)
+		# leaves no orphan behind. The returned id is echoed on the session so
+		# the SPA can link straight to the new file without re-listing.
+		session.file_id = await file_service.complete_upload(current_user.id, session)
 
 		if job_id is None:
 			return session

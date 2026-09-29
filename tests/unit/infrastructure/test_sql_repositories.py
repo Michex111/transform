@@ -2,21 +2,36 @@
 
 import asyncio
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from src.domain.assistant.entities.conversation import Message, MessageRole
 from src.domain.conversions.entities.conversion_job import ConversionJob
 from src.domain.conversions.value_object.conversion_type import ConversionType
 from src.domain.conversions.value_object.job_status import JobStatus
 from src.domain.security.enitities.api_key import APIKey, APIKeyStatus
 from src.domain.subscriptions.entities.credit import Credit
+from src.domain.subscriptions.policies.tier_policy import TierPolicy
+from src.domain.subscriptions.value_object.credit_period import current_period_key
 from src.domain.subscriptions.value_object.tier import SubscriptionTier
 from src.infrastructure.adapters.repository.sql_api_key_repo import SQLAPIKeyRepository
+from src.infrastructure.adapters.repository.sql_assistant_account_adapter import (
+    SQLAssistantAccountAdapter,
+)
+from src.infrastructure.adapters.repository.sql_conversation_repo import (
+    SQLConversationRepository,
+)
 from src.infrastructure.adapters.repository.sql_conversion_job_repo import SQLConversionJobRepository
 from src.infrastructure.adapters.repository.sql_credit_repo import SQLCreditRepository
 from src.infrastructure.adapters.repository.sql_subscription_repo import SQLSubscriptionRepository
-from src.infrastructure.database.models import UserModel
+from src.infrastructure.adapters.repository.sql_user_file_repo import SQLUserFileRepository
+from src.infrastructure.database.models import (
+    ConversionJobModel,
+    UserFileModel,
+    UserFolderModel,
+    UserModel,
+)
 from src.infrastructure.database.session import Base
 
 
@@ -161,6 +176,196 @@ def test_conversion_job_active_listing() -> None:
         asyncio.run(_run())
 
 
+def test_conversion_job_aggregations_for_the_account_tool() -> None:
+    """Both aggregation methods honour ``since``, ``fmt`` and ``status``.
+
+    They feed the assistant's account tool, whose numbers must match the
+    dashboard's; the tests therefore pin the exact contract (status keys, the
+    OR semantics of ``fmt``, and the empty result for an unknown status).
+    """
+    with sqlite_session_factory() as factory:
+
+        async def _run() -> None:
+            async with factory() as session:
+                user = await _create_user(factory)
+                other = UserModel(
+                    username="other",
+                    email="other@example.com",
+                    hashed_password="x",
+                    is_active=True,
+                )
+                session.add(other)
+                await session.commit()
+                await session.refresh(other)
+                now = datetime.now(UTC)
+
+                def job(
+                    job_id: str,
+                    source: str,
+                    target: str,
+                    status: JobStatus,
+                    created_at: datetime,
+                    user_id: int | None,
+                ) -> ConversionJobModel:
+                    return ConversionJobModel(
+                        job_id=job_id,
+                        status=status,
+                        source_format=source,
+                        target_format=target,
+                        input_file="input.bin",
+                        object_key="objects/input.bin",
+                        user_id=user_id,
+                        created_at=created_at,
+                        updated_at=created_at,
+                    )
+
+                session.add_all(
+                    [
+                        job("a", "pdf", "docx", JobStatus.COMPLETED, now - timedelta(days=2), user.id),
+                        job("b", "docx", "pdf", JobStatus.COMPLETED, now - timedelta(hours=1), user.id),
+                        job("c", "pdf", "txt", JobStatus.FAILED, now - timedelta(minutes=30), user.id),
+                        job("d", "png", "jpg", JobStatus.PROCESSING, now - timedelta(minutes=10), user.id),
+                        job("e", "pdf", "docx", JobStatus.COMPLETED, now - timedelta(hours=1), other.id),
+                    ]
+                )
+                await session.commit()
+
+                repo = SQLConversionJobRepository(session)
+                # Another tenant's job is never counted.
+                assert await repo.counts_by_status(user.id) == {
+                    "COMPLETED": 2,
+                    "FAILED": 1,
+                    "TOTAL": 4,
+                }
+                # ``since`` excludes the 2-day-old job.
+                assert await repo.counts_by_status(
+                    user.id, since=now - timedelta(days=1)
+                ) == {"COMPLETED": 1, "FAILED": 1, "TOTAL": 3}
+                # ``fmt`` matches source OR target, case-insensitively.
+                assert await repo.counts_by_status(user.id, fmt="PDF") == {
+                    "COMPLETED": 2,
+                    "FAILED": 1,
+                    "TOTAL": 3,
+                }
+                # ``status`` narrows to a single bucket.
+                assert await repo.counts_by_status(user.id, status="failed") == {
+                    "COMPLETED": 0,
+                    "FAILED": 1,
+                    "TOTAL": 1,
+                }
+                # An unknown status matches nothing rather than everything.
+                assert await repo.counts_by_status(user.id, status="nope") == {
+                    "COMPLETED": 0,
+                    "FAILED": 0,
+                    "TOTAL": 0,
+                }
+
+                # Grouped by target, most frequent first (all tie here, so the
+                # format name breaks the tie).
+                assert await repo.count_jobs_by_target_format(user.id) == [
+                    ("docx", 1),
+                    ("jpg", 1),
+                    ("pdf", 1),
+                    ("txt", 1),
+                ]
+                # ``fmt`` matches source OR target, so "pdf" keeps the docx
+                # target of the pdf source, the pdf target, and the txt target.
+                assert await repo.count_jobs_by_target_format(user.id, fmt="pdf") == [
+                    ("docx", 1),
+                    ("pdf", 1),
+                    ("txt", 1),
+                ]
+
+        asyncio.run(_run())
+
+
+def test_assistant_account_adapter_mirrors_the_dashboard() -> None:
+    """The account adapter derives the same numbers the dashboard shows.
+
+    Credit balance falls back to the tier allowance when no bucket exists, the
+    reset date is the next period start for tiers that have an allowance, and
+    "active" is everything that is neither completed nor failed.
+    """
+    with sqlite_session_factory() as factory:
+
+        async def _run() -> None:
+            async with factory() as session:
+                user = await _create_user(factory)
+                now = datetime.now(UTC)
+
+                def job(
+                    job_id: str, source: str, target: str, status: JobStatus
+                ) -> ConversionJobModel:
+                    return ConversionJobModel(
+                        job_id=job_id,
+                        status=status,
+                        source_format=source,
+                        target_format=target,
+                        input_file="input.bin",
+                        object_key="objects/input.bin",
+                        user_id=user.id,
+                        created_at=now,
+                        updated_at=now,
+                    )
+
+                session.add_all(
+                    [
+                        job("j1", "pdf", "docx", JobStatus.COMPLETED),
+                        job("j2", "docx", "pdf", JobStatus.COMPLETED),
+                        job("j3", "pdf", "txt", JobStatus.FAILED),
+                        job("j4", "png", "jpg", JobStatus.PENDING),
+                        job("j5", "pdf", "docx", JobStatus.COMPLETED),
+                    ]
+                )
+                await session.commit()
+
+                adapter = SQLAssistantAccountAdapter(
+                    job_repository=SQLConversionJobRepository(session),
+                    credit_repository=SQLCreditRepository(session),
+                    subscription_repository=SQLSubscriptionRepository(session),
+                    file_repository=SQLUserFileRepository(session),
+                )
+                overview = await adapter.overview(
+                    user.id, since=None, fmt=None, status=None
+                )
+                assert overview.tier == "FREE"
+                assert overview.jobs_total == 5
+                assert overview.jobs_completed == 3
+                assert overview.jobs_failed == 1
+                assert overview.jobs_active == 1
+                # Ordering is by count (docx has 2), then format name.
+                assert overview.by_target_format == (
+                    ("docx", 2),
+                    ("jpg", 1),
+                    ("pdf", 1),
+                    ("txt", 1),
+                )
+                assert overview.storage_used_bytes == 0
+                assert (
+                    overview.storage_limit_bytes
+                    == TierPolicy.for_tier(SubscriptionTier.FREE).storage_quota_bytes
+                )
+                # No persisted bucket yet: the tier allowance is the balance.
+                assert overview.credits_remaining == 50
+                assert overview.credits_reset_at is not None
+
+                # A persisted bucket for the current period wins over the allowance.
+                await SQLCreditRepository(session).save_credit(
+                    Credit(
+                        owner_id=str(user.id),
+                        period_key=current_period_key(now),
+                        allowance=50,
+                        remaining=7,
+                    )
+                )
+                refreshed = await adapter.overview(
+                    user.id, since=None, fmt=None, status=None
+                )
+                assert refreshed.credits_remaining == 7
+
+        asyncio.run(_run())
+
+
 def test_api_key_repo_roundtrip() -> None:
     with sqlite_session_factory() as factory:
 
@@ -293,3 +498,300 @@ def test_worker_persists_status_via_repo() -> None:
                 assert final.credits_used == 3
 
         asyncio.run(_run())
+
+
+def test_conversation_message_meta_survives_the_round_trip() -> None:
+    """The UI-only meta (labels, summaries, artifacts) is persisted verbatim.
+
+    ``meta`` is stored as a JSON string, so this proves the new keys the SPA
+    reads when a conversation is reopened make it back out of the database
+    unchanged — decoding must not drop or reshape them.
+    """
+    with sqlite_session_factory() as factory:
+
+        async def _run() -> None:
+            async with factory() as session:
+                user = await _create_user(factory)
+                repo = SQLConversationRepository(session)
+                conversation = await repo.create_conversation(
+                    user_id=user.id, title="Round trip"
+                )
+
+                tool_meta = {
+                    "tool_call_id": "call_1",
+                    "label": "Looking through your files",
+                    "summary": "Found 2 matching file(s)",
+                    "artifacts": [
+                        {"type": "file", "id": "f1", "name": "a.pdf", "meta": {}},
+                        {
+                            "type": "job",
+                            "id": "job-1",
+                            "name": "b.docx",
+                            "meta": {"status": "completed"},
+                        },
+                    ],
+                }
+                await repo.add_message(
+                    Message(
+                        id="m-tool",
+                        conversation_id=conversation.id,
+                        position=0,
+                        role=MessageRole.TOOL,
+                        content='{"count": 2}',
+                        tool_name="list_files",
+                        meta=tool_meta,
+                    )
+                )
+
+                stored = await repo.list_messages(conversation.id)
+                assert len(stored) == 1
+                assert stored[0].meta == tool_meta
+
+        asyncio.run(_run())
+
+
+def test_truncate_from_message_deletes_the_target_and_everything_after() -> None:
+    """A suffix delete keeps the ``_next_position`` COUNT invariant intact.
+
+    The rows that survive are exactly ``0..n-1`` with no gaps, so the next
+    append lands last instead of colliding with a surviving position.
+    """
+    with sqlite_session_factory() as factory:
+
+        async def _run() -> None:
+            async with factory() as session:
+                user = await _create_user(factory)
+                repo = SQLConversationRepository(session)
+                conversation = await repo.create_conversation(
+                    user_id=user.id, title="Trim"
+                )
+                other = await repo.create_conversation(user_id=user.id, title="Other")
+
+                for index in range(5):
+                    await repo.add_message(
+                        Message(
+                            id=f"m{index}",
+                            conversation_id=conversation.id,
+                            position=0,
+                            role=MessageRole.USER if index % 2 == 0 else MessageRole.ASSISTANT,
+                            content=f"message {index}",
+                        )
+                    )
+                await repo.add_message(
+                    Message(
+                        id="other-1",
+                        conversation_id=other.id,
+                        position=0,
+                        role=MessageRole.USER,
+                        content="other",
+                    )
+                )
+
+                # An unknown id and a real id from another conversation both say
+                # "absent", in either direction.
+                assert await repo.truncate_from_message(conversation.id, "nope") is False
+                assert await repo.truncate_from_message(conversation.id, "other-1") is False
+                assert await repo.truncate_from_message(other.id, "m0") is False
+
+                assert await repo.truncate_from_message(conversation.id, "m2") is True
+                remaining = await repo.list_messages(conversation.id)
+                assert [message.id for message in remaining] == ["m0", "m1"]
+                # A different conversation is untouched.
+                assert [message.id for message in await repo.list_messages(other.id)] == [
+                    "other-1"
+                ]
+
+                # The next append is positioned after the survivors.
+                appended = await repo.add_message(
+                    Message(
+                        id="m-new",
+                        conversation_id=conversation.id,
+                        position=0,
+                        role=MessageRole.USER,
+                        content="new",
+                    )
+                )
+                assert appended.position == 2
+                assert [message.id for message in await repo.list_messages(conversation.id)] == [
+                    "m0",
+                    "m1",
+                    "m-new",
+                ]
+
+        asyncio.run(_run())
+
+
+def test_user_file_search_by_name_spans_folders_and_escapes_wildcards() -> None:
+    """The assistant's "find my file" search must see filed documents.
+
+    ``list_by_user`` is root-scoped, so a search that went through it would miss
+    everything inside a folder. This pins the cross-folder, case-insensitive,
+    per-user, newest-first behaviour — and that ``%``/``_`` in the query are
+    literals, not wildcards.
+    """
+    with sqlite_session_factory() as factory:
+
+        async def _run() -> None:
+            async with factory() as session:
+                user = await _create_user(factory)
+                other = UserModel(
+                    username="searcher-other",
+                    email="search-other@example.com",
+                    hashed_password="x",
+                    is_active=True,
+                )
+                session.add(other)
+                await session.commit()
+                await session.refresh(other)
+                now = datetime.now(UTC)
+
+                def row(
+                    file_id: str, owner: int, folder_id: str | None, name: str,
+                    created_at: datetime,
+                ) -> UserFileModel:
+                    return UserFileModel(
+                        id=file_id,
+                        user_id=owner,
+                        folder_id=folder_id,
+                        file_key=f"objects/{file_id}",
+                        file_name=name,
+                        file_extension=name.rsplit(".", 1)[-1].lower(),
+                        file_size_bytes=10,
+                        mime_type="application/octet-stream",
+                        is_favorite=False,
+                        created_at=created_at,
+                    )
+
+                session.add_all(
+                    [
+                        UserFolderModel(
+                            id="f-outer", user_id=user.id, name="Outer",
+                            parent_id=None, created_at=now, updated_at=now,
+                        ),
+                        UserFolderModel(
+                            id="f-inner", user_id=user.id, name="Inner",
+                            parent_id="f-outer", created_at=now, updated_at=now,
+                        ),
+                        row("a", user.id, "f-inner", "Invoice-2026.PDF", now - timedelta(days=2)),
+                        row("b", user.id, None, "invoice-draft.pdf", now - timedelta(hours=1)),
+                        row("c", user.id, "f-outer", "50%_report.pdf", now - timedelta(days=1)),
+                        row("d", user.id, "f-inner", "axb.pdf", now - timedelta(days=3)),
+                        row("e", other.id, None, "invoice-other.pdf", now - timedelta(minutes=1)),
+                    ]
+                )
+                await session.commit()
+                repo = SQLUserFileRepository(session)
+
+                # Nested (a) and root (b) both match, case-insensitively and
+                # per-user (e is another tenant's); newest first.
+                rows, total = await repo.search_by_name(user.id, "INVOICE")
+                assert total == 2
+                assert [r.id for r in rows] == ["b", "a"]
+
+                # The total is the full match count, independent of the page.
+                page, total_all = await repo.search_by_name(user.id, "invoice", limit=1)
+                assert total_all == 2
+                assert [r.id for r in page] == ["b"]
+
+                # ``%`` and ``_`` match literally, not as wildcards.
+                escaped, escaped_total = await repo.search_by_name(user.id, "50%_report")
+                assert escaped_total == 1
+                assert [r.id for r in escaped] == ["c"]
+                # ``a_b`` would match ``axb.pdf`` if ``_`` were a wildcard.
+                _, underscore_total = await repo.search_by_name(user.id, "a_b")
+                assert underscore_total == 0
+                # ``%`` would match every row if it were a wildcard; escaped, it
+                # matches only the name that literally contains one.
+                percent_rows, percent_total = await repo.search_by_name(user.id, "%")
+                assert percent_total == 1
+                assert [r.id for r in percent_rows] == ["c"]
+
+        asyncio.run(_run())
+
+
+def test_conversion_job_search_filters_by_name_and_format_per_user() -> None:
+    """``search_jobs`` matches either end of a conversion, newest first."""
+    with sqlite_session_factory() as factory:
+
+        async def _run() -> None:
+            async with factory() as session:
+                user = await _create_user(factory)
+                other = UserModel(
+                    username="job-other",
+                    email="job-other@example.com",
+                    hashed_password="x",
+                    is_active=True,
+                )
+                session.add(other)
+                await session.commit()
+                await session.refresh(other)
+                now = datetime.now(UTC)
+
+                def job(
+                    job_id: str, source: str, target: str, input_file: str,
+                    output_file: str | None, created_at: datetime, owner: int,
+                ) -> ConversionJobModel:
+                    return ConversionJobModel(
+                        job_id=job_id,
+                        status=JobStatus.COMPLETED,
+                        source_format=source,
+                        target_format=target,
+                        input_file=input_file,
+                        output_file=output_file,
+                        object_key=f"objects/{job_id}",
+                        user_id=owner,
+                        created_at=created_at,
+                        updated_at=created_at,
+                    )
+
+                session.add_all(
+                    [
+                        job("j1", "pdf", "docx", "homework.pdf", "homework.docx", now - timedelta(days=2), user.id),
+                        job("j2", "docx", "pdf", "essay.docx", "essay.pdf", now - timedelta(hours=1), user.id),
+                        job("j3", "png", "jpg", "photo.png", "photo.jpg", now - timedelta(minutes=30), user.id),
+                        job("j4", "pdf", "docx", "homework-other.pdf", None, now, other.id),
+                    ]
+                )
+                await session.commit()
+                repo = SQLConversionJobRepository(session)
+
+                # Name substring, case-insensitive, on either side, per-user.
+                assert [j.job_id for j in await repo.search_jobs(user.id, query="HOMEWORK")] == ["j1"]
+                assert [j.job_id for j in await repo.search_jobs(user.id, query="essay.pdf")] == ["j2"]
+                # Format matches source OR target, case-insensitively.
+                assert [j.job_id for j in await repo.search_jobs(user.id, fmt="PDF")] == ["j2", "j1"]
+                # Filters combine with AND; the limit keeps the newest.
+                assert [j.job_id for j in await repo.search_jobs(user.id, query="homework", fmt="docx")] == ["j1"]
+                assert [j.job_id for j in await repo.search_jobs(user.id, fmt="pdf", limit=1)] == ["j2"]
+                # No filters is an unfiltered listing, still per-user.
+                assert [j.job_id for j in await repo.search_jobs(user.id)] == ["j3", "j2", "j1"]
+                # ``%`` in a query is literal, so it matches nothing here.
+                assert await repo.search_jobs(user.id, query="%") == []
+
+        asyncio.run(_run())
+
+
+def test_get_user_storage_used_always_returns_int() -> None:
+    """Regression: PostgreSQL hands back ``Decimal`` for ``SUM(BIGINT)``.
+
+    The repository's contract is ``int`` (every caller — quota arithmetic, the
+    dashboard, the assistant account snapshot — treats it as one, and the
+    declared return type says so). asyncpg maps the ``numeric`` type PostgreSQL
+    uses for ``sum(bigint)`` to ``Decimal``, while SQLite returns a plain int,
+    so a test backed by the real SQLite engine cannot see the regression. Feeding
+    the repository exactly what Postgres produces is what makes this fail on the
+    coercing code being removed.
+    """
+    from decimal import Decimal
+    from unittest.mock import AsyncMock, MagicMock
+
+    session = MagicMock()
+    result = MagicMock()
+    result.scalar_one.return_value = Decimal("1048576")
+    session.execute = AsyncMock(return_value=result)
+
+    repo = SQLUserFileRepository(session=session)
+    value = asyncio.run(repo.get_user_storage_used(1))
+
+    assert type(value) is int, f"expected int, got {type(value).__name__}"
+    assert value == 1048576

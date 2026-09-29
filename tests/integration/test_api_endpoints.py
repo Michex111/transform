@@ -29,7 +29,10 @@ def test_create_conversion_job_endpoint_returns_accepted() -> None:
     assert payload["status"] == "AWAITING_UPLOAD"
     assert payload["source_format"] == "docx"
     assert payload["target_format"] == "pdf"
-    assert payload["input_file"] == "uploads/example.docx"
+    # ``input_key`` is reduced to a leaf display name: a path-shaped value is
+    # rejected as an object-deletion target (see ``_safe_display_name`` and the
+    # cleanup worker's ``object_key or input_file`` fallback).
+    assert payload["input_file"] == "example.docx"
     # object_key is not set until the upload is verified, so it is None here.
     assert payload["object_key"] is None
     assert conversion_service.created_jobs[0].conversion.source_format == "docx"
@@ -421,3 +424,27 @@ def test_upload_flow_requires_source_and_input_key_without_file_id() -> None:
         response = client.post("/api/conversions/jobs", json={"target_format": "pdf"})
 
     assert response.status_code == 422
+
+def test_create_conversion_job_reduces_a_path_like_input_key_to_a_leaf() -> None:
+    """Regression: ``input_key`` must not survive as an arbitrary storage key.
+
+    It is persisted as ``input_file``, and for a job that is never verified the
+    cleanup worker deletes the object named by ``object_key or input_file``. A
+    path-shaped or traversal ``input_key`` was therefore an arbitrary
+    object-deletion target. Reducing it to a single leaf makes that impossible:
+    every real object key this service writes is prefixed (contains a "/"), so a
+    bare leaf name can never address one.
+    """
+    with create_test_client() as client:
+        response = client.post(
+            "/api/conversions/jobs",
+            json={
+                "source_format": "docx",
+                "target_format": "pdf",
+                "input_key": "../../etc/passwd",
+            },
+        )
+        payload = response.json()
+
+    assert response.status_code == 202
+    assert payload["input_file"] == "passwd"

@@ -25,9 +25,11 @@ from src.infrastructure.database.session import get_engine
 from src.infrastructure.adapters.storage.cors import apply_bucket_cors
 from src.presentation.api.middleware.rate_limit import build_rate_limit_middleware
 from src.presentation.api.middleware.security_headers import SecurityHeadersMiddleware
+from src.presentation.api.middleware.body_limit import RequestBodyLimitMiddleware
 from src.presentation.api.validation_errors import validation_error_detail
 from src.presentation.api.routers.v1 import (
     api_keys,
+    assistant,
     conversions,
     credits,
     dashboard,
@@ -95,6 +97,18 @@ async def lifespan(_: FastAPI):
         else "",
     )
 
+    # Same idea for the AI assistant. ``echo`` is not an error — it is a working
+    # offline backend — but an operator who expected real model answers needs to
+    # see from the boot log alone that no key is configured.
+    ai_backend = settings._resolve_ai_backend()
+    logger.warning(
+        "Ai transport: %s%s",
+        ai_backend,
+        " (offline demo backend; set AI_API_KEY for real answers)"
+        if ai_backend == "echo"
+        else f" (model {settings.AI_MODEL})",
+    )
+
     # Ensure the object-storage bucket allows browser uploads from the SPA
     # origin(s). Failures are non-fatal (logged) but configured origins are
     # honoured so direct uploads are not blocked by bucket CORS.
@@ -124,6 +138,12 @@ app.add_middleware(
 
 # Rate limiting (Redis-backed with in-memory fallback)
 app.add_middleware(build_rate_limit_middleware)
+
+# Refuse an oversized request body before it is read. Added AFTER the rate
+# limiter so a flood of huge bodies is still counted/limited first, and BEFORE
+# the routes so no dependency (not even authentication) runs on a body we are
+# going to refuse.
+app.add_middleware(RequestBodyLimitMiddleware)
 
 # Security hardening headers
 app.add_middleware(SecurityHeadersMiddleware)
@@ -214,6 +234,7 @@ app.include_router(api_keys.router)
 app.include_router(webhooks.router)
 app.include_router(dashboard.router)
 app.include_router(events.router)
+app.include_router(assistant.router)
 
 
 # ---------------------------------------------------------------------------

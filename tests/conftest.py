@@ -35,6 +35,18 @@ os.environ.setdefault(
     '["http://localhost:5173","https://transform-web.onrender.com"]',
 )
 
+# AI assistant: pin the offline backend. `auto` would prefer `openai` as soon as
+# a developer's gitignored `.env` carries a real AI_API_KEY, which would make the
+# assistant tests depend on that key's presence and (for the status endpoint)
+# report a different backend. It also guarantees the suite never makes an egress
+# request through the assistant. Tests inject their own `LlmPort` anyway; this
+# only pins what `GET /assistant/status` reports.
+#
+# Consequence for future tests: an OS environment variable outranks the declared
+# default, so a settings test asserting `AI_BACKEND`'s default must read the
+# field (or pass the value explicitly), not construct a bare `Settings()`.
+os.environ.setdefault("AI_BACKEND", "echo")
+
 import pytest  # noqa: E402
 
 from src.infrastructure.converters.converter_registry import ConverterRegistry  # noqa: E402

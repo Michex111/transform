@@ -11,6 +11,8 @@ import {
   UploadSimple,
   Swap,
   ArrowCounterClockwise,
+  Sparkle,
+  SpinnerGap,
 } from "@phosphor-icons/react";
 import { useAuth } from "@/auth/AuthContext";
 import { useToast } from "@/auth/ToastContext";
@@ -23,11 +25,13 @@ import { canSaveToDrive } from "@/lib/saveToDrive";
 import { useRetryConversion } from "@/lib/useRetryConversion";
 import { useSaveToDrive } from "@/lib/useSaveToDrive";
 import { useConversionMap } from "@/lib/useConversionMap";
+import { useAssistantRecommend } from "@/lib/useAssistantRecommend";
 import { useNarrowViewport } from "@/lib/useMediaQuery";
 import { FolderPickerModal } from "@/components/FolderPickerModal";
 import { ErrorButton } from "@/components/ErrorButton";
 import { FormatPicker } from "@/components/FormatPicker";
 import { RowMenu } from "@/components/RowMenu";
+import { RecommendChips } from "@/components/assistant/RecommendChips";
 import { Button, Card, FormatMorph, FormatChip, ProgressBar, StatusBadge } from "@/components/ui";
 
 /**
@@ -141,6 +145,23 @@ export function ConvertPage() {
 
   // The target formats currently allowed for the chosen source.
   const allowedTargets = useMemo(() => targetsFor(from), [targetsFor, from]);
+
+  // AI target-format suggestions for the chosen source. There is no library file
+  // here — the file has not been uploaded yet — so the suggestion is asked for by
+  // source format alone.
+  const { state: suggest, recommend: recommendTargets, reset: resetSuggest } = useAssistantRecommend();
+
+  // Suggestions belong to the source they were asked about: switching the source
+  // makes them stale, so they are cleared rather than left to contradict the
+  // pickers above them.
+  useEffect(() => {
+    resetSuggest();
+  }, [from, resetSuggest]);
+
+  async function suggestTargets() {
+    if (suggest.status === "loading") return;
+    await recommendTargets({ source_format: from });
+  }
 
   // Keep `to` valid for the selected source, and keep `from` a valid source.
   useEffect(() => {
@@ -344,6 +365,33 @@ export function ConvertPage() {
 
         <div className="flex justify-center">
           <FormatMorph from={from} to={to} animated size="lg" />
+        </div>
+
+        {/* AI suggestion: recommends a target for the chosen source. */}
+        <div className="space-y-3">
+          <div className="flex justify-center">
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={suggestTargets}
+              disabled={suggest.status === "loading" || allowedSources.length === 0}
+            >
+              {suggest.status === "loading" ? (
+                <SpinnerGap size={15} className="animate-spin" />
+              ) : (
+                <Sparkle size={15} weight="fill" />
+              )}
+              {suggest.status === "loading" ? "Suggesting…" : "Suggest with AI"}
+            </Button>
+          </div>
+          <RecommendChips
+            state={suggest}
+            availableTargets={allowedTargets}
+            selected={to}
+            sourceFormat={from}
+            onSelect={setTo}
+          />
         </div>
 
         {/* Drop zone */}

@@ -7,6 +7,7 @@ from datetime import datetime, UTC
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.infrastructure.adapters.repository.like_escape import escape_like
 from src.infrastructure.adapters.storage.sanitize import normalize_extension
 from src.infrastructure.database.models import UserFileModel, UserModel
 
@@ -104,6 +105,37 @@ class SQLUserFileRepository:
         base = select(UserFileModel).where(
             UserFileModel.user_id == user_id,
             UserFileModel.folder_id == folder_id,
+        )
+
+        count_q = select(func.count()).select_from(base.subquery())
+        total = (await self._session.execute(count_q)).scalar_one()
+
+        rows_q = base.order_by(UserFileModel.created_at.desc()).offset(offset).limit(limit)
+        rows = (await self._session.execute(rows_q)).scalars().all()
+
+        return list(rows), total
+
+    async def search_by_name(
+        self, user_id: int, query: str, *, offset: int = 0, limit: int = 50,
+    ) -> tuple[list[UserFileModel], int]:
+        """Name-substring search across ALL of a user's folders, newest first.
+
+        ``list_by_user`` is folder-scoped by design (an omitted ``folder_id``
+        means "the root"), so it can never answer "where is my invoice?" for a
+        file the user has filed away. This method exists for exactly that
+        question: it ignores ``folder_id`` entirely and matches ``file_name``
+        anywhere in the drive.
+
+        The match is a case-insensitive substring. ``%`` and ``_`` in ``query``
+        are escaped (see :func:`escape_like`) so a literal name such as
+        ``50%_report`` cannot widen the result set, and ``escape="\\"`` tells the
+        backend which character is doing the escaping. Ordering and the total
+        are independent of ``limit`` so the caller can say "showing 5 of 12".
+        """
+        pattern = f"%{escape_like(query)}%"
+        base = select(UserFileModel).where(
+            UserFileModel.user_id == user_id,
+            UserFileModel.file_name.ilike(pattern, escape="\\"),
         )
 
         count_q = select(func.count()).select_from(base.subquery())

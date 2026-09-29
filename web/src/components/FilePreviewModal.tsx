@@ -6,6 +6,7 @@ import { Modal } from "@/components/Modal";
 import { Button, Skeleton } from "@/components/ui";
 import {
   isTextPreviewOversize,
+  previewBlobType,
   previewKind,
   previewUnavailableMessage,
 } from "@/lib/filePreview";
@@ -105,7 +106,15 @@ export function FilePreviewModal({
           return;
         }
 
-        objectUrl = URL.createObjectURL(blob);
+        // Stamp the classified type onto the blob the frame loads. A blob keeps
+        // its own (or absent) type, and an iframe will render HTML bytes as a
+        // same-origin document if they are sniffed — forcing `application/pdf`
+        // for a `.pdf`-classified preview keeps the browser in its PDF viewer.
+        // `slice` re-types the blob without copying the bytes; every other kind
+        // returns `null` and keeps the bytes untouched.
+        const blobType = previewBlobType(kind);
+        const previewBlob = blobType ? blob.slice(0, blob.size, blobType) : blob;
+        objectUrl = URL.createObjectURL(previewBlob);
         setState({ status: "ready", loaded: { kind: "rendered", preview: kind, url: objectUrl } });
       } catch (err) {
         if (cancelled) return;

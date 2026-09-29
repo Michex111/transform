@@ -54,6 +54,12 @@ class FileRepositoryPort(Protocol):
         offset: int = 0, limit: int = 20,
     ) -> tuple[list[UserFileModel], int]: ...
 
+    async def search_by_name(
+        self, user_id: int, query: str, *, offset: int = 0, limit: int = 50,
+    ) -> tuple[list[UserFileModel], int]:
+        """Name-substring search across every folder the user owns."""
+        ...
+
     async def move(self, file_id: str, folder_id: str | None) -> bool: ...
 
     async def rename(self, file_id: str, file_name: str) -> bool: ...
@@ -281,6 +287,22 @@ class FileService:
         return await self._files.list_by_user(
             user_id, folder_id=folder_id, offset=offset, limit=limit,
         )
+
+    async def search_files(
+        self, user_id: int, query: str, *, offset: int = 0, limit: int = 50,
+    ) -> tuple[list[UserFileModel], int]:
+        """Find a user's files by name substring, across every folder.
+
+        A thin pass-through to the repository, but it exists so callers (the
+        assistant's toolbox in particular) stay on the service — which owns the
+        ownership rule — instead of reaching into a repository and being free to
+        forget the ``user_id`` scope. An empty ``query`` is answered with an
+        empty result rather than "everything", because a search for nothing is
+        not a listing.
+        """
+        if not query.strip():
+            return [], 0
+        return await self._files.search_by_name(user_id, query, offset=offset, limit=limit)
 
     async def move_file(
         self, user_id: int, file_id: str, folder_id: str | None,

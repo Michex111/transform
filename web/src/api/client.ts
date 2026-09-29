@@ -1,8 +1,16 @@
 import { downloadFromUrl, isTrustedDownloadUrl, saveBlob } from '@/lib/download'
 import { encryptFileToFencr, fencrDataKeyToBase64 } from '@/lib/fencr'
 import { joinValidationMessages, validationErrorsFrom } from '@/lib/apiErrors'
+import { readSseStream } from '@/lib/sse'
 import {
   normalizeApiKeyCreate,
+  normalizeAssistantConversation,
+  normalizeAssistantConversationDetail,
+  normalizeAssistantConversationList,
+  normalizeAssistantRecommend,
+  normalizeAssistantStatus,
+  normalizeAssistantStreamEvent,
+  normalizeAssistantSummary,
   normalizeApiKeyList,
   normalizeBatchDelete,
   normalizeCancelSubscription,
@@ -41,6 +49,9 @@ import {
 } from './normalize'
 import type {
   APIKeyCreateRequest,
+  AssistantChatRequest,
+  AssistantRecommendRequest,
+  AssistantStreamEvent,
   BatchDeleteRequest,
   ChangePasswordRequest,
   ConversionJobResponse,
@@ -241,7 +252,14 @@ async function readErrorBody(
   return { detail: response.statusText || fallback }
 }
 
-class ApiClient {
+/**
+ * The typed HTTP client.
+ *
+ * Exported (alongside the `api` singleton) so a module that receives the client
+ * as a parameter — rather than reaching for the singleton — can name its type
+ * and depend on just the methods it uses (`Pick<ApiClient, …>`).
+ */
+export class ApiClient {
   private get token() {
     return localStorage.getItem(TOKEN_KEY)
   }
@@ -753,6 +771,35 @@ class ApiClient {
   }
 
   /**
+   * Run an authenticated request and hand back the raw `Response`.
+   *
+   * The sibling of `authedFetch` for a request that is not a bare GET and whose
+   * body must stay unread by `request()` (which always consumes it as JSON) —
+   * the assistant chat needs to stream the body itself. Mirrors `request`'s
+   * 401 handling so a streamed call recovers from an expired access token the
+   * same way every other call does.
+   */
+  private async authorizedFetch(path: string, options: RequestInit = {}): Promise<Response> {
+    const init = (): RequestInit => ({
+      ...options,
+      headers: {
+        ...((options.headers as Record<string, string>) ?? {}),
+        ...(this.token ? { Authorization: `Bearer ${this.token}` } : {}),
+      },
+    })
+
+    let res = await fetch(`${API_BASE}${path}`, init())
+    if (res.status === 401 && this.refreshToken && (await this.refresh())) {
+      res = await fetch(`${API_BASE}${path}`, init())
+    }
+    if (res.status === 401) {
+      this.clearTokens()
+      window.dispatchEvent(new CustomEvent('auth:unauthorized'))
+    }
+    return res
+  }
+
+  /**
    * Stream a server-relative path to a browser download.
    *
    * `auth: false` is used by the guest flow, which authenticates with its token
@@ -1156,6 +1203,116 @@ class ApiClient {
     )
   listApiKeys = () => this.request<unknown>('/v1/api-keys').then(normalizeApiKeyList)
   deleteApiKey = (id: string) => this.request<void>(`/v1/api-keys/${id}`, { method: 'DELETE' })
+
+  // ---- Transform AI (assistant) ----
+
+  /** Whether the assistant is on, and which backend answers. */
+  assistantStatus = () =>
+    this.request<unknown>('/v1/assistant/status').then(normalizeAssistantStatus)
+
+  assistantConversations = () =>
+    this.request<unknown>('/v1/assistant/conversations').then(normalizeAssistantConversationList)
+
+  assistantCreateConversation = (title?: string) =>
+    this.request<unknown>('/v1/assistant/conversations', {
+      method: 'POST',
+      body: JSON.stringify(title ? { title } : {}),
+    }).then(normalizeAssistantConversation)
+
+  assistantConversation = (id: string) =>
+    this.request<unknown>(`/v1/assistant/conversations/${id}`).then(
+      normalizeAssistantConversationDetail,
+    )
+
+  assistantDeleteConversation = (id: string) =>
+    this.request<void>(`/v1/assistant/conversations/${id}`, { method: 'DELETE' })
+
+  /**
+   * Delete one message of a conversation, and everything after it.
+   *
+   * This is the server half of "edit a message": the transcript the API holds is
+   * the source of truth, so an edit has to drop the original turn (and the
+   * answer it produced) or reopening the conversation would show the message the
+   * user thought they had replaced. The caller re-sends the edited turn
+   * afterwards, which appends at the freed position.
+   *
+   * A conversation that is not the caller's and a message that is not in it both
+   * answer 404, so neither can be probed.
+   */
+  assistantDeleteMessage = (conversationId: string, messageId: string) =>
+    this.request<void>(
+      `/v1/assistant/conversations/${conversationId}/messages/${messageId}`,
+      { method: 'DELETE' },
+    )
+
+  /** Summarise one library file. */
+  assistantSummarize = (fileId: string) =>
+    this.request<unknown>('/v1/assistant/summarize', {
+      method: 'POST',
+      body: JSON.stringify({ file_id: fileId }),
+    }).then(normalizeAssistantSummary)
+
+  /** Ask for target-format recommendations for a file and/or a source format. */
+  assistantRecommend = (body: AssistantRecommendRequest) =>
+    this.request<unknown>('/v1/assistant/recommend', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }).then(normalizeAssistantRecommend)
+
+  /**
+   * Send a chat turn and read the streamed answer.
+   *
+   * The endpoint is a **POST** that answers with a streamed `text/event-stream`
+   * body, so `EventSource` cannot be used (it only issues GETs and carries no
+   * Authorization header). This reads the response through the same
+   * silent-refresh path as every other authenticated call, then frames the body
+   * with the shared SSE parser.
+   *
+   * @returns an abort function — it stops the fetch and the stream, which is
+   * what the composer's Stop button calls.
+   */
+  assistantChat(
+    body: AssistantChatRequest,
+    handlers: {
+      onEvent: (event: AssistantStreamEvent) => void
+      onError: (error: { code: string; message: string }) => void
+      onDone?: () => void
+    },
+  ): () => void {
+    const controller = new AbortController()
+
+    void (async () => {
+      try {
+        const res = await this.authorizedFetch('/v1/assistant/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+          body: JSON.stringify(body),
+          signal: controller.signal,
+        })
+
+        if (!res.ok || !res.body) {
+          const { detail, code } = await readErrorBody(res, res.statusText || 'Assistant unavailable')
+          handlers.onError({ code: code ?? 'INTERNAL_ERROR', message: detail })
+          return
+        }
+
+        await readSseStream(res, (frame) => {
+          const event = normalizeAssistantStreamEvent(frame.event, frame.data)
+          // An unparseable or unknown frame is dropped rather than thrown: one
+          // bad frame must not end a healthy stream.
+          if (event) handlers.onEvent(event)
+        })
+        handlers.onDone?.()
+      } catch (err) {
+        // An abort is the user pressing Stop, not a failure.
+        if ((err as Error).name !== 'AbortError') {
+          handlers.onError({ code: 'INTERNAL_ERROR', message: (err as Error).message })
+        }
+      }
+    })()
+
+    return () => controller.abort()
+  }
 
   /**
    * Subscribe to SSE progress for a job. Returns a cleanup function.

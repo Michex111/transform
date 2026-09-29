@@ -15,17 +15,62 @@
 # every `from src.…` import fail with `missing-import`.
 
 # ---------------------------------------------------------------------------
-# What to type check: the three folders that hold project code.
+# What to type check: the folders that hold *tracked* project code.
 # `include`-style scoping means the workspace root is NOT implicit, so every
-# folder must be listed. Dot-directories (e.g. `.venv`, `.github`) are filtered
-# out automatically at the glob layer, so tooling under `.github/skills` is not
-# picked up.
+# folder must be listed -- an unlisted folder is silently unchecked.
+#
+# `.github/scripts` is listed explicitly and is the one deliberate exception to
+# "no dot-directories": it holds `render_deploy_hook.py`, which `deploy.yml`
+# executes as the production deploy gate. That makes it real, tracked project
+# code rather than tooling, and its unit test in `tests/` was already covered
+# while the script itself was not.
+#
+# Every other dot-directory stays unchecked, and this list is the whole reason:
+# it is an allowlist, so nothing outside these four folders is read on its own
+# behalf. `.agents/` (local MCP tooling) and the ~36 vendored scripts under the
+# gitignored `.github/skills/` are therefore skipped simply by not being named.
+# Modules those folders import are still *read* to supply types -- they are just
+# never reported on. See `disable-project-excludes-heuristics` for why this
+# allowlist, and not the exclude list, is what draws the boundary.
 # ---------------------------------------------------------------------------
-project-includes = ["src", "tests", "workers"]
+project-includes = ["src", "tests", "workers", ".github/scripts"]
 
-# Explicit for documentation/CI portability; Pyrefly's defaults already cover
-# these, and the defaults are appended to this list.
-project-excludes = ["**/.venv", "**/env", "**/node_modules", "**/build", "**/dist", "**/__pycache__"]
+# Most of this list duplicates Pyrefly's own defaults on purpose: see
+# `disable-project-excludes-heuristics` below, which switches those defaults
+# off and makes this list the *only* source of excludes. `**/venv/**` in
+# particular is copied from the defaults because turning them off would
+# otherwise drop it. The site-packages path from `python-interpreter-path` is
+# always excluded separately, whatever this list says.
+project-excludes = [
+    "**/.venv",
+    "**/venv/**",
+    "**/env",
+    "**/node_modules",
+    "**/build",
+    "**/dist",
+    "**/__pycache__",
+]
+
+# ---------------------------------------------------------------------------
+# Required for the `.github/scripts` entry above -- do not remove it without
+# also removing that entry.
+#
+# Pyrefly filters dot-directories out at its glob layer, which outranks
+# `project-includes`: naming `.github/scripts` while the heuristics are on just
+# produces `WARN Skipping include pattern ... because it is matched by
+# `project-excludes` or an ignore file`, and `render_deploy_hook.py` is silently
+# left unchecked. Turning the heuristics off drops that filter, so the explicit
+# include takes effect. Verified by planting a type error in the script: it is
+# reported with this flag set and missed without it.
+#
+# The cost is that the defaults listed above stop being applied, hence copying
+# `**/venv/**` into `project-excludes`. Scope stays exact either way, because
+# `project-includes` is an allowlist: disabling heuristics widens nothing beyond
+# the four folders named there (verified: 284 modules = src 165 + tests 106 +
+# workers 12 + .github/scripts 1, and no `.agents/`, `.github/skills/`, `.venv`
+# or `node_modules` entry).
+# ---------------------------------------------------------------------------
+disable-project-excludes-heuristics = true
 
 # ---------------------------------------------------------------------------
 # Where imports resolve from. The workspace root ("." relative to this file)
