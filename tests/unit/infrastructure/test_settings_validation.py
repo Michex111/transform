@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+from src.domain.assistant.policies.assistant_policy import max_document_bytes_for_tier
+from src.domain.subscriptions.value_object.tier import SubscriptionTier
 from src.infrastructure.config.settings import Settings
 
 _ENV_EXAMPLE = Path(__file__).resolve().parents[3] / ".env.example"
@@ -506,3 +508,20 @@ def test_env_example_documents_the_ai_settings() -> None:
     assert "echo" in text
     assert "OpenAI-compatible" in text
 
+
+def test_the_default_document_ceiling_does_not_cap_any_plan() -> None:
+    """The deployment ceiling must be at or above the largest plan allowance.
+
+    Enforcement reads ``min(ceiling, plan allowance)``, so a ceiling below a
+    plan's entitlement silently caps that plan while ``/subscription/plans`` and
+    ``/assistant/status`` go on advertising the larger number — a paid plan that
+    quietly reads less than it is sold as. Asserting the *code default* rather
+    than an instantiated ``Settings`` is deliberate: pydantic-settings layers
+    the developer's ``.env`` on top of the arguments, so an instantiated value
+    would assert this machine rather than the shipped configuration.
+    """
+    default_ceiling = Settings.model_fields["AI_MAX_DOCUMENT_BYTES"].default
+    largest_allowance = max(
+        max_document_bytes_for_tier(tier) for tier in SubscriptionTier
+    )
+    assert default_ceiling >= largest_allowance

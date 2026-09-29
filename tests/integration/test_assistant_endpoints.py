@@ -429,7 +429,7 @@ def test_status_reports_the_tier_entitlements_and_usage(tmp_path) -> None:
     assert body["remaining_this_hour"] == 57
     assert body["max_attachments"] == 3
     assert body["max_actions_per_turn"] == 3
-    assert body["max_document_bytes"] == 5 * 1024 * 1024
+    assert body["max_document_bytes"] == 25 * 1024 * 1024
 
 
 def test_status_reports_the_tier_model(tmp_path) -> None:

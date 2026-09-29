@@ -100,6 +100,6 @@ def test_plan_ai_values_are_the_documented_ones() -> None:
         "max_actions_per_turn": 1,
     }
     assert plans["PRO"]["ai"]["requests_per_hour"] == 60
-    assert plans["PRO"]["ai"]["max_document_mb"] == 5
-    assert plans["PRO_PLUS"]["ai"]["max_document_mb"] == 10
+    assert plans["PRO"]["ai"]["max_document_mb"] == 25
+    assert plans["PRO_PLUS"]["ai"]["max_document_mb"] == 25
     assert plans["ENTERPRISE"]["ai"]["max_actions_per_turn"] == 10
