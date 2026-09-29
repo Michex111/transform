@@ -387,6 +387,14 @@ export interface UploadSession {
   status: string
   file_name: string | null
   folder_id: string | null
+  /**
+   * The library file id created by `POST /uploads/sessions/{id}/verify`.
+   *
+   * Additive: an older API omits it, so it stays absent rather than becoming
+   * `""` — a caller that needs the id must treat `undefined` as "this API does
+   * not report it" rather than uploading to an empty file.
+   */
+  file_id?: string
 }
 
 /**
@@ -627,6 +635,29 @@ export interface CreditPricingResponse {
 }
 
 // ---- Subscription ----
+
+/**
+ * What a plan's Transform AI includes.
+ *
+ * The whole object is absent or `null` on a plan that has no assistant (the
+ * free tier), so a caller must treat `plan.ai == null` as "no AI group to
+ * render" rather than as zeros. Read it through `normalizeAiEntitlement`, which
+ * returns `null` for a payload it cannot trust instead of a half-built object.
+ */
+export interface AiEntitlement {
+  /** `"standard" | "advanced" | "priority"`, as the API names the model tier. */
+  model_level: string
+  /** Ready-to-display tier name, e.g. `"Advanced"`. */
+  model_label: string
+  requests_per_hour: number
+  /** Files one message may carry on this plan. */
+  max_attachments: number
+  /** Largest single document the assistant will read, in megabytes. */
+  max_document_mb: number
+  /** Tool calls the model may make in one turn. */
+  max_actions_per_turn: number
+}
+
 export interface SubscriptionPlanResponse {
   tier: string
   name: string
@@ -634,6 +665,14 @@ export interface SubscriptionPlanResponse {
   storage_gb: number
   monthly_credits: number | null
   features: string[]
+  /**
+   * The assistant this plan includes, or `null`/absent when it has none.
+   *
+   * Additive and per the same independent-deploy rule as every optional field
+   * here: an older API omits it entirely, and "the API didn't say" must render
+   * as no AI group — never as a plan with zero of everything.
+   */
+  ai?: AiEntitlement | null
 }
 
 export interface SubscriptionStatusResponse {
@@ -704,3 +743,233 @@ export interface JobProgressEvent {
   // (`pdf -> jpg` on a multi-page PDF emits a `.zip`).
   output_file?: string | null
 }
+
+// ---- Transform AI (assistant) ----
+//
+// Every field below is optional unless the UI literally cannot function without
+// it, for the same independent-deploy reason as the profile fields above: the
+// SPA and the API ship separately, so a new bundle can briefly talk to an older
+// API. Always read these through the `normalizeAssistant*` helpers in
+// `api/normalize.ts` rather than indexing into a raw response.
+
+/**
+ * Which model backend answered.
+ *
+ * `"unknown"` is not an API value — it is what `normalizeAssistantStatus`
+ * substitutes for a value the contract does not define (or omits), so the UI can
+ * tell "a real model" apart from "echo/demo mode" without inventing an answer.
+ */
+export type AssistantBackend = "openai" | "echo" | "unknown"
+
+export interface AssistantStatus {
+  enabled: boolean
+  backend: AssistantBackend
+  model: string
+
+  // ---- Plan entitlements (additive; every field is optional) ----
+  //
+  // An older API omits all of these, so each is optional and the UI degrades to
+  // the pre-entitlement behaviour: no usage label, the client's own attachment
+  // fallback. `max_attachments` in particular must never be read as `0` when it
+  // is absent — see `normalizeAssistantStatus`.
+
+  /** `"FREE" | "PRO" | "PRO_PLUS" | "ENTERPRISE"`, echoing the caller's plan. */
+  tier?: string
+  /** `"standard" | "advanced" | "priority"`. */
+  model_level?: string
+  /** Ready-to-display tier name, e.g. `"Advanced"`. */
+  model_label?: string
+  requests_per_hour?: number
+  used_this_hour?: number
+  remaining_this_hour?: number
+  /** How many files one turn may attach on this plan. */
+  max_attachments?: number
+  max_actions_per_turn?: number
+  /** Largest single document the assistant will read, in bytes. */
+  max_document_bytes?: number
+}
+
+export interface AssistantConversation {
+  id: string
+  title: string
+  created_at: string
+  /** Absent on the create response; present on list/detail. */
+  updated_at?: string
+}
+
+export interface AssistantConversationListResponse {
+  conversations: AssistantConversation[]
+}
+
+export type AssistantMessageRole = "user" | "assistant" | "tool"
+
+/**
+ * A library file the user attached to a chat turn.
+ *
+ * It is a *reference* (`user_files.id`), not a copy: the server resolves the id
+ * to the account's own file and answers `ATTACHMENT_NOT_FOUND` when it is not
+ * owned or no longer exists. `extension` is optional because the server may not
+ * echo it, and the UI derives it from `name` when it is absent.
+ */
+export interface AssistantAttachment {
+  id: string
+  name: string
+  extension?: string
+}
+
+export interface AssistantMessage {
+  id: string
+  role: AssistantMessageRole
+  content: string
+  tool_name?: string | null
+  meta?: Record<string, unknown> | null
+  created_at?: string
+  /**
+   * Files the user attached to a `user` turn, parsed from `meta.attachments`.
+   * Present on a persisted user message so a reopened conversation still shows
+   * its attachment chips; absent on rows that carry none.
+   */
+  attachments?: AssistantAttachment[]
+  /**
+   * Human label for a step, parsed from `meta.label`. Present on a `tool` row
+   * of a conversation persisted after the label contract landed; absent on
+   * legacy rows, where the client falls back to a phrase built from
+   * `tool_name` (see `lib/assistantTranscript.ts#toolStepLabel`).
+   */
+  label?: string
+  /** Tool-result summary, parsed from `meta.summary`. Absent on legacy rows. */
+  summary?: string
+  /**
+   * Files and jobs the row refers to, parsed from `meta.artifacts` — on a
+   * `tool` row and on the final assistant message of a turn. Absent when the
+   * row has none, or on an API older than the field.
+   */
+  artifacts?: AssistantArtifact[]
+}
+
+export interface AssistantConversationDetailResponse {
+  conversation: AssistantConversation
+  messages: AssistantMessage[]
+}
+
+export interface AssistantChatRequest {
+  message: string
+  conversation_id?: string
+  /** Library file ids to attach to this turn. The API caps this per plan. */
+  file_ids?: string[]
+  /**
+   * The page the question was asked from, e.g. `"/app/dashboard"`.
+   *
+   * Lets the model answer "what's on this page?" style questions. Sent as the
+   * pathname only — never a full URL, which would leak the query string.
+   */
+  context?: string
+}
+
+/**
+ * A file, folder or job the assistant surfaced while answering.
+ *
+ * A `"folder"` artifact carries the folder's own `id` in `id`, its name in
+ * `name`, and its location in `meta.parent_id` (null at the drive root) — the
+ * opposite direction to a file artifact's `meta.folder_id`. `"unknown"` stays
+ * the fallback for a kind this bundle does not recognise (an API newer than the
+ * SPA), so such an artifact still renders as a neutral chip instead of being
+ * dropped.
+ */
+export interface AssistantArtifact {
+  type: "file" | "job" | "folder" | "unknown"
+  id: string
+  name: string
+  meta?: Record<string, unknown> | null
+}
+
+export interface AssistantToolEvent {
+  name: string
+  label?: string
+  status: "running" | "done" | "unknown"
+  summary?: string
+  artifacts?: AssistantArtifact[]
+}
+
+/**
+ * A fully parsed frame of the `POST /assistant/chat` SSE stream.
+ *
+ * A discriminated union on `type` (the SSE `event:` name), so `applyStreamEvent`
+ * can switch exhaustively and a frame the parser does not recognise is dropped
+ * before it reaches the reducer rather than silently mutating state.
+ */
+export type AssistantStreamEvent =
+  | { type: "status"; stage: string }
+  | { type: "delta"; text: string }
+  | { type: "tool"; tool: AssistantToolEvent }
+  | { type: "artifact"; artifact: AssistantArtifact }
+  | {
+      type: "done"
+      conversation_id: string
+      message_id: string
+      content: string
+      artifacts: AssistantArtifact[]
+      /**
+       * The persisted id of the USER message this turn answered, when the API
+       * sends one.
+       *
+       * Optional for the same independent-deploy reason as every other
+       * additive field here: an older API omits it entirely, and an absent id
+       * must stay absent rather than becoming `""`.
+       *
+       * Its purpose is editing. A user message sent *in this session* only has
+       * a local `user-N` id until the turn finishes; this frame is what gives
+       * it a real server id without a reload, which the edit-and-resend flow
+       * needs in order to truncate the persisted transcript. See
+       * `lib/assistantChat.ts#editTurn` and `lib/useAssistantChat.ts#editMessage`.
+       */
+      user_message_id?: string
+    }
+  | { type: "error"; code: string; message: string }
+
+export interface AssistantSummaryResponse {
+  file_id: string
+  file_name: string
+  summary: string
+  key_points: string[]
+  model: string
+}
+
+export interface AssistantRecommendation {
+  target_format: string
+  label: string
+  category: string
+  reason: string
+  /** 0..1 model confidence; clamped by the normaliser. */
+  confidence: number
+}
+
+export interface AssistantRecommendRequest {
+  file_id?: string
+  source_format?: string
+  use_case?: string
+}
+
+export interface AssistantRecommendResponse {
+  source_format: string
+  use_case: string
+  recommendations: AssistantRecommendation[]
+}
+
+/** Machine-readable assistant error codes the UI branches on. */
+export const ASSISTANT_QUOTA_EXCEEDED = "QUOTA_EXCEEDED"
+export const ASSISTANT_NOT_AVAILABLE_FOR_TIER = "AI_NOT_AVAILABLE_FOR_TIER"
+export const ASSISTANT_INTERNAL_ERROR = "INTERNAL_ERROR"
+/**
+ * Returned (403) when a turn names more files than the plan allows. Unlike
+ * `ATTACHMENT_NOT_FOUND`, nothing is wrong with the files themselves: the user
+ * simply attached too many, so the composer keeps the whole list and lets them
+ * drop one and resend.
+ */
+export const ASSISTANT_ATTACHMENT_LIMIT_EXCEEDED = "ATTACHMENT_LIMIT_EXCEEDED"
+/**
+ * Returned (404) when a turn's `file_ids` names a library file the account does
+ * not own or that no longer exists. The composer drops the offending
+ * attachments and keeps the typed message so the user can resend without it.
+ */
+export const ASSISTANT_ATTACHMENT_NOT_FOUND = "ATTACHMENT_NOT_FOUND"

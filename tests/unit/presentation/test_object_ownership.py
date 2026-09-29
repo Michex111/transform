@@ -7,15 +7,28 @@ Covers:
 """
 
 import asyncio
+from typing import cast
 
 import pytest
 from fastapi import HTTPException
 
+from src.application.services.file_transfer_service import TransferService
 from src.domain.conversions.entities.conversion_job import ConversionJob
 from src.domain.conversions.value_object.conversion_type import ConversionType
+from src.infrastructure.adapters.repository.sql_conversion_job_repo import (
+    SQLConversionJobRepository,
+)
+from src.infrastructure.adapters.repository.sql_user_file_repo import SQLUserFileRepository
+from src.infrastructure.adapters.storage.minio_storage_adapter import MinioUrlStorageAdapter
+from src.infrastructure.database.models import UserModel
 from src.presentation.api.routers.v1 import conversions as conversions_router
 from src.presentation.api.routers.v1 import files as files_router
 from src.presentation.schemas.files import PresignedUrlsRequest
+
+# The routers declare their collaborators as concrete adapters/repositories. The
+# doubles below implement only the slice of that API the route actually reads,
+# so each argument is `cast` at the boundary. That is the same narrowing the
+# runtime does when `app.dependency_overrides` swaps the real dependency out.
 
 
 def _run(coro):
@@ -70,10 +83,10 @@ def test_presigned_urls_returns_url_for_an_owned_key() -> None:
     result = _run(
         files_router.generate_presigned_urls(
             PresignedUrlsRequest(object_keys=["uploads/mine.pdf"]),
-            _User(1),
-            storage,
-            FakeUserFileRepo(owned={"uploads/mine.pdf"}),
-            FakeJobKeyRepo(owned=set()),
+            cast(UserModel, _User(1)),
+            cast(MinioUrlStorageAdapter, storage),
+            cast(SQLUserFileRepository, FakeUserFileRepo(owned={"uploads/mine.pdf"})),
+            cast(SQLConversionJobRepository, FakeJobKeyRepo(owned=set())),
         )
     )
 
@@ -88,10 +101,10 @@ def test_presigned_urls_allows_a_conversion_job_output_key() -> None:
     result = _run(
         files_router.generate_presigned_urls(
             PresignedUrlsRequest(object_keys=["conversions/out.docx"]),
-            _User(1),
-            storage,
-            FakeUserFileRepo(owned=set()),
-            FakeJobKeyRepo(owned={"conversions/out.docx"}),
+            cast(UserModel, _User(1)),
+            cast(MinioUrlStorageAdapter, storage),
+            cast(SQLUserFileRepository, FakeUserFileRepo(owned=set())),
+            cast(SQLConversionJobRepository, FakeJobKeyRepo(owned={"conversions/out.docx"})),
         )
     )
     assert [r.object_key for r in result] == ["conversions/out.docx"]
@@ -104,10 +117,10 @@ def test_presigned_urls_rejects_a_key_the_caller_does_not_own() -> None:
         _run(
             files_router.generate_presigned_urls(
                 PresignedUrlsRequest(object_keys=["uploads/someone-else.pdf"]),
-                _User(1),
-                storage,
-                FakeUserFileRepo(owned=set()),
-                FakeJobKeyRepo(owned=set()),
+                cast(UserModel, _User(1)),
+                cast(MinioUrlStorageAdapter, storage),
+                cast(SQLUserFileRepository, FakeUserFileRepo(owned=set())),
+                cast(SQLConversionJobRepository, FakeJobKeyRepo(owned=set())),
             )
         )
 
@@ -123,10 +136,10 @@ def test_presigned_urls_rejects_traversal_key() -> None:
         _run(
             files_router.generate_presigned_urls(
                 PresignedUrlsRequest(object_keys=["../secret"]),
-                _User(1),
-                storage,
-                FakeUserFileRepo(owned=set()),
-                FakeJobKeyRepo(owned=set()),
+                cast(UserModel, _User(1)),
+                cast(MinioUrlStorageAdapter, storage),
+                cast(SQLUserFileRepository, FakeUserFileRepo(owned=set())),
+                cast(SQLConversionJobRepository, FakeJobKeyRepo(owned=set())),
             )
         )
     assert exc.value.status_code == 404
@@ -138,10 +151,10 @@ def test_presigned_urls_raises_on_first_missing_key_in_order() -> None:
         _run(
             files_router.generate_presigned_urls(
                 PresignedUrlsRequest(object_keys=["uploads/a.pdf", "uploads/missing.pdf"]),
-                _User(1),
-                storage,
-                FakeUserFileRepo(owned={"uploads/a.pdf", "uploads/missing.pdf"}),
-                FakeJobKeyRepo(owned=set()),
+                cast(UserModel, _User(1)),
+                cast(MinioUrlStorageAdapter, storage),
+                cast(SQLUserFileRepository, FakeUserFileRepo(owned={"uploads/a.pdf", "uploads/missing.pdf"})),
+                cast(SQLConversionJobRepository, FakeJobKeyRepo(owned=set())),
             )
         )
     assert exc.value.status_code == 404
@@ -177,9 +190,9 @@ def test_authenticated_router_hides_ownerless_guest_job() -> None:
         _run(
             conversions_router.get_conversion_job(
                 "job-1",
-                _User(1),
-                FakeJobRepository(_job(user_id=None)),
-                _FakeTransferService(),
+                cast(UserModel, _User(1)),
+                cast(SQLConversionJobRepository, FakeJobRepository(_job(user_id=None))),
+                cast(TransferService, _FakeTransferService()),
                 None,
             )
         )
@@ -191,9 +204,9 @@ def test_authenticated_router_hides_another_users_job() -> None:
         _run(
             conversions_router.get_conversion_job(
                 "job-1",
-                _User(1),
-                FakeJobRepository(_job(user_id=2)),
-                _FakeTransferService(),
+                cast(UserModel, _User(1)),
+                cast(SQLConversionJobRepository, FakeJobRepository(_job(user_id=2))),
+                cast(TransferService, _FakeTransferService()),
                 None,
             )
         )
@@ -204,9 +217,9 @@ def test_authenticated_router_returns_own_job() -> None:
     response = _run(
         conversions_router.get_conversion_job(
             "job-1",
-            _User(1),
-            FakeJobRepository(_job(user_id=1)),
-            _FakeTransferService(),
+            cast(UserModel, _User(1)),
+            cast(SQLConversionJobRepository, FakeJobRepository(_job(user_id=1))),
+            cast(TransferService, _FakeTransferService()),
             None,
         )
     )

@@ -14,6 +14,7 @@ schemas kept leaking, because the leak comes from pydantic's own phrasing.
 """
 
 import json
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import pytest
@@ -51,12 +52,16 @@ _IMPLEMENTATION_VOCABULARY = (
 )
 
 
-def _request_error(errors: list[dict[str, Any]]) -> RequestValidationError:
+def _request_error(errors: Sequence[Mapping[str, Any]]) -> RequestValidationError:
     """A ``RequestValidationError`` carrying ``errors``.
 
     Built directly rather than by sending a request: the handler is a pure
     function of the error records, so the mapping can be tested without an app,
     a client or a database.
+
+    ``Sequence[Mapping[str, Any]]`` (not ``list[dict[str, Any]]``) because the
+    callers hand it pydantic's own ``list[ErrorDetails]`` — a ``TypedDict``,
+    which is a ``Mapping`` but deliberately not a ``dict``.
     """
     return RequestValidationError(errors)
 

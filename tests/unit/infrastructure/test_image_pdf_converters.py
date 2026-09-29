@@ -6,6 +6,7 @@ page geometry and rendered pixels rather than just "a file appeared".
 """
 
 from pathlib import Path
+from typing import Callable, cast
 
 import pypdfium2 as pdfium
 import pytest
@@ -58,6 +59,18 @@ def _render_first_page(pdf_path: Path) -> Image.Image:
         return document[0].render(scale=1).to_pil().convert("RGB")
     finally:
         document.close()
+
+
+def _rgb(pixel: float | tuple[int, ...] | None) -> tuple[int, int, int]:
+    """Pin a ``getpixel`` result to three channels.
+
+    Pillow types ``getpixel`` as a union over every image mode (a scalar for
+    ``L``, a tuple for the colour modes, ``None`` when out of bounds). Every
+    pixel these tests read comes from an image the test itself rendered as
+    ``RGB``, so the shape is checked once here instead of at each assertion.
+    """
+    assert isinstance(pixel, tuple) and len(pixel) >= 3, f"not an RGB pixel: {pixel!r}"
+    return pixel[0], pixel[1], pixel[2]
 
 
 def _render_page(pdf_path: Path, index: int) -> Image.Image:
@@ -124,7 +137,7 @@ class TestSingleFrameImages:
         rendered = _render_first_page(_convert("png", source_file, tmp_path))
 
         assert rendered.size == (50, 50)
-        for pixel in (rendered.getpixel((1, 1)), rendered.getpixel((25, 25))):
+        for pixel in (_rgb(rendered.getpixel((1, 1))), _rgb(rendered.getpixel((25, 25)))):
             assert all(abs(actual - expected) <= 6 for actual, expected in zip(pixel, (15, 30, 200)))
 
     def test_transparency_is_flattened_onto_white(self, tmp_path: Path):
@@ -136,8 +149,8 @@ class TestSingleFrameImages:
 
         rendered = _render_first_page(_convert("png", source_file, tmp_path))
 
-        outside = rendered.getpixel((2, 2))
-        inside = rendered.getpixel((30, 30))
+        outside = _rgb(rendered.getpixel((2, 2)))
+        inside = _rgb(rendered.getpixel((30, 30)))
         assert all(channel > 240 for channel in outside), f"expected white, got {outside}"
         assert inside[2] > 200 and inside[0] < 40, f"expected blue, got {inside}"
 
@@ -152,7 +165,7 @@ class TestSingleFrameImages:
 
         rendered = _render_first_page(_convert("tiff", source_file, tmp_path))
 
-        assert all(channel > 240 for channel in rendered.getpixel((15, 15)))
+        assert all(channel > 240 for channel in _rgb(rendered.getpixel((15, 15))))
 
 
 class TestPageGeometry:
@@ -219,8 +232,8 @@ class TestMultiFrameImages:
 
         assert len(_pages(pdf)) == 2
         # Frame composition is kept: page 2 is page 1 with the square added.
-        assert _render_page(pdf, 0).getpixel((50, 30))[0] > 200
-        second_page = _render_page(pdf, 1).getpixel((50, 30))
+        assert _rgb(_render_page(pdf, 0).getpixel((50, 30)))[0] > 200
+        second_page = _rgb(_render_page(pdf, 1).getpixel((50, 30)))
         assert second_page[1] > 200 and second_page[0] < 60
 
     def test_multi_page_tiff_becomes_one_page_per_frame(self, tmp_path: Path):
@@ -232,8 +245,8 @@ class TestMultiFrameImages:
         pdf = _convert("tiff", source_file, tmp_path)
 
         assert len(_pages(pdf)) == 2
-        assert _render_page(pdf, 0).getpixel((20, 15))[0] > 200
-        assert _render_page(pdf, 1).getpixel((20, 15))[2] > 200
+        assert _rgb(_render_page(pdf, 0).getpixel((20, 15)))[0] > 200
+        assert _rgb(_render_page(pdf, 1).getpixel((20, 15)))[2] > 200
 
     def test_single_frame_image_is_not_duplicated(self, tmp_path: Path):
         source_file = _write_image(tmp_path / "in.png", "RGB", (30, 30), (0, 0, 0))
@@ -254,7 +267,7 @@ class TestSvgToPdf:
         pdf = _convert("svg", source_file, tmp_path)
 
         assert len(_pages(pdf)) == 1
-        assert _render_first_page(pdf).getpixel((75, 37))[2] > 200
+        assert _rgb(_render_first_page(pdf).getpixel((75, 37)))[2] > 200
 
     def test_broken_svg_leaves_no_output(self, tmp_path: Path):
         source_file = tmp_path / "in.svg"
@@ -300,10 +313,16 @@ class TestFailureHandling:
         assert not output.exists()
 
     def test_converter_accepts_and_ignores_logger_override(self, tmp_path: Path):
+        """The registry contract is two positional arguments, but every
+        converter implementation also tolerates the legacy ``logger_override``
+        keyword. The call is cast because that tolerance is outside the
+        declared ``ConverterFunction`` type.
+        """
         source_file = _write_image(tmp_path / "in.png", "RGB", (20, 20), (0, 0, 0))
         output = tmp_path / "out.pdf"
+        converter = cast(Callable[..., None], _converter("png"))
 
-        _converter("png")(str(source_file), str(output), logger_override=object())
+        converter(str(source_file), str(output), logger_override=object())
 
         assert output.is_file()
 

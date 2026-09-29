@@ -7,20 +7,33 @@ from minio import Minio
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.application.services.api_key_service import APIKeyService
+from src.application.services.assistant_service import AssistantService
+from src.application.services.assistant_tools import AssistantToolBox
 from src.application.services.conversion_service import ConversionService
 from src.application.services.file_service import FileService
 from src.application.services.file_transfer_service import TransferService
 from src.application.services.priority_queue_dispatcher import PriorityQueueDispatcher
 from src.application.services.queue_priority_router import QueuePriorityRouter
+from src.application.ports.assistant_account_port import AssistantAccountPort
+from src.application.ports.assistant_model_port import AssistantModelResolver
+from src.application.ports.assistant_repository_port import AssistantQuotaPort
+from src.application.ports.document_text_port import DocumentTextExtractorPort
 from src.application.ports.email_port import EmailPort
 from src.application.ports.sms_port import SmsPort
+from src.infrastructure.adapters.ai.redis_quota import RedisAssistantQuota
+from src.infrastructure.adapters.ai.registry import AssistantModelRegistry
 from src.infrastructure.adapters.cache.redis_session_adapter import RedisSessionAdapter
+from src.infrastructure.adapters.documents.text_extractor import DocumentTextExtractor
 from src.infrastructure.adapters.email import build_email_sender
 from src.infrastructure.adapters.sms import build_sms_sender
 from src.infrastructure.adapters.payment.stripe_service import StripeService
 from src.infrastructure.adapters.queues.redis_stream_job_queue import JobStream
 from src.infrastructure.adapters.queues.redis_stream_status_queue import JobEventSubscriber
 from src.infrastructure.adapters.repository.sql_api_key_repo import SQLAPIKeyRepository
+from src.infrastructure.adapters.repository.sql_assistant_account_adapter import (
+    SQLAssistantAccountAdapter,
+)
+from src.infrastructure.adapters.repository.sql_conversation_repo import SQLConversationRepository
 from src.infrastructure.adapters.repository.sql_conversion_job_repo import SQLConversionJobRepository
 from src.infrastructure.adapters.repository.sql_credit_repo import SQLCreditRepository
 from src.infrastructure.adapters.repository.sql_subscription_repo import SQLSubscriptionRepository
@@ -224,4 +237,118 @@ def get_file_service(
         folder_repository=folder_repository,
         storage=storage,
         subscription_repository=subscription_repository,
+    )
+
+
+# ---------------------------------------------------------------------------
+# AI assistant
+# ---------------------------------------------------------------------------
+
+
+@lru_cache
+def get_assistant_model_registry() -> AssistantModelResolver:
+    """The process-wide assistant model registry (tier → cached ``LlmPort``).
+
+    Cached for the same reason as the email/SMS transports: each resolved port
+    is a pooled transport (an ``httpx.AsyncClient`` for the OpenAI adapter), and
+    rebuilding one per request would throw away every keep-alive. Caching the
+    registry itself (not just the adapters) keeps the one adapter-per-model map
+    alive for the process, so a FREE and a PRO turn reuse their own adapters.
+
+    Tests override this dependency with a fake resolver, which is how the
+    tier→model mapping and the whole chat loop are asserted without a provider
+    or network.
+    """
+    return AssistantModelRegistry(get_settings())
+
+
+@lru_cache
+def get_document_text_extractor() -> DocumentTextExtractorPort:
+    """The process-wide document text extractor, configured from settings."""
+    settings = get_settings()
+    return DocumentTextExtractor(
+        max_document_bytes=settings.AI_MAX_DOCUMENT_BYTES,
+        max_input_chars=settings.AI_SUMMARY_MAX_INPUT_CHARS,
+    )
+
+
+@lru_cache
+def get_assistant_quota() -> AssistantQuotaPort:
+    """Per-user hourly assistant quota, backed by the shared Redis client.
+
+    Cached for the same reason as the transports above: the shared client is
+    already a singleton, and building one tiny wrapper per request buys nothing.
+    Tests override this dependency to decide whether a turn is allowed, which is
+    how the 429 path is asserted without Redis.
+    """
+    return RedisAssistantQuota(redis_client=_shared_redis_client())
+
+
+def get_conversation_repository(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> SQLConversationRepository:
+    return SQLConversationRepository(session=db)
+
+
+def get_assistant_account_port(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> AssistantAccountPort:
+    """Read-only account/usage aggregation for the assistant account tool.
+
+    Built per request (deliberately NOT ``lru_cache``d) because the adapter is
+    bound to the request's ``AsyncSession``: caching it would pin a pooled
+    session open forever and hand stale data to every later request. Only the
+    session-independent collaborators in this module are cached.
+    """
+    return SQLAssistantAccountAdapter(
+        job_repository=SQLConversionJobRepository(session=db),
+        credit_repository=SQLCreditRepository(session=db),
+        subscription_repository=SQLSubscriptionRepository(session=db),
+        file_repository=SQLUserFileRepository(session=db),
+    )
+
+
+def get_assistant_toolbox(
+    models: Annotated[AssistantModelResolver, Depends(get_assistant_model_registry)],
+    extractor: Annotated[DocumentTextExtractorPort, Depends(get_document_text_extractor)],
+    file_service: Annotated[FileService, Depends(get_file_service)],
+    folder_repository: Annotated[SQLUserFolderRepository, Depends(get_user_folder_repository)],
+    conversion_service: Annotated[ConversionService, Depends(get_conversion_service)],
+    storage: Annotated[MinioUrlStorageAdapter, Depends(get_minio_url_storage)],
+    account_port: Annotated[AssistantAccountPort, Depends(get_assistant_account_port)],
+) -> AssistantToolBox:
+    """The assistant's tools, wired to the real file/conversion services.
+
+    Built per request because the folder/file repositories are bound to the
+    request's database session; the expensive collaborators (the model
+    registry, the extractor) are themselves cached dependencies.
+    """
+    settings = get_settings()
+    return AssistantToolBox(
+        file_service=file_service,
+        conversion_service=conversion_service,
+        folder_repository=folder_repository,
+        storage=storage,
+        extractor=extractor,
+        models=models,
+        account_port=account_port,
+        max_document_bytes=settings.AI_MAX_DOCUMENT_BYTES,
+        summary_max_input_chars=settings.AI_SUMMARY_MAX_INPUT_CHARS,
+    )
+
+
+def get_assistant_service(
+    models: Annotated[AssistantModelResolver, Depends(get_assistant_model_registry)],
+    toolbox: Annotated[AssistantToolBox, Depends(get_assistant_toolbox)],
+    conversations: Annotated[SQLConversationRepository, Depends(get_conversation_repository)],
+    quota: Annotated[AssistantQuotaPort, Depends(get_assistant_quota)],
+) -> AssistantService:
+    settings = get_settings()
+    return AssistantService(
+        models=models,
+        toolbox=toolbox,
+        conversations=conversations,
+        quota=quota,
+        max_tool_iterations=settings.AI_MAX_TOOL_ITERATIONS,
+        max_history_messages=settings.AI_MAX_HISTORY_MESSAGES,
     )

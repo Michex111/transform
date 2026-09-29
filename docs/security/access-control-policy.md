@@ -94,7 +94,7 @@ Implementation: `src/infrastructure/auth/jwt_provider.py`.
 - **Refresh flow:** refresh tokens are long-lived and are used to mint new access
   tokens; they are not themselves used for resource requests.
 - **Signing key:** `SECRET_KEY` — a `SecretStr`. In production,
-  `Settings.validate()` rejects a weak (<32 chars) or known-insecure value
+  `Settings.validate_settings()` rejects a weak (<32 chars) or known-insecure value
   (`settings.py`).
 - **Session/caching:** the app uses Redis (`redis_session_adapter.py`) for
   upload-session caches; JWT itself is stateless (no server-side session store),

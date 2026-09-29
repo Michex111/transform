@@ -12,6 +12,12 @@ dist
 dist-ssr
 *.local
 
+# Vite's transient bundled-config artifacts (`vite.config.ts.timestamp-*.mjs`).
+# Vite writes one per config load and they are pure build debris, but they land
+# in the source tree next to vite.config.ts, so without this rule a `git add -A`
+# sweeps one into a commit.
+vite.config.ts.timestamp-*.mjs
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

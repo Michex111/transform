@@ -16,6 +16,10 @@ class UploadSession(BaseModel):
     file_extension: str | None = None
     folder_id: str | None = None
     user_id: str | None = None
+    # The library file id created by an authenticated verify. It stays None for
+    # guest and pending sessions, which never persist a library row, so the
+    # client can tell "a file record now exists" from "still just an object key".
+    file_id: str | None = None
 
     # How the client must send the bytes. ``single`` is the historical one-shot
     # presigned PUT; ``multipart`` means the client PUTs each part to a URL from

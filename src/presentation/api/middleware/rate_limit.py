@@ -80,6 +80,13 @@ def _truncate_rate_limit_key(key: str) -> str:
 # fallback state so per-IP counters do not accumulate across test cases.
 _INSTANCES: list["RateLimitMiddleware"] = []
 
+#: Hard ceiling on the number of keys the in-memory fallback tracks. The key is
+#: derived from a client-supplied credential (bearer token / API key) or the
+#: client IP, so without a cap an attacker can add one dictionary entry per
+#: request and never revisit it — unbounded memory growth on the one code path
+#: that is only ever reached when Redis is already down.
+_IN_MEMORY_MAX_KEYS = 10_000
+
 # Set once a Redis flush fails, so repeated ``reset_all`` calls become a no-op.
 # ``reset_all`` is a test helper and Redis is usually absent in local/CI runs;
 # without this, every test would pay the connect timeout twice (setup and
@@ -240,9 +247,17 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         # In-memory fallback (single-process only)
         now = time.time()
         if key not in self._store:
+            # A brand-new key must not be able to grow ``_store`` without bound.
+            # The key space is attacker-addressable: a client can mint a fresh
+            # bucket per request by sending a random bearer token or API key (or
+            # by hitting a fresh ``/api/`` 404), and a key that is used once and
+            # never revisited would otherwise stay in the dict forever — a slow
+            # memory-exhaustion DoS in exactly the degraded mode (Redis down)
+            # where the limiter is already the only control left.
+            self._prune_store(now, window)
             self._store[key] = []
 
-        # Remove expired entries
+        # Remove expired entries for this key.
         self._store[key] = [t for t in self._store[key] if now - t < window]
 
         if len(self._store[key]) >= limit:
@@ -250,6 +265,37 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
         self._store[key].append(now)
         return True
+
+    def _prune_store(self, now: float, window: int) -> None:
+        """Bound the in-memory fallback's key count.
+
+        First drops every key whose window has fully elapsed (the common case:
+        one-shot keys from earlier traffic). If the dict is still at the cap —
+        an active flood of distinct keys, all still inside the window — the
+        least-recently-used keys are evicted down to half the cap.
+
+        Evicting a live key resets that key's budget, which is a deliberate
+        trade-off: the alternative is unbounded memory growth, and this whole
+        path exists only because Redis is already unavailable. The eviction is
+        from a *bounded* working set, so the relaxation is not unbounded either.
+        """
+        if len(self._store) < _IN_MEMORY_MAX_KEYS:
+            return
+
+        for stale_key in [
+            k for k, timestamps in self._store.items()
+            if not timestamps or now - timestamps[-1] >= window
+        ]:
+            del self._store[stale_key]
+
+        if len(self._store) >= _IN_MEMORY_MAX_KEYS:
+            by_recency = sorted(
+                self._store.items(),
+                key=lambda item: item[1][-1] if item[1] else 0.0,
+            )
+            for stale_key, _ in by_recency[: len(by_recency) - _IN_MEMORY_MAX_KEYS // 2]:
+                del self._store[stale_key]
+
 
 
 def build_rate_limit_middleware(app) -> RateLimitMiddleware:

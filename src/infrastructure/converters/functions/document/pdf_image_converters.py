@@ -23,7 +23,7 @@ need a container:
 import io
 import logging
 import zipfile
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator
 from pathlib import Path
 
 import pypdfium2 as pdfium
@@ -105,8 +105,13 @@ def _flatten(image: Image.Image) -> Image.Image:
     return image.convert("RGB")
 
 
-def _render_pages(pdf_path: str | Path, dpi: int = DEFAULT_DPI) -> Iterator[Image.Image]:
-    """Yield each page of ``pdf_path`` as a flattened RGB image, in order."""
+def _render_pages(pdf_path: str | Path, dpi: int = DEFAULT_DPI) -> Generator[Image.Image, None, None]:
+    """Yield each page of ``pdf_path`` as a flattened RGB image, in order.
+
+    Typed as a ``Generator`` (not ``Iterator``) because callers close it early
+    to release the underlying PDFium document as soon as the writer stops
+    pulling pages.
+    """
     document = pdfium.PdfDocument(str(pdf_path))
     try:
         for index in range(len(document)):

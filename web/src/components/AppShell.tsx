@@ -4,6 +4,7 @@ import { motion } from "motion/react";
 import { DotsThree } from "@phosphor-icons/react";
 import { Logo } from "@/components/ui";
 import { ProfileMenu } from "@/components/ProfileMenu";
+import { AssistantLauncher } from "@/components/assistant/AssistantLauncher";
 import { MORE, NAV, PRIMARY } from "@/components/navItems";
 import { PHONE_MENU, SIDEBAR_MENU } from "@/lib/profileMenu";
 
@@ -91,7 +92,11 @@ export function AppShell() {
           <ProfileMenu {...PHONE_MENU} align="right" placement="down" />
         </header>
 
-        <main className="flex-1 px-4 py-6 sm:px-6 lg:px-8">
+        {/* The content container's own padding. Deliberately on the shared
+            shell so every page has the same gutter; the Assistant page
+            compensates in its height calc (`100dvh - 10.5rem` / `- 5.5rem`),
+            which assumes exactly this much vertical padding. */}
+        <main className="flex-1 px-4 py-5 sm:px-6 lg:px-7">
           {/* Animate each page in on mount. We deliberately do NOT use
               AnimatePresence mode="wait" here: when SSE job updates or the
               Queue's layout animations re-render the exiting page, the exit
@@ -106,6 +111,11 @@ export function AppShell() {
             <Outlet />
           </motion.div>
         </main>
+
+        {/* Floating Transform AI launcher — mounted here (not on a page) so it
+            is present on every authed route. It portals its own fixed elements
+            to `document.body`. */}
+        <AssistantLauncher />
 
         {/* Mobile bottom nav — primary 4 always visible; the rest live in a
             "More" popover so every destination stays reachable on small screens.

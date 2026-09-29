@@ -89,7 +89,11 @@ export function UploadsDock() {
     // `pb-[env(safe-area-inset-bottom)]`), so the offset has to include that
     // inset too or the dock hides behind the nav on a notched phone. From `lg`
     // up there is no nav and the dock returns to the corner.
-    <div className="fixed right-4 bottom-[calc(4.5rem_+_env(safe-area-inset-bottom))] z-40 w-80 max-w-[calc(100vw-2rem)] lg:bottom-4">
+    //
+    // From `md` up the Transform AI launcher sits in the corner (fixed right-4
+    // bottom-4, h-14), so the dock is lifted to stack cleanly above it instead
+    // of overlapping the button.
+    <div className="fixed right-4 bottom-[calc(4.5rem_+_env(safe-area-inset-bottom))] z-40 w-80 max-w-[calc(100vw-2rem)] md:bottom-[calc(5.75rem_+_env(safe-area-inset-bottom))] lg:bottom-[5.75rem]">
       <Card className="overflow-hidden shadow-2xl">
         <button
           type="button"

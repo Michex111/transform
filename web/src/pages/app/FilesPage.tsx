@@ -10,6 +10,7 @@ import {
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
+import { useSearchParams } from "react-router-dom";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { Item, PopIn, staggerContainer } from "@/lib/motion";
 import {
@@ -29,6 +30,7 @@ import {
   Star,
   SquaresFour,
   CheckSquare,
+  Sparkle,
 } from "@phosphor-icons/react";
 import { useAuth } from "@/auth/AuthContext";
 import { useToast } from "@/auth/ToastContext";
@@ -41,7 +43,9 @@ import { FilesConvertModal } from "./FilesConvertModal";
 import { FilesMassConvertModal } from "./FilesMassConvertModal";
 import { FilesMoveModal, type MoveItem } from "./FilesMoveModal";
 import { FilePreviewModal } from "@/components/FilePreviewModal";
+import { SummarizeModal } from "@/components/assistant/SummarizeModal";
 import { useUploads } from "@/uploads/uploadsContext";
+import { buildFolderPath } from "@/lib/folderPath";
 import type { FolderResponse, FileMetadataResponse } from "@/api/types";
 
 // Custom MIME type used to identify a draggable file in the page's HTML5 DnD.
@@ -93,6 +97,8 @@ export function FilesPage() {
   const [convertFile, setConvertFile] = useState<FileMetadataResponse | null>(null);
   // File whose in-page preview modal is open (null = closed).
   const [previewFile, setPreviewFile] = useState<FileMetadataResponse | null>(null);
+  // File whose AI summary modal is open (null = closed).
+  const [summarizeFile, setSummarizeFile] = useState<FileMetadataResponse | null>(null);
   // Id of the file currently being dragged (null when no drag is active).
   const [draggedFileId, setDraggedFileId] = useState<string | null>(null);
   // Id of the folder currently being dragged (null when no drag is active).
@@ -114,6 +120,17 @@ export function FilesPage() {
   // Favorites view toggle.
   const [showFavorites, setShowFavorites] = useState(false);
 
+  // Deep link to a folder: `/app/files?folder=<id>`. Read from the query string
+  // (the assistant's "go to this folder" link); the resolver effect below turns
+  // it into a real breadcrumb chain. This is an *entry point*: in-page
+  // navigation (openFolder / breadcrumb clicks) deliberately does not rewrite
+  // the URL, so a later param change is the only re-trigger.
+  const [searchParams] = useSearchParams();
+  const folderParam = searchParams.get("folder");
+  // Gates the listing until the deep link (if any) has been resolved, so the
+  // root is never fetched and rendered before the target folder.
+  const [pathReady, setPathReady] = useState(!folderParam);
+
   const reduce = useReducedMotion();
   const currentFolderId = path[path.length - 1]?.id ?? null;
 
@@ -122,6 +139,54 @@ export function FilesPage() {
   // could land last and show folder A's contents under folder B's breadcrumb
   // (and clear `loading` while a newer request is still running).
   const loadIdRef = useRef(0);
+
+  // Adapt the folder-contents endpoint (which answers `{ folder, folders, files }`)
+  // to the single-folder fetcher the path builder wants. Stable, so the
+  // deep-link effect below does not re-run on unrelated renders.
+  const fetchFolder = useCallback(
+    (folderId: string) => client.getFolderContents(folderId).then((contents) => contents.folder),
+    [client],
+  );
+
+  // Resolve `/app/files?folder=<id>` into a root→target chain and store it as
+  // `path` — the page's single source of truth — so the existing `load` effect
+  // (with its request-id guard) fetches the target's contents. This adds no
+  // second load path: it only prepares the path that `load` reacts to.
+  //
+  // An unknown/dangling id degrades truthfully: land on the drive root and say
+  // so, rather than showing the wrong folder under a plausible-looking crumb.
+  useEffect(() => {
+    if (!folderParam) {
+      // No deep link (or it was removed): make sure the listing is not left
+      // gated by a previous resolution.
+      setPathReady(true);
+      return;
+    }
+    // Cancel a superseded resolution so a slower response cannot clobber a
+    // newer one (the same discipline as `loadIdRef` for folder loads).
+    let active = true;
+    setPathReady(false);
+    buildFolderPath(folderParam, fetchFolder)
+      .then((chain) => {
+        if (!active) return;
+        if (chain.length === 0) {
+          error("That folder could not be found");
+          setPath([]);
+        } else {
+          setPath(chain);
+        }
+        setPathReady(true);
+      })
+      .catch((err: unknown) => {
+        if (!active) return;
+        error(err instanceof Error ? err.message : "Could not open that folder");
+        setPath([]);
+        setPathReady(true);
+      });
+    return () => {
+      active = false;
+    };
+  }, [folderParam, fetchFolder, error]);
 
   const load = useCallback(async () => {
     const requestId = ++loadIdRef.current;
@@ -156,8 +221,11 @@ export function FilesPage() {
   }, [client, currentFolderId, error, showFavorites]);
 
   useEffect(() => {
+    // Hold the first load until a deep link has resolved the path, so the root
+    // listing never flashes ahead of the folder the link named.
+    if (!pathReady) return;
     load();
-  }, [load]);
+  }, [load, pathReady]);
 
   // Refresh the listing when a background upload completes — the modal used to
   // call `onUploaded` synchronously, but it now closes immediately and the
@@ -834,6 +902,7 @@ export function FilesPage() {
                       onDownload={() => downloadFile(file)}
                       onConvert={() => setConvertFile(file)}
                       onPreview={() => setPreviewFile(file)}
+                      onSummarize={() => setSummarizeFile(file)}
                       onRename={(name) => renameFile(file.id, name)}
                       onDelete={() => deleteFile(file.id)}
                       onToggleFavorite={() => toggleFavorite(file)}
@@ -892,6 +961,13 @@ export function FilesPage() {
               }
             : null
         }
+      />
+
+      {/* AI summary of a library file */}
+      <SummarizeModal
+        open={summarizeFile !== null}
+        onClose={() => setSummarizeFile(null)}
+        file={summarizeFile}
       />
 
       {/* Mass-convert selected files modal */}
@@ -1206,6 +1282,7 @@ function FileCard({
   onDownload,
   onConvert,
   onPreview,
+  onSummarize,
   onRename,
   onDelete,
   onToggleFavorite,
@@ -1221,6 +1298,7 @@ function FileCard({
   onDownload: () => void;
   onConvert: () => void;
   onPreview: () => void;
+  onSummarize: () => void;
   onRename: (name: string) => void;
   onDelete: () => void;
   onToggleFavorite: () => void;
@@ -1351,6 +1429,7 @@ function FileCard({
               {!selectable && (
                 <CardMenu
                   onPreview={onPreview}
+                  onSummarize={onSummarize}
                   onDownload={onDownload}
                   onConvert={onConvert}
                   onRename={() => { setDraft(file.file_name); setEditing(true); }}
@@ -1368,6 +1447,7 @@ function FileCard({
 
 function CardMenu({
   onPreview,
+  onSummarize,
   onRename,
   onDownload,
   onConvert,
@@ -1375,6 +1455,7 @@ function CardMenu({
   onDelete,
 }: {
   onPreview?: () => void;
+  onSummarize?: () => void;
   onRename?: () => void;
   onDownload?: () => void;
   onConvert?: () => void;
@@ -1475,6 +1556,15 @@ function CardMenu({
                   className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm text-on-background hover:bg-surface-variant"
                 >
                   <Eye size={15} /> Preview
+                </button>
+              )}
+              {onSummarize && (
+                <button
+                  role="menuitem"
+                  onClick={() => { setOpen(false); onSummarize(); }}
+                  className="flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm text-on-background hover:bg-surface-variant"
+                >
+                  <Sparkle size={15} /> Summarize with AI
                 </button>
               )}
               {onMove && (

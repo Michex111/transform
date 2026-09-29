@@ -112,16 +112,20 @@ def run_migrations_online() -> None:
     configuration["sqlalchemy.url"] = url
 
     if _is_async_database_url(url):
-        connectable = async_engine_from_config(
+        # Keep this distinct from the sync `connectable` below: static analyzers
+        # (Pyrefly included) do not narrow a variable captured by a nested
+        # closure, so sharing the name unions AsyncEngine with Engine and makes
+        # `await async_connectable.dispose()` look like awaiting `None`.
+        async_connectable = async_engine_from_config(
             configuration,
             prefix="sqlalchemy.",
             poolclass=pool.NullPool,
         )
 
         async def run_async_migrations() -> None:
-            async with connectable.connect() as connection:
+            async with async_connectable.connect() as connection:
                 await connection.run_sync(do_run_migrations)
-            await connectable.dispose()
+            await async_connectable.dispose()
 
         asyncio.run(run_async_migrations())
         return

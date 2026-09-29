@@ -74,10 +74,10 @@ def test_auto_resolves_to_twilio_with_all_three_credentials() -> None:
 def test_auto_does_not_resolve_to_twilio_with_incomplete_credentials(missing: str) -> None:
     """A half-configured Twilio would fail every send; the log sink is better.
 
-    ``Settings.validate()`` warns about this case explicitly, because there is
+    ``Settings.validate_settings()`` warns about this case explicitly, because there is
     no gate here that fails open — nothing else would surface it.
     """
-    credentials = dict(_CREDENTIALS)
+    credentials: dict[str, str | None] = dict(_CREDENTIALS)
     credentials[missing] = None
 
     settings = _settings(**credentials)
@@ -114,13 +114,13 @@ def test_explicit_twilio_is_honoured() -> None:
 def test_an_unsupported_backend_is_rejected() -> None:
     """A typo must not silently resolve to a transport nobody intended."""
     with pytest.raises(ValueError, match="Unsupported SMS_BACKEND"):
-        _settings(SMS_BACKEND="signal").validate()
+        _settings(SMS_BACKEND="signal").validate_settings()
 
 
 def test_explicit_twilio_without_credentials_is_a_startup_error() -> None:
     """An explicit choice is never silently downgraded to the log sink."""
     with pytest.raises(RuntimeError, match="TWILIO_ACCOUNT_SID"):
-        _settings(SMS_BACKEND="twilio").validate()
+        _settings(SMS_BACKEND="twilio").validate_settings()
 
 
 def test_explicit_twilio_missing_only_the_token_is_a_startup_error() -> None:
@@ -129,15 +129,15 @@ def test_explicit_twilio_missing_only_the_token_is_a_startup_error() -> None:
             SMS_BACKEND="twilio",
             TWILIO_ACCOUNT_SID=SID,
             TWILIO_FROM_NUMBER=FROM,
-        ).validate()
+        ).validate_settings()
 
 
 def test_a_supported_backend_validates_cleanly() -> None:
-    _settings(SMS_BACKEND="console").validate()  # should not raise
-    _settings(**_CREDENTIALS).validate()  # auto -> twilio, complete
+    _settings(SMS_BACKEND="console").validate_settings()  # should not raise
+    _settings(**_CREDENTIALS).validate_settings()  # auto -> twilio, complete
 
 
 def test_a_non_positive_attempt_ceiling_is_rejected() -> None:
     """Zero attempts would make a 6-digit code instantly brute-forceable."""
     with pytest.raises(RuntimeError, match="PHONE_VERIFICATION_MAX_ATTEMPTS"):
-        _settings(PHONE_VERIFICATION_MAX_ATTEMPTS=0).validate()
+        _settings(PHONE_VERIFICATION_MAX_ATTEMPTS=0).validate_settings()

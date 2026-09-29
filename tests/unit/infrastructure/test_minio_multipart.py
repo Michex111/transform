@@ -9,6 +9,7 @@ mapping (especially the ETag quoting rule) without a provider.
 """
 
 import asyncio
+from typing import Any, cast
 
 import pytest
 from minio import Minio
@@ -20,6 +21,16 @@ from src.infrastructure.adapters.storage.minio_storage_adapter import MinioUrlSt
 
 BUCKET = "transform-convertion-bucket"
 ENDPOINT = "minio:9000"
+
+
+def _provider_error(code: str, message: str) -> S3Error:
+    """A synthetic provider error, raised from a stubbed SDK call.
+
+    ``minio`` types the first argument (the urllib3 response) as required, but
+    the SDK tolerates ``None`` — which is all a recording stand-in can hand it —
+    so the argument is cast rather than faked.
+    """
+    return S3Error(cast(Any, None), code, message, "res", "req", "host")
 
 
 def _client() -> Minio:
@@ -82,7 +93,7 @@ def test_complete_multipart_upload_strips_etag_quotes(adapter) -> None:
 
 def test_complete_multipart_upload_wraps_provider_errors(adapter) -> None:
     def boom(*args, **kwargs):
-        raise S3Error(None, "NoSuchUpload", "gone", "res", "req", "host")
+        raise _provider_error("NoSuchUpload", "gone")
 
     adapter._minio_client._complete_multipart_upload = boom  # type: ignore[method-assign]
 
@@ -95,7 +106,7 @@ def test_abort_tolerates_a_missing_upload(adapter) -> None:
     must not turn a delete into an error."""
 
     def gone(*args, **kwargs):
-        raise S3Error(None, "NoSuchUpload", "gone", "res", "req", "host")
+        raise _provider_error("NoSuchUpload", "gone")
 
     adapter._minio_client._abort_multipart_upload = gone  # type: ignore[method-assign]
 
@@ -104,7 +115,7 @@ def test_abort_tolerates_a_missing_upload(adapter) -> None:
 
 def test_abort_wraps_unexpected_provider_errors(adapter) -> None:
     def boom(*args, **kwargs):
-        raise S3Error(None, "AccessDenied", "denied", "res", "req", "host")
+        raise _provider_error("AccessDenied", "denied")
 
     adapter._minio_client._abort_multipart_upload = boom  # type: ignore[method-assign]
 

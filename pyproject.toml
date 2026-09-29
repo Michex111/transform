@@ -40,6 +40,10 @@ pythonpath = [
 [dependency-groups]
 dev = [
     "aiosqlite>=0.21.0",
+    # Static type checker, gated in CI (`pyrefly check`). Configured by
+    # `pyrefly.toml`, which pins the workspace root as the import root and the
+    # `default` preset as the diagnostic posture.
+    "pyrefly>=1.3.2",
     "pytest>=9.1.1",
     "pytest-asyncio>=0.25.0",
     "pytest-cov>=6.0.0",

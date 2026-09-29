@@ -66,12 +66,22 @@ def _run(engine: sa.Engine, fn) -> None:
 
 def _columns(engine: sa.Engine) -> set[str]:
     with engine.connect() as connection:
-        return {col["name"] for col in sa.inspect(connection).get_columns("user_files")}
+        # Reflection types an attribute name as optional; a real row always has
+        # one, so drop the impossible ``None`` rather than widening the result.
+        return {
+            name
+            for col in sa.inspect(connection).get_columns("user_files")
+            if (name := col["name"]) is not None
+        }
 
 
 def _indexes(engine: sa.Engine) -> set[str]:
     with engine.connect() as connection:
-        return {idx["name"] for idx in sa.inspect(connection).get_indexes("user_files")}
+        return {
+            name
+            for idx in sa.inspect(connection).get_indexes("user_files")
+            if (name := idx["name"]) is not None
+        }
 
 
 def test_upgrade_adds_column_index_and_backfills(migration) -> None:

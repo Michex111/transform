@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
-import { Check, ArrowsClockwise } from "@phosphor-icons/react";
+import { Check, ArrowsClockwise, Sparkle, SpinnerGap } from "@phosphor-icons/react";
 import { useAuth } from "@/auth/AuthContext";
 import { useToast } from "@/auth/ToastContext";
 import { useJobs } from "@/jobs/JobsContext";
 import { Modal } from "@/components/Modal";
 import { Button, FormatChip } from "@/components/ui";
 import { FormatIcon } from "@/components/FormatPicker";
+import { RecommendChips } from "@/components/assistant/RecommendChips";
 import { formatExt, formatMeta } from "@/lib/format";
+import { useAssistantRecommend } from "@/lib/useAssistantRecommend";
 import { useConversionMap } from "@/lib/useConversionMap";
 import type { FileMetadataResponse } from "@/api/types";
 
@@ -24,6 +26,7 @@ export function FilesConvertModal({
   const { success, error } = useToast();
   const [target, setTarget] = useState("");
   const [busy, setBusy] = useState(false);
+  const { state: suggest, recommend, reset: resetSuggest } = useAssistantRecommend();
 
   // Source format inferred from the file name (fall back to mime type).
   const source = useMemo(() => (file ? formatExt(file.file_name, file.mime_type) : ""), [file]);
@@ -38,13 +41,21 @@ export function FilesConvertModal({
 
   // Reset the chosen target each time the modal opens.
   useEffect(() => {
-    if (open) setTarget("");
-  }, [open]);
+    if (open) {
+      setTarget("");
+      resetSuggest();
+    }
+  }, [open, resetSuggest]);
 
   // Default the target to the first valid format for the source.
   useEffect(() => {
     if (!target && allowedTargets.length) setTarget(allowedTargets[0]);
   }, [target, allowedTargets]);
+
+  async function suggestTargets() {
+    if (!file || suggest.status === "loading") return;
+    await recommend({ file_id: file.id });
+  }
 
   async function submit() {
     if (!file || !target || busy) return;
@@ -83,9 +94,38 @@ export function FilesConvertModal({
 
         {allowedTargets.length > 0 ? (
           <>
-            <div className="flex items-center gap-2">
+            <div className="flex items-center justify-between gap-2">
               <span className="text-sm text-muted">Convert to</span>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={suggestTargets}
+                disabled={suggest.status === "loading" || !file}
+              >
+                {suggest.status === "loading" ? (
+                  <SpinnerGap size={15} className="animate-spin" />
+                ) : (
+                  <Sparkle size={15} weight="fill" />
+                )}
+                {suggest.status === "loading" ? "Suggesting…" : "Suggest with AI"}
+              </Button>
             </div>
+
+            {suggest.status === "failed" && (
+              <p className="text-xs text-muted">
+                AI suggestions aren&apos;t available right now — pick a format below.
+              </p>
+            )}
+
+            <RecommendChips
+              state={suggest}
+              availableTargets={allowedTargets}
+              selected={target}
+              sourceFormat={source}
+              onSelect={setTarget}
+            />
+
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
               {allowedTargets.map((t) => {
                 const selected = t === target;
