@@ -92,19 +92,37 @@ _ATTACHMENTS_BY_TIER: dict[SubscriptionTier, int] = {
     SubscriptionTier.ENTERPRISE: 5,
 }
 
+#: Document budget shared by every paid plan.
+#:
+#: One constant rather than four numbers because a higher plan must never read
+#: *less* than a lower one: with the value written out per tier, raising Pro
+#: alone would leave Pro Plus and Enterprise behind it (an inversion that reads
+#: as a bug to anyone comparing the plan cards).
+_PAID_DOCUMENT_BYTES: int = 25 * _MiB
+
 #: Largest document (bytes) a tier's assistant may read with its file tools.
 #:
 #: Distinct from the deployment's ``AI_MAX_DOCUMENT_BYTES`` on purpose: that is
 #: the operator's hard ceiling (what the process will ever buffer), while this
 #: is the per-plan entitlement. Enforcement takes the MINIMUM of the two, so
-#: lowering either one on a deployment or a plan takes effect immediately.
+#: lowering either one on a deployment or a plan takes effect immediately — and,
+#: read the other way, a deployment ceiling below the largest row here silently
+#: caps the plans that advertise more. Raise the two together.
+#:
+#: FREE is a taste: 2 MB covers a résumé, an invoice or a contract, which is
+#: what the assistant is actually asked to read before someone subscribes. Every
+#: paid plan gets the same 25 MB instead of a ladder, because the prompt is
+#: bounded by ``AI_SUMMARY_MAX_INPUT_CHARS`` however big the document is: a
+#: larger byte allowance buys the user "this large PDF reads at all", not more
+#: provider spend on that user's behalf. A ladder here would be extra cost — to
+#: the server's memory and the operator's bill — for no extra entitlement.
 _DOCUMENT_BYTES_BY_TIER: dict[SubscriptionTier, int] = {
     SubscriptionTier.GUEST: 0,
     SubscriptionTier.FREE: 2 * _MiB,
-    SubscriptionTier.PREMIUM: 5 * _MiB,
-    SubscriptionTier.PRO: 5 * _MiB,
-    SubscriptionTier.PRO_PLUS: 10 * _MiB,
-    SubscriptionTier.ENTERPRISE: 10 * _MiB,
+    SubscriptionTier.PREMIUM: _PAID_DOCUMENT_BYTES,
+    SubscriptionTier.PRO: _PAID_DOCUMENT_BYTES,
+    SubscriptionTier.PRO_PLUS: _PAID_DOCUMENT_BYTES,
+    SubscriptionTier.ENTERPRISE: _PAID_DOCUMENT_BYTES,
 }
 
 #: Mutating actions (conversions started) allowed within a SINGLE turn.
