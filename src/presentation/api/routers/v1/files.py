@@ -15,6 +15,7 @@ from fastapi.responses import StreamingResponse
 from src.application.exceptions.file_system_exceptions import FileSystemError
 from src.application.services.file_service import FileService
 from src.application.services.file_transfer_service import TransferService
+from src.application.services.mime_types import FALLBACK_MIME_TYPE, mime_type_for
 from src.infrastructure.adapters.repository.sql_conversion_job_repo import SQLConversionJobRepository
 from src.infrastructure.adapters.repository.sql_user_file_repo import SQLUserFileRepository
 from src.infrastructure.adapters.security.encryption import FileEncryptionService
@@ -24,6 +25,7 @@ from src.infrastructure.adapters.storage.minio_storage_adapter import (
 )
 from src.infrastructure.adapters.storage.sanitize import (
     UnsafeObjectKeyError,
+    extension_from_filename,
     sanitize_object_key,
 )
 from src.infrastructure.logging.audit import log_data_access
@@ -75,7 +77,12 @@ def _to_metadata(row) -> FileMetadataResponse:
         file_name=row.file_name,
         file_key=row.file_key,
         file_size_bytes=row.file_size_bytes,
-        mime_type=row.mime_type,
+        # Derived, not raw, so a row written before the derivation existed (or
+        # by a path that stored the provider's headerless-PUT default) is
+        # reported to the client with a type that describes the file. The
+        # SPA's own `previewMimeType` derives from the name as well, so the two
+        # agree rather than one silently correcting the other on every render.
+        mime_type=mime_type_for(extension_from_filename(row.file_name)) or row.mime_type,
         folder_id=row.folder_id,
         created_at=row.created_at,
         expires_at=row.expires_at,
@@ -101,6 +108,25 @@ def _map_fs_error(exc: FileSystemError) -> HTTPException:
     returns its message string as before.
     """
     return HTTPException(status_code=exc.status_code, detail=exc.http_detail())
+
+
+def _stream_media_type(file_name: str, stored_mime_type: str | None) -> str:
+    """The content type to label streamed bytes with.
+
+    The file's name wins over the stored value for the same reason it does when
+    a file is created (:meth:`FileService._resolve_mime_type`): rows written
+    before that derivation existed carry the object store's own default for an
+    untyped PUT — measured as ``application/x-www-form-urlencoded`` for every
+    single-PUT object — which would otherwise be what a browser is told a video
+    is. Everything already in the library is served by this endpoint when
+    encryption is on, so deriving here is also what repairs those rows without a
+    backfill migration.
+    """
+    return (
+        mime_type_for(extension_from_filename(file_name))
+        or stored_mime_type
+        or FALLBACK_MIME_TYPE
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -512,7 +538,7 @@ async def stream_file(
     )
     return StreamingResponse(
         iter_decrypted_object(storage, row.file_key, encryption_service, str(current_user.id)),
-        media_type=row.mime_type or "application/octet-stream",
+        media_type=_stream_media_type(row.file_name, row.mime_type),
         headers={
             # The name is user-supplied (upload or rename), so it is encoded
             # rather than interpolated: a quote or CR/LF in it must not be able

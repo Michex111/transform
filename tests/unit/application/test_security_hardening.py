@@ -100,6 +100,60 @@ def test_validate_upload_signature_accepts_every_image_source() -> None:
         assert validate_upload_signature(head, extension) is True, extension
 
 
+def test_validate_upload_signature_accepts_every_advertised_audio_format() -> None:
+    """Every audio extension the format catalog advertises must survive upload.
+
+    The same class of bug as the image case above: this check runs *before* the
+    worker, so a rejection silently deletes the object and makes an advertised
+    format impossible to upload. Three formats were in exactly that state —
+    ``.opus``, ``.alac`` and ``.m4b`` — because ``detect_type`` reports the
+    *container* (``ogg`` for Opus, ``mp4`` for ALAC and the M4B audiobook) and
+    the alias table did not list those extensions under the container's label.
+    Each head here is the real leading bytes of a file produced by ffmpeg.
+    """
+    heads = {
+        "mp3": b"ID3\x04\x00\x00\x00\x00\x00\x22TSSE",  # ID3v2 tag
+        "wav": b"RIFF\xa2g\x00\x00WAVEfmt ",
+        "flac": b"fLaC\x00\x00\x00\x22\x12\x00\x12\x00\x00",
+        "ogg": b"OggS\x00\x02\x00\x00\x00\x00\x00\x00\x00\x00",
+        # Ogg container, non-Vorbis payloads.
+        "oga": b"OggS\x00\x02\x00\x00\x00\x00\x00\x00\x00\x00",
+        "opus": b"OggS\x00\x02\x00\x00\x00\x00\x00\x00\x00\x00",
+        "spx": b"OggS\x00\x02\x00\x00\x00\x00\x00\x00\x00\x00",
+        # ISO BMFF / MP4 container.
+        "m4a": b"\x00\x00\x00\x1cftypM4A \x00\x00\x02\x00",
+        "m4b": b"\x00\x00\x00\x1cftypisom\x00\x00\x02\x00",
+        "alac": b"\x00\x00\x00\x1cftypisom\x00\x00\x02\x00",
+        # No recognised signature at all — lenient, must still pass.
+        "aac": b"\xff\xf1P@!?\xfc\xde\x02\x00Lavc",
+        "aiff": b"FORM\x00\x00g\x8aAIFFCO",
+        "wma": b"0&\xb2u\x8ef\xcf\x11\xa6\xd9\x00\xaa\x00b",
+        "mid": b"MThd\x00\x00\x00\x06\x00\x00",
+    }
+    for extension, head in heads.items():
+        assert validate_upload_signature(head, extension) is True, extension
+
+
+def test_ogg_and_mp4_containers_reject_a_genuine_mismatch() -> None:
+    """Widening those alias sets must not turn the check off.
+
+    Accepting ``.opus``/``.alac`` is only correct because those really are Ogg
+    and MP4 containers. A file whose bytes are a *different* container must
+    still be refused, otherwise the alias table has quietly become "always say
+    yes" and the whole extension-spoofing guard is gone.
+    """
+    ogg = b"OggS\x00\x02\x00\x00\x00\x00\x00\x00\x00\x00"
+    mp4 = b"\x00\x00\x00\x1cftypM4A \x00\x00\x02\x00"
+    pdf = b"%PDF-1.7\n"
+
+    assert validate_upload_signature(ogg, "opus") is True
+    assert validate_upload_signature(ogg, "mp3") is False
+    assert validate_upload_signature(mp4, "alac") is True
+    assert validate_upload_signature(mp4, "flac") is False
+    # The pre-existing spoofing case is untouched.
+    assert validate_upload_signature(pdf, "mp3") is False
+
+
 # ---------------------------------------------------------------------------
 # Archive decompression-bomb guard (F3)
 # ---------------------------------------------------------------------------

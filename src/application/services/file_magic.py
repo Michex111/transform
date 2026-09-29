@@ -114,12 +114,31 @@ def validate_upload_signature(head: bytes, extension: str) -> bool:
         return True
 
     # Group "alias" extensions that share a signature.
+    #
+    # Keys are what ``detect_type`` RETURNS, not what the file is called: a
+    # signature label the detector never produces is a dead entry that silently
+    # rejects every file whose extension it was supposed to cover. ``OggS`` is
+    # the case in point — it is one container shared by Vorbis (`.ogg`), Opus
+    # (`.opus`), FLAC-in-Ogg (`.oga`) and Theora video (`.ogv`), so all four
+    # extensions have to be listed under the detected label ``ogg``.
     aliases = {
         "jpeg": {"jpg", "jpeg"},
         "jpg": {"jpg", "jpeg"},
-        "mp4": {"mp4", "mov", "m4v"},
-        "mov": {"mp4", "mov", "m4v"},
-        "ogv": {"ogg", "ogv"},
+        # ISO BMFF (``....ftyp``) is one container wearing many extensions.
+        # ``detect_type`` answers ``mp4`` for all of them — the brand at offset 8
+        # distinguishes avif/heic (handled separately) but not these — so every
+        # extension that really is an MP4 container has to be listed under the
+        # ``mp4`` label. Omitting ``alac``/``m4b``/``m4r`` rejected a genuine
+        # Apple Lossless or audiobook file as a type mismatch, exactly as
+        # omitting ``opus`` rejected a genuine Opus file.
+        "mp4": {"mp4", "mov", "m4v", "m4a", "m4b", "m4r", "alac"},
+        "mov": {"mp4", "mov", "m4v", "m4a", "m4b", "m4r", "alac"},
+        # `.oga`/`.opus`/`.ogv`/`.spx` are the *same* Ogg container. Without
+        # them here, an `.opus` — an advertised format the Audio preview and the
+        # conversion catalog both list — could never be uploaded at all: the
+        # verify step saw `OggS`, answered "ogg", and rejected the file as a
+        # type mismatch before deleting the object.
+        "ogg": {"ogg", "oga", "ogv", "opus", "spx"},
         "webm": {"webm"},
         "wav": {"wav"},
         "webp": {"webp"},

@@ -6,10 +6,12 @@ import { Modal } from "@/components/Modal";
 import { Button, Skeleton } from "@/components/ui";
 import {
   isTextPreviewOversize,
-  previewBlobType,
   previewKind,
+  previewMimeType,
   previewUnavailableMessage,
+  type PreviewKind,
 } from "@/lib/filePreview";
+import { cachePreview, getCachedPreview, previewCacheKey } from "@/lib/previewCache";
 
 /** What the modal has to show once the bytes have arrived. */
 type Loaded =
@@ -41,12 +43,48 @@ type PreviewState =
 const PREVIEW_EXIT_MS = 500;
 
 /**
- * In-page preview of a library file, opened from the file card's ⋮ menu.
+ * Re-label the fetched bytes with the content type the file's *name* implies.
+ *
+ * A `<blob:>` URL takes its type from the Blob, so whatever the API called the
+ * file is what the `<img>`/`<audio>`/`<video>`/`<iframe>` is handed. That value
+ * comes from object storage and is routinely meaningless — measured on the live
+ * stack as `application/x-www-form-urlencoded` for every file uploaded below
+ * the 100 MiB multipart threshold. `previewMimeType` derives the honest type
+ * from the file name and returns `""` when it cannot, which leaves the element
+ * sniffing the bytes rather than being told a lie.
+ *
+ * `new Blob` over an existing Blob does not copy the bytes (the new Blob is a
+ * reference to the same data), so this costs nothing for a large file.
+ */
+function retypeForPreview(
+  blob: Blob,
+  file: { file_name: string; mime_type?: string | null },
+  kind: PreviewKind,
+): Blob {
+  const type = previewMimeType(file.file_name, kind, file.mime_type);
+  return blob.type === type ? blob : new Blob([blob], { type });
+}
+
+/**
+ * Where a preview's bytes and its Download action come from.
+ *
+ * Two sources because a conversion output is not a library file: their ids live
+ * in different spaces, so a job id sent to the library endpoints answers `404
+ * File not found` (and both are UUIDs, so that failure reads as "deleted file"
+ * rather than "wrong endpoint").
+ */
+export type PreviewTarget =
+  | { kind: "library"; id: string; file_name: string; mime_type?: string | null }
+  | { kind: "job"; id: string; file_name: string; mime_type?: string | null };
+
+/**
+ * In-page preview of a library file (opened from the file card's ⋮ menu) or of a
+ * completed conversion's output (opened from the Convert page's row).
  *
  * WHY the object URL is created inside an effect: `URL.createObjectURL` pins the
  * Blob in memory until it is revoked, so the effect that creates it also owns
  * revoking it (and does so before a replacement is created, and whenever the
- * modal closes or the file changes). A URL created during render or left in
+ * modal closes or the target changes). A URL created during render or left in
  * state would leak for the lifetime of the tab. The release is deferred past the
  * exit animation for the reason given at the cleanup.
  *
@@ -58,11 +96,11 @@ const PREVIEW_EXIT_MS = 500;
 export function FilePreviewModal({
   open,
   onClose,
-  file,
+  target,
 }: {
   open: boolean;
   onClose: () => void;
-  file: { id: string; file_name: string; mime_type?: string | null } | null;
+  target: PreviewTarget | null;
 }) {
   const { api: client } = useAuth();
   const { error: toastError } = useToast();
@@ -71,8 +109,21 @@ export function FilePreviewModal({
   const [attempt, setAttempt] = useState(0);
   const [downloading, setDownloading] = useState(false);
 
+  // The effect keys off these primitives, never off `target`.
+  //
+  // WHY: callers pass an inline object literal (`target={{ kind: "job", … }}`),
+  // so a `target` dependency changes identity on every render and re-runs the
+  // effect — refetching the bytes and minting a new object URL each time, which
+  // both leaks the previous URL and flickers the preview. Each field below is a
+  // string or `null`, so React compares it by value and the effect re-runs only
+  // when something the preview actually depends on changed.
+  const targetKind = target?.kind ?? null;
+  const targetId = target?.id ?? null;
+  const targetFileName = target?.file_name ?? null;
+  const targetMimeType = target?.mime_type ?? null;
+
   useEffect(() => {
-    if (!open || !file) return;
+    if (!open || targetKind === null || targetId === null) return;
 
     // Every async continuation checks this before touching state: closing the
     // modal mid-fetch must not write a result into an unmounted dialog (and
@@ -83,10 +134,39 @@ export function FilePreviewModal({
 
     void (async () => {
       try {
-        const blob = await client.fetchLibraryFileBlob(file.id);
+        // The name the bytes are actually stored under. For a conversion it comes
+        // back with the bytes, not from the prop: a converter may emit a
+        // container (a multi-page `pdf -> jpg` produces a `.zip`), and the row's
+        // own name can be stale before its terminal event arrives — classifying
+        // that `.zip` as the image the row claims would put a broken preview on
+        // screen.
+        //
+        // The cache is consulted first: measured on the running app, opening the
+        // same file three times downloaded it three times. Bytes under one id
+        // are immutable (a re-upload creates a new row and object key), so a hit
+        // is safe, and the stored `fileName` — not this render's prop — is what
+        // the bytes are classified by on a hit.
+        const cacheKey = previewCacheKey(targetKind, targetId, targetFileName ?? "");
+        const cached = getCachedPreview(cacheKey);
+
+        let blob: Blob;
+        let fileName: string;
+        if (cached) {
+          blob = cached.blob;
+          fileName = cached.fileName;
+        } else if (targetKind === "library") {
+          blob = await client.fetchLibraryFileBlob(targetId);
+          fileName = targetFileName ?? "";
+          cachePreview(cacheKey, { blob, fileName });
+        } else {
+          const output = await client.fetchConversionOutput(targetId);
+          blob = output.blob;
+          fileName = output.filename;
+          cachePreview(cacheKey, { blob, fileName });
+        }
         if (cancelled) return;
 
-        const kind = previewKind(file.file_name, file.mime_type);
+        const kind = previewKind(fileName, targetMimeType);
 
         if (kind === "text" && !isTextPreviewOversize(blob.size)) {
           // Decoded as text rather than pointed at by an object URL: nothing
@@ -106,15 +186,9 @@ export function FilePreviewModal({
           return;
         }
 
-        // Stamp the classified type onto the blob the frame loads. A blob keeps
-        // its own (or absent) type, and an iframe will render HTML bytes as a
-        // same-origin document if they are sniffed — forcing `application/pdf`
-        // for a `.pdf`-classified preview keeps the browser in its PDF viewer.
-        // `slice` re-types the blob without copying the bytes; every other kind
-        // returns `null` and keeps the bytes untouched.
-        const blobType = previewBlobType(kind);
-        const previewBlob = blobType ? blob.slice(0, blob.size, blobType) : blob;
-        objectUrl = URL.createObjectURL(previewBlob);
+        objectUrl = URL.createObjectURL(
+          retypeForPreview(blob, { file_name: fileName, mime_type: targetMimeType }, kind),
+        );
         setState({ status: "ready", loaded: { kind: "rendered", preview: kind, url: objectUrl } });
       } catch (err) {
         if (cancelled) return;
@@ -141,13 +215,21 @@ export function FilePreviewModal({
         window.setTimeout(() => URL.revokeObjectURL(url), PREVIEW_EXIT_MS);
       }
     };
-  }, [open, attempt, client, file]);
+  }, [open, attempt, client, targetKind, targetId, targetFileName, targetMimeType]);
 
   async function download() {
-    if (!file || downloading) return;
+    if (!target || downloading) return;
     setDownloading(true);
     try {
-      await client.downloadLibraryFile(file.id, file.file_name);
+      if (target.kind === "library") {
+        await client.downloadLibraryFile(target.id, target.file_name);
+      } else {
+        // Filename omitted deliberately: `downloadConvertedFile` re-reads the job
+        // and derives the name from the object the worker actually produced, so a
+        // multi-page `pdf -> jpg` still saves the `.zip` it really is even when
+        // this row's name is stale.
+        await client.downloadConvertedFile(target.id);
+      }
     } catch (err) {
       // Surfaced rather than swallowed: a preview the browser cannot inline is
       // only a dead end if the download also fails silently.
@@ -159,12 +241,45 @@ export function FilePreviewModal({
 
   const loaded = state.status === "ready" ? state.loaded : null;
 
+  /**
+   * The browser refused to render the bytes we handed it.
+   *
+   * Classification is optimistic on purpose — it can only see the file's name,
+   * so it promises a player for anything that *is* audio. Whether this browser
+   * can decode that particular container/codec is a separate question it cannot
+   * answer: Chromium ships no AAC, so an `.m4a` or `.aac` voice memo is
+   * classified `audio` and then silently fails to load. Without this the user
+   * was left with a dead control and no explanation; the failure is invisible
+   * because a media element that cannot start simply does nothing.
+   *
+   * Reuses the `unavailable` state rather than adding a second failure copy, so
+   * an undecodable file lands on the same "Download it to open it" panel a file
+   * we never claimed to preview would.
+   *
+   * Guarded on the current state being a rendered preview: an error from a
+   * stale element (the file changed under us) must not clobber a good one, and
+   * must not fire twice.
+   */
+  function handleRenderError() {
+    setState((prev) =>
+      prev.status === "ready" && prev.loaded.kind === "rendered"
+        ? {
+            status: "ready",
+            loaded: {
+              kind: "unavailable",
+              reason: previewUnavailableMessage(prev.loaded.preview),
+            },
+          }
+        : prev,
+    );
+  }
+
   return (
     <Modal
       open={open}
       onClose={onClose}
       title="Preview"
-      description={file?.file_name}
+      description={target?.file_name}
       maxWidth="max-w-3xl"
     >
       <div className="space-y-1">
@@ -198,8 +313,12 @@ export function FilePreviewModal({
         {loaded?.kind === "rendered" && loaded.preview === "image" && (
           <img
             src={loaded.url}
-            alt={file?.file_name ?? "File preview"}
+            alt={target?.file_name ?? "File preview"}
             className="max-h-[60vh] w-full object-contain"
+            // A format this browser cannot paint (HEIC and TIFF are advertised
+            // as images here but are not decodable everywhere) otherwise leaves
+            // a broken-image glyph in place of any explanation.
+            onError={handleRenderError}
           />
         )}
 
@@ -208,7 +327,7 @@ export function FilePreviewModal({
           // frame, which is why the Download button below is not optional.
           <iframe
             src={loaded.url}
-            title={file?.file_name ?? "PDF preview"}
+            title={target?.file_name ?? "PDF preview"}
             className="h-[70vh] w-full rounded-lg border border-outline bg-surface-variant"
           />
         )}
@@ -217,17 +336,24 @@ export function FilePreviewModal({
           <video
             src={loaded.url}
             controls
-            title={file?.file_name ?? "Video preview"}
+            title={target?.file_name ?? "Video preview"}
             className="max-h-[60vh] w-full"
+            onError={handleRenderError}
           />
         )}
 
         {loaded?.kind === "rendered" && loaded.preview === "audio" && (
           <div className="space-y-2">
-            <audio src={loaded.url} controls className="w-full" />
+            <audio
+              src={loaded.url}
+              controls
+              title={target?.file_name ?? "Audio preview"}
+              className="w-full"
+              onError={handleRenderError}
+            />
             {/* The one place the name is repeated: the audio controls show no
                 file name of their own, and the dialog header truncates it. */}
-            <p className="truncate text-sm text-muted">{file?.file_name}</p>
+            <p className="truncate text-sm text-muted">{target?.file_name}</p>
           </div>
         )}
 
@@ -240,7 +366,11 @@ export function FilePreviewModal({
         {/* Always present: some types cannot be rendered inline by every
             browser (PDF on mobile), so the download is the guaranteed exit. */}
         <div className="mt-4 flex flex-wrap items-center justify-end gap-2">
-          <Button variant="secondary" onClick={() => void download()} disabled={!file || downloading}>
+          <Button
+            variant="secondary"
+            onClick={() => void download()}
+            disabled={!target || downloading}
+          >
             <Download size={16} /> Download
           </Button>
           <Button variant="ghost" onClick={onClose}>

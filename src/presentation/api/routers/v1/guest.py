@@ -382,6 +382,8 @@ async def stream_job_events(
                     payload["input_size_bytes"] = fields["input_size_bytes"]
                 if "output_size_bytes" in fields:
                     payload["output_size_bytes"] = fields["output_size_bytes"]
+                if fields.get("output_file"):
+                    payload["output_file"] = fields["output_file"]
                 if "credits_remaining" in fields:
                     payload["credits_remaining"] = fields["credits_remaining"]
 

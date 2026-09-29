@@ -124,23 +124,47 @@ export function formatDuration(ms: number | null | undefined): string | null {
   return remainder ? `${minutes} m ${remainder} s` : `${minutes} m`;
 }
 
+/**
+ * Shared date formatters.
+ *
+ * WHY hoisted: `toLocaleDateString(undefined, options)` builds a fresh
+ * `Intl.DateTimeFormat` on every call, and these run once per row in the
+ * Dashboard, Queue and History tables — so a 100-row History page constructed
+ * 100 formatters per render. `Intl.DateTimeFormat` is expensive to construct and
+ * cheap to reuse, and the locale never changes within a session.
+ *
+ * `undefined` resolves the locale from the environment, which is what the
+ * previous call sites passed, so the rendered output is unchanged.
+ */
+const FORMATTERS = {
+  date: new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  }),
+  dateTime: new Intl.DateTimeFormat(undefined, {
+    // Deliberately no `year`, matching the options this replaced: the rows that
+    // use it are recent-by-construction, and the shorter stamp is the one the
+    // tables were laid out for.
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }),
+} as const
+
 export function formatDate(iso: string | null | undefined): string {
   if (!iso) return "—";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" });
+  return FORMATTERS.date.format(d);
 }
 
 export function formatDateTime(iso: string | null | undefined): string {
   if (!iso) return "—";
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  return FORMATTERS.dateTime.format(d);
 }
 
 /**

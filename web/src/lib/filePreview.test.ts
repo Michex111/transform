@@ -10,9 +10,10 @@ import { describe, expect, it } from "vitest";
 import {
   PREVIEW_TEXT_MAX_BYTES,
   extensionOf,
+  isPreviewable,
   isTextPreviewOversize,
-  previewBlobType,
   previewKind,
+  previewMimeType,
   previewUnavailableMessage,
   type PreviewKind,
 } from "@/lib/filePreview";
@@ -66,13 +67,29 @@ describe("previewKind by extension", () => {
     ["clip.avi", "video"],
     ["clip.m4v", "video"],
     ["clip.ogv", "video"],
+    // The video formats the picker advertises; classified so the browser can
+    // accept or reject them, rather than refused up front.
+    ["clip.flv", "video"],
+    ["clip.wmv", "video"],
+    ["clip.mpg", "video"],
+    ["clip.mpeg", "video"],
+    ["clip.3gp", "video"],
     ["song.mp3", "audio"],
     ["song.wav", "audio"],
     ["song.ogg", "audio"],
+    ["song.oga", "audio"],
     ["song.flac", "audio"],
     ["song.m4a", "audio"],
     ["song.aac", "audio"],
     ["song.opus", "audio"],
+    // Was the inconsistency: advertised as Audio but not classified as such,
+    // so an `.aiff` was refused while an `.mp3` beside it played.
+    ["song.aiff", "audio"],
+    ["song.alac", "audio"],
+    ["song.m4b", "audio"],
+    ["song.mid", "audio"],
+    ["song.midi", "audio"],
+    ["song.wma", "audio"],
     ["notes.txt", "text"],
     ["rows.csv", "text"],
     ["rows.tsv", "text"],
@@ -175,6 +192,28 @@ describe("previewKind precedence", () => {
   });
 });
 
+describe("isPreviewable", () => {
+  it("refuses a .zip, the container a multi-page pdf -> jpg conversion emits", () => {
+    // `pdf -> jpg` on a multi-page document produces a .zip of page images, not
+    // an image. The Convert page has to gate on the *output's* name so those
+    // rows get no preview button: previewing one would hand the browser bytes
+    // that are not an image.
+    expect(isPreviewable("report.zip")).toBe(false);
+    expect(isPreviewable("report.zip", "application/zip")).toBe(false);
+  });
+
+  it("accepts the formats a browser renders inline", () => {
+    expect(isPreviewable("photo.jpg")).toBe(true);
+    expect(isPreviewable("doc.pdf")).toBe(true);
+    expect(isPreviewable("song.mp3")).toBe(true);
+  });
+
+  it("refuses a dotfile, which has no format to preview", () => {
+    expect(isPreviewable(".gitignore")).toBe(false);
+    expect(isPreviewable(".gitignore", "text/plain")).toBe(false);
+  });
+});
+
 describe("isTextPreviewOversize", () => {
   it("accepts a file exactly at the cap", () => {
     expect(isTextPreviewOversize(PREVIEW_TEXT_MAX_BYTES)).toBe(false);
@@ -210,19 +249,97 @@ describe("previewUnavailableMessage", () => {
     }
     expect(new Set(messages).size).toBe(kinds.length);
   });
+
+  it("names the medium for a file the browser refused to decode", () => {
+    // Reached when the element itself errors, so the copy has to say what
+    // could not be played rather than falling back to "unknown file type".
+    expect(previewUnavailableMessage("audio")).toContain("audio");
+    expect(previewUnavailableMessage("video")).toContain("video");
+    expect(previewUnavailableMessage("image")).toContain("image");
+    expect(previewUnavailableMessage("pdf")).toContain("PDF");
+  });
 });
 
-// Regression: a file named `.pdf` whose bytes are HTML was handed to an
-// `<iframe>` as a blob URL with no declared type, which the browser could sniff
-// and run as a same-origin document. The preview stamps the classified type so
-// only the PDF viewer can render it.
-describe("previewBlobType", () => {
-  it("forces application/pdf for the pdf kind", () => {
-    expect(previewBlobType("pdf")).toBe("application/pdf");
+describe("previewMimeType", () => {
+  // A blob URL's type comes from the Blob, so this is what every preview
+  // element is handed. The API's `mime_type` is the object store's leftover:
+  // measured on the live stack as `application/x-www-form-urlencoded` for
+  // every file uploaded under the 100 MB multipart threshold.
+  const STORAGE_DEFAULTS = ["application/x-www-form-urlencoded", "application/octet-stream"];
+
+  it.each<[string, PreviewKind, string]>([
+    ["song.mp3", "audio", "audio/mpeg"],
+    ["song.wav", "audio", "audio/wav"],
+    ["song.flac", "audio", "audio/flac"],
+    ["song.m4a", "audio", "audio/mp4"],
+    ["song.ogg", "audio", "audio/ogg"],
+    ["song.opus", "audio", "audio/ogg"],
+    ["song.aiff", "audio", "audio/aiff"],
+    // ALAC and M4B are MP4 containers, like M4A.
+    ["song.alac", "audio", "audio/mp4"],
+    ["song.m4b", "audio", "audio/mp4"],
+    ["song.wma", "audio", "audio/x-ms-wma"],
+    ["song.mid", "audio", "audio/midi"],
+    ["clip.mp4", "video", "video/mp4"],
+    ["clip.webm", "video", "video/webm"],
+    ["clip.mov", "video", "video/quicktime"],
+    ["clip.wmv", "video", "video/x-ms-wmv"],
+    ["clip.flv", "video", "video/x-flv"],
+    ["clip.mpg", "video", "video/mpeg"],
+    ["doc.pdf", "pdf", "application/pdf"],
+    ["photo.png", "image", "image/png"],
+    ["photo.jpg", "image", "image/jpeg"],
+    ["vector.svg", "image", "image/svg+xml"],
+    ["notes.txt", "text", "text/plain"],
+    ["data.json", "text", "application/json"],
+  ])("derives the type for %s from its name", (fileName, kind, expected) => {
+    expect(previewMimeType(fileName, kind)).toBe(expected);
   });
 
-  it("leaves every other kind untouched (null = keep the fetched type)", () => {
-    const others: PreviewKind[] = ["image", "video", "audio", "text", "none"];
-    for (const kind of others) expect(previewBlobType(kind)).toBeNull();
+  it("ignores the meaningless type storage reports", () => {
+    for (const stored of STORAGE_DEFAULTS) {
+      expect(previewMimeType("song.mp3", "audio", stored)).toBe("audio/mpeg");
+      expect(previewMimeType("clip.mp4", "video", stored)).toBe("video/mp4");
+      expect(previewMimeType("doc.pdf", "pdf", stored)).toBe("application/pdf");
+      expect(previewMimeType("photo.png", "image", stored)).toBe("image/png");
+    }
+  });
+
+  it("is case-insensitive", () => {
+    expect(previewMimeType("Song.MP3", "audio")).toBe("audio/mpeg");
+    expect(previewMimeType("PHOTO.PNG", "image")).toBe("image/png");
+  });
+
+  it("returns an empty type when the name says nothing we know", () => {
+    // Empty means "work it out from the bytes". Handing over
+    // `application/octet-stream` would instead *state* "unknown binary", which
+    // a browser may act on.
+    expect(previewMimeType("README", "none")).toBe("");
+    expect(previewMimeType("data.xyz", "none")).toBe("");
+    expect(previewMimeType("blob.unknownext", "audio")).toBe("");
+    expect(previewMimeType("blob.unknownext", "audio", "application/octet-stream")).toBe("");
+  });
+
+  it("never returns a type belonging to a different kind", () => {
+    // The server value is only adopted when it agrees with what we are about
+    // to render, so a stray image type cannot be attached to an <audio>.
+    expect(previewMimeType("blob.unknownext", "audio", "image/png")).toBe("");
+    expect(previewMimeType("blob.unknownext", "video", "application/pdf")).toBe("");
+    // ...and when it does agree, it is kept.
+    expect(previewMimeType("blob.unknownext", "audio", "audio/ogg")).toBe("audio/ogg");
+  });
+
+  it("prefers the name over a disagreeing server value", () => {
+    expect(previewMimeType("song.mp3", "audio", "application/pdf")).toBe("audio/mpeg");
+  });
+
+  it("strips a charset parameter from an adopted server value", () => {
+    expect(previewMimeType("blob.unknownext", "text", "text/plain; charset=utf-8")).toBe(
+      "text/plain",
+    );
+  });
+
+  it("returns nothing for a dotfile, which never previews", () => {
+    expect(previewMimeType(".gitignore", "none")).toBe("");
   });
 });

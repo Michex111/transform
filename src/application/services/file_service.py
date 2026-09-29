@@ -23,6 +23,11 @@ from src.application.exceptions.file_system_exceptions import (
     StorageQuotaExceededError,
 )
 from src.application.services.file_magic import validate_upload_signature
+from src.application.services.mime_types import (
+    FALLBACK_MIME_TYPE,
+    GENERIC_MIME_TYPES,
+    mime_type_for,
+)
 from src.application.services.upload_limits import default_size_limits
 from src.domain.subscriptions.policies.storage_quota import evaluate_storage_quota
 from src.domain.subscriptions.policies.tier_policy import TierPolicy
@@ -538,6 +543,51 @@ class FileService:
             file_name=file_name,
             file_extension=file_extension,
             file_size_bytes=size,
-            mime_type=stats.get("content_type") or "application/octet-stream",
+            # Derived from the name, checked against what storage reported (see
+            # `_resolve_mime_type`), never the raw stored value: the single-PUT
+            # upload path deliberately signs its presigned URL without a
+            # Content-Type, so what storage holds is the provider's own default
+            # for a headerless PUT.
+            mime_type=self._resolve_mime_type(
+                file_name, file_extension, stats.get("content_type")
+            ),
             folder_id=session.folder_id,
         )
+
+    @staticmethod
+    def _resolve_mime_type(
+        file_name: str, file_extension: str, reported_type: str | None,
+    ) -> str:
+        """The content type to persist for a just-verified upload.
+
+        The file's **name decides**, and the object store's value is only a
+        tie-breaker, because `reported_type` is not a property of the file at
+        all: it is whatever the upload left on the object. Measured against the
+        live bucket, every single-PUT object came back as
+        ``application/x-www-form-urlencoded`` (the presigned URL is signed
+        without a ``Content-Type`` so the provider applies its own default) and
+        every multipart object as ``application/octet-stream`` — i.e. the same
+        song was described differently depending on whether it crossed the
+        100 MiB multipart threshold, and neither value described a song.
+
+        Order of preference:
+
+        1. the extension (the one signal that survives every upload path);
+        2. the reported type, if it is specific enough to mean something;
+        3. ``application/octet-stream``.
+
+        A caller-supplied ``reported_type`` is only trusted when it is not in
+        :data:`GENERIC_MIME_TYPES`. That keeps a genuine type from some future
+        upload path that does sign a content type, while refusing to record
+        "form submission" as the type of an audio file.
+        """
+        by_extension = mime_type_for(file_extension) or mime_type_for(
+            extension_from_filename(file_name)
+        )
+        if by_extension:
+            return by_extension
+
+        reported = (reported_type or "").split(";")[0].strip().lower()
+        if reported and reported not in GENERIC_MIME_TYPES:
+            return reported
+        return FALLBACK_MIME_TYPE

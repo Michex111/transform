@@ -951,7 +951,16 @@ export function FilesPage() {
       <FilePreviewModal
         open={previewFile !== null}
         onClose={() => setPreviewFile(null)}
-        file={previewFile}
+        target={
+          previewFile
+            ? {
+                kind: "library",
+                id: previewFile.id,
+                file_name: previewFile.file_name,
+                mime_type: previewFile.mime_type,
+              }
+            : null
+        }
       />
 
       {/* AI summary of a library file */}

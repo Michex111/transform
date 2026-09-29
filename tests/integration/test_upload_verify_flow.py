@@ -232,6 +232,7 @@ def verify_client(
     folder_id: str | None = None,
     transfer: FakeTransferService | None = None,
     conversion: FakeConversionService | None = None,
+    storage: FakeStorage | None = None,
 ) -> Generator[tuple[TestClient, SqliteBackend], None, None]:
     backend = SqliteBackend(db_path, folder_id=folder_id)
 
@@ -250,7 +251,7 @@ def verify_client(
             yield FileService(
                 file_repository=SQLUserFileRepository(session=session),
                 folder_repository=SQLUserFolderRepository(session=session),
-                storage=FakeStorage(),
+                storage=storage or FakeStorage(),
                 subscription_repository=FakeSubscriptionRepo(tier=SubscriptionTier.FREE),
             )
 
@@ -315,6 +316,96 @@ class OversizeStorage(FakeStorage):
 
     def __init__(self) -> None:
         super().__init__(size=6 * 1024**3)
+
+
+# ---------------------------------------------------------------------------
+# The MIME type recorded for an upload
+# ---------------------------------------------------------------------------
+
+def test_verify_ignores_the_generic_type_storage_reports(tmp_path) -> None:
+    """A file's recorded type comes from its name, not from the object store.
+
+    The single-PUT path signs its presigned URL without a ``Content-Type``
+    (sending one breaks the signature), so the provider substitutes its own
+    default and ``stat_object`` reports that. Measured against the live bucket,
+    every single-PUT object came back as ``application/x-www-form-urlencoded``
+    — which was being stored as the file's type and then served on the streamed
+    download, telling a browser that a song was a form submission.
+    """
+    session = UploadSession(
+        upload_id="sess-mime",
+        object_key="uploads/abc123.mp3",
+        status="pending",
+        file_name="song.mp3",
+        file_extension="mp3",
+        folder_id=None,
+    )
+    transfer = FakeTransferService(session=session)
+    storage = FakeStorage(content_type="application/x-www-form-urlencoded")
+    with verify_client(
+        str(tmp_path / "mime.db"), transfer=transfer, storage=storage
+    ) as (client, _backend):
+        assert client.post("/api/uploads/sessions/sess-mime/verify").status_code == 200
+
+        listing = client.get("/api/v1/files").json()
+        assert listing["files"][0]["mime_type"] == "audio/mpeg"
+
+
+def test_verify_records_the_same_type_for_single_and_multipart_uploads(tmp_path) -> None:
+    """The upload path must not change the type.
+
+    A single PUT leaves ``application/x-www-form-urlencoded`` and a multipart
+    upload leaves ``application/octet-stream``. Both are meaningless, so the
+    type derived from the name has to be identical either way — otherwise the
+    same song would be described differently depending on whether it happened to
+    cross the 100 MiB multipart threshold.
+    """
+    def type_for(content_type: str, db_name: str) -> str:
+        session = UploadSession(
+            upload_id=f"sess-{db_name}",
+            object_key=f"uploads/{db_name}.mp4",
+            status="pending",
+            file_name="clip.mp4",
+            file_extension="mp4",
+            folder_id=None,
+        )
+        with verify_client(
+            str(tmp_path / db_name),
+            transfer=FakeTransferService(session=session),
+            storage=FakeStorage(content_type=content_type),
+        ) as (client, _backend):
+            assert client.post(f"/api/uploads/sessions/sess-{db_name}/verify").status_code == 200
+            return client.get("/api/v1/files").json()["files"][0]["mime_type"]
+
+    single = type_for("application/x-www-form-urlencoded", "single.db")
+    multi = type_for("application/octet-stream", "multi.db")
+    assert single == multi == "video/mp4"
+
+
+def test_verify_falls_back_when_neither_the_name_nor_storage_says_anything(
+    tmp_path,
+) -> None:
+    """An unknown extension plus a generic reported type yields the explicit
+    fallback, never the provider's default echoed back as though it meant
+    something."""
+    session = UploadSession(
+        upload_id="sess-blob",
+        object_key="uploads/abc123.qqq",
+        status="pending",
+        file_name="mystery.qqq",
+        file_extension="qqq",
+        folder_id=None,
+    )
+    storage = FakeStorage(content_type="application/x-www-form-urlencoded")
+    with verify_client(
+        str(tmp_path / "unknown.db"),
+        transfer=FakeTransferService(session=session),
+        storage=storage,
+    ) as (client, _backend):
+        assert client.post("/api/uploads/sessions/sess-blob/verify").status_code == 200
+
+        listing = client.get("/api/v1/files").json()
+        assert listing["files"][0]["mime_type"] == "application/octet-stream"
 
 
 def test_verify_rejects_oversized_upload(tmp_path) -> None:

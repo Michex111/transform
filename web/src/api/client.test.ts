@@ -164,6 +164,29 @@ function jsonResponse(status: number, body: unknown, statusText = ""): Response 
   } as unknown as Response;
 }
 
+/** A `Response` for the binary routes, which read `blob()` rather than `json()`. */
+function blobResponse(blob: Blob, status = 200): Response {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    statusText: "",
+    blob: async () => blob,
+  } as unknown as Response;
+}
+
+/**
+ * Route `fetch` by URL: the job lookup answers the given job JSON, everything
+ * else (the pre-signed object it points at) answers `bytes`.
+ */
+function stubJobAndDownload(job: Record<string, unknown>, bytes: Blob) {
+  const fetchMock = vi.fn(async (url: string) =>
+    String(url).includes("/conversions/jobs/") ? jsonResponse(200, job) : blobResponse(bytes),
+  );
+  vi.stubGlobal("fetch", fetchMock);
+  stubLocalStorage();
+  return fetchMock;
+}
+
 /** `api.request` reads the token from localStorage on every call. */
 function stubLocalStorage() {
   vi.stubGlobal("localStorage", {
@@ -456,6 +479,67 @@ describe("password reset client", () => {
     expect(err).toBeInstanceOf(ApiError);
     expect((err as Error).message).toBe(detail);
     expect((err as { status: number }).status).toBe(400);
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * Conversion output
+ * ------------------------------------------------------------------ */
+
+/** The `.zip` bytes a multi-page `pdf -> jpg` job really produces. */
+const ZIP_BYTES = new Blob([new Uint8Array([0x50, 0x4b, 0x03, 0x04])], {
+  type: "application/zip",
+});
+
+function completedJob(overrides: Record<string, unknown> = {}) {
+  return {
+    job_id: "job-1",
+    status: "COMPLETED",
+    source_format: "pdf",
+    target_format: "jpg",
+    input_file: "uploads/report.pdf",
+    output_file: "output/user/1/job/job-1/report.zip",
+    download_url: "https://s3.example.com/bucket/report.zip?X-Amz-Signature=abc",
+    ...overrides,
+  };
+}
+
+describe("fetchConversionOutput", () => {
+  it("names the output after the produced .zip, not the target format", async () => {
+    // The regression: a multi-page pdf -> jpg job's bytes are a zip, so naming
+    // them "report.jpg" makes the upload's magic-byte validator reject them.
+    stubJobAndDownload(completedJob(), ZIP_BYTES);
+
+    const { api } = await loadClient();
+    const { blob, filename } = await api.fetchConversionOutput("job-1");
+
+    expect(filename).toBe("report.zip");
+    expect(filename.endsWith(".jpg")).toBe(false);
+    expect(blob).toBe(ZIP_BYTES);
+  });
+
+  it("falls back to the target format when the job has no output key yet", async () => {
+    stubJobAndDownload(
+      completedJob({
+        output_file: null,
+        download_url: "https://s3.example.com/bucket/report.jpg?X-Amz-Signature=abc",
+      }),
+      ZIP_BYTES,
+    );
+
+    const { api } = await loadClient();
+    const { filename } = await api.fetchConversionOutput("job-1");
+
+    expect(filename).toBe("report.jpg");
+  });
+
+  it("keeps fetchConversionOutputBlob resolving to the same bytes", async () => {
+    stubJobAndDownload(completedJob(), ZIP_BYTES);
+
+    const { api } = await loadClient();
+    const blob = await api.fetchConversionOutputBlob("job-1");
+
+    expect(blob).toBe(ZIP_BYTES);
   });
 });
 
