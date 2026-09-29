@@ -1,20 +1,23 @@
 """Unit tests for the derived profile values (display name, initials, avatar URL).
 
 ``display_name``/``initials``/``avatar_url`` are computed rather than stored, so
-these are pure-function tests over a stub record — no database, no ORM.
+these are pure-function tests over an **unsaved** ORM row — no database, no
+session. Using the real ``UserModel`` (rather than a ``SimpleNamespace``) keeps
+the tests honest: if a column these rules read is renamed or removed, the test
+module stops type checking instead of silently returning ``None``.
 """
 
 from base64 import b64encode
-from types import SimpleNamespace
 
 from src.application.services.user_profile import (
     avatar_data_url_for,
     display_name_for,
     initials_for,
 )
+from src.infrastructure.database.models import UserModel
 
 
-def _user(**overrides):
+def _user(**overrides) -> UserModel:
     base = {
         "username": "ada",
         "first_name": None,
@@ -23,7 +26,7 @@ def _user(**overrides):
         "avatar_content_type": None,
     }
     base.update(overrides)
-    return SimpleNamespace(**base)
+    return UserModel(**base)
 
 
 # ---------------------------------------------------------------------------

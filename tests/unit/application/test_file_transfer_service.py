@@ -2,6 +2,7 @@
 
 import asyncio
 from datetime import timedelta
+from typing import cast
 
 import pytest
 
@@ -10,6 +11,7 @@ from src.application.exceptions.file_transfer_exceptions import (
     UploadSessionNotFoundError,
     UploadVerificationError,
 )
+from src.application.ports.object_storage_port import StorageUrlGateway
 from src.application.services.file_transfer_service import TransferService
 
 
@@ -62,7 +64,11 @@ def cache() -> FakeCache:
 
 @pytest.fixture
 def service(storage: FakeStorageGateway, cache: FakeCache) -> TransferService:
-    return TransferService(storage_port=storage, cache_port=cache, ttl_minutes=10)
+    # The double implements the single-PUT half of the gateway; the multipart
+    # half is exercised by the storage-adapter tests instead.
+    return TransferService(
+        storage_port=cast(StorageUrlGateway, storage), cache_port=cache, ttl_minutes=10
+    )
 
 
 def test_create_download_url_generates_presigned_get(storage, service) -> None:

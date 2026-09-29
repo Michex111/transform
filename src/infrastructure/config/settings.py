@@ -12,11 +12,10 @@ logger = logging.getLogger(__name__)
 # README). Any other value is rejected at boot so a typo like ``prod`` cannot
 # silently disable the production safety checks.
 _SUPPORTED_ENVIRONMENTS = frozenset({"development", "production"})
-
 # The single authoritative ceiling for a single authenticated upload. Every
-# per-tier cap defaults to this (and ``validate()`` refuses to start if a tier
-# is configured above it), so "what can the store actually accept" is expressed
-# in exactly one place rather than repeated per tier.
+# per-tier cap defaults to this (and ``validate_settings()`` refuses to start
+# if a tier is configured above it), so "what can the store actually accept" is
+# expressed in exactly one place rather than repeated per tier.
 #
 # 5 GiB is also the *single-PUT* ceiling for Backblaze B2 and AWS S3: a
 # presigned PUT above it is rejected by the provider, and a real 5 GiB transfer
@@ -26,8 +25,8 @@ _SUPPORTED_ENVIRONMENTS = frozenset({"development", "production"})
 _MAX_UPLOAD_FILE_SIZE_CEILING: int = 5 * 1024 * 1024 * 1024  # 5 GiB
 
 # S3/S3-compatible providers cap a multipart upload at 10 000 parts; exceeding
-# it fails only at the END of a multi-gigabyte transfer. ``validate()`` asserts
-# the configured part size keeps the ceiling under the limit.
+# it fails only at the END of a multi-gigabyte transfer. ``validate_settings()``
+# asserts the configured part size keeps the ceiling under the limit.
 _S3_MAX_MULTIPART_PARTS: int = 10_000
 
 
@@ -37,6 +36,12 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development"
 
     SECRET_KEY: SecretStr
+    # Symmetric only, deliberately. `jwt_provider` both SIGNS and VERIFIES with
+    # SECRET_KEY, so an asymmetric algorithm could not work at all, and the
+    # dangerous value here is `none` — pyjwt accepts it, which would make every
+    # token trivially forgeable. The value is validated in `validate_settings`
+    # rather than trusted, so a misconfiguration fails the boot instead of
+    # silently producing forgeable tokens.
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
@@ -44,6 +49,21 @@ class Settings(BaseSettings):
     # Run database migrations at startup. Disable in deployments that run
     # migrations as a separate one-shot step to avoid concurrent upgrades.
     RUN_MIGRATIONS: bool = True
+
+    # Largest request body the API will accept, in bytes.
+    #
+    # The API only ever receives JSON metadata (uploads go straight to object
+    # storage through presigned URLs, never through this process), so the real
+    # bodies are tiny: a chat message is ≤4 kB, and the largest legitimate one is
+    # a multipart-finalise part list (10 000 parts, ~1.5 MB). 4 MiB leaves
+    # comfortable headroom above that while still refusing the unbounded body a
+    # hostile client would otherwise make uvicorn buffer in memory.
+    #
+    # Enforced in `RequestBodyLimitMiddleware`, which rejects on the declared
+    # `Content-Length` BEFORE the body is read. (A chunked request declares no
+    # length, so it is bounded by the per-schema field limits instead — see the
+    # middleware's docstring for why that trade-off is deliberate.)
+    MAX_REQUEST_BODY_BYTES: int = 4 * 1024 * 1024
 
     # Redis configuration
     REDIS_URL: SecretStr
@@ -120,9 +140,9 @@ class Settings(BaseSettings):
     #
     # Accepted values: auto | console | smtp | resend. A value that names a
     # transport whose credentials are missing is a configuration error and is
-    # rejected in ``validate()`` rather than silently degrading — an explicit
-    # choice must not be quietly ignored. ``auto`` is never rejected, because
-    # its whole purpose is to resolve to whatever is available.
+    # rejected in ``validate_settings()`` rather than silently degrading — an
+    # explicit choice must not be quietly ignored. ``auto`` is never rejected,
+    # because its whole purpose is to resolve to whatever is available.
     EMAIL_BACKEND: str = "auto"
 
     # Envelope sender. Must be a domain you control and have verified with your
@@ -239,6 +259,75 @@ class Settings(BaseSettings):
     # recovery path (the operator's SMS provider going down would lock every
     # user out) and no benefit. Phone verification is opt-in from the settings
     # page. See ``domain/security/enitities/phone_verification.py``.
+
+    # ------------------------------------------------------------------
+    # AI assistant ("Transform AI")
+    # ------------------------------------------------------------------
+    # How the assistant's completions are produced. ``auto`` (the default)
+    # resolves to the OpenAI-compatible HTTP transport as soon as AI_API_KEY is
+    # set, and otherwise falls back to ``echo`` — a local, no-network backend
+    # that answers from a small rule engine. ``auto`` means the assistant is
+    # usable out of the box in development and CI (no key, no egress, fully
+    # deterministic in tests) and starts calling a real model the moment a key
+    # is added, with no extra switch to remember.
+    #
+    # Accepted values: auto | openai | echo. Naming a transport whose
+    # credentials are missing is a startup error — an explicit choice must not
+    # be quietly downgraded to a stub that answers without the model the
+    # operator asked for. ``echo`` is never rejected: it is a supported,
+    # intentional backend, not a degraded fallback. The boot log names the
+    # resolved backend (see the API lifespan).
+    AI_BACKEND: str = "auto"
+
+    # Credential for the OpenAI-compatible API. Not required for ``echo``.
+    AI_API_KEY: SecretStr | None = None
+    # Base URL of an OpenAI-compatible API, WITHOUT a trailing slash. Any
+    # provider that implements ``POST /chat/completions`` works (OpenAI,
+    # Azure OpenAI, OpenRouter, Together, Groq, vLLM, Ollama, LM Studio).
+    AI_BASE_URL: str = "https://api.openai.com/v1"
+    AI_MODEL: str = "gpt-4o-mini"
+
+    # Per-level model overrides. The domain maps a tier to a *level*
+    # (``standard`` / ``advanced`` / ``priority``, see ``assistant_policy``);
+    # these turn a level into the concrete model id to call. A BLANK value
+    # falls back to ``AI_MODEL``, which is what keeps a single-model deployment
+    # behaving exactly as before — only a deployment that deliberately sets
+    # these serves a better model to a better plan.
+    #
+    #   FREE / GUEST          -> standard -> AI_MODEL_STANDARD
+    #   PRO / PREMIUM         -> advanced -> AI_MODEL_ADVANCED
+    #   PRO_PLUS / ENTERPRISE -> priority -> AI_MODEL_PRIORITY
+    #
+    # All three must name models that support tool calling: the assistant is
+    # tool-driven, so a model without it cannot list files or start a conversion.
+    AI_MODEL_STANDARD: str = ""
+    AI_MODEL_ADVANCED: str = ""
+    AI_MODEL_PRIORITY: str = ""
+
+    # Generation parameters. A low temperature is deliberate: the assistant's
+    # job is to call the right tool with the right arguments, not to be
+    # creative, and tool arguments must be stable to be safe.
+    AI_MAX_TOKENS: int = 1200
+    AI_TEMPERATURE: float = 0.3
+    # Bounds a stalled provider so one slow completion cannot pin a request
+    # worker for the whole client timeout.
+    AI_REQUEST_TIMEOUT_SECONDS: int = 60
+
+    # Hard ceiling on tool round-trips per turn. The agent loop is bounded
+    # rather than "until the model stops asking": an unbounded loop is an
+    # unbounded provider bill and an unbounded request duration, and the
+    # failure mode (a model that keeps calling tools) is exactly the one a
+    # loop limit exists to stop.
+    AI_MAX_TOOL_ITERATIONS: int = 6
+    # How many stored messages are replayed to the model as history. Bounds
+    # both the prompt cost and the context the model can be confused by.
+    AI_MAX_HISTORY_MESSAGES: int = 20
+
+    # Document-reading limits for the assistant's file tools. The character
+    # budget is what actually bounds the prompt; the byte budget is a cheaper,
+    # earlier guard so a huge upload is refused before it is read into memory.
+    AI_SUMMARY_MAX_INPUT_CHARS: int = 48000
+    AI_MAX_DOCUMENT_BYTES: int = 10 * 1024 * 1024
 
     # Frontend (SPA) static serving
     # DEPRECATED / NO-OP: the API no longer serves the SPA. The React app is
@@ -366,7 +455,18 @@ class Settings(BaseSettings):
 
     _SUPPORTED_EMAIL_BACKENDS = frozenset({"auto", "console", "smtp", "resend"})
 
+    # Algorithms `jwt_provider` may be configured with.
+    #
+    # Symmetric only: it signs AND verifies with the same `SECRET_KEY`, so an
+    # asymmetric algorithm could never round-trip. The value that actually
+    # matters here is `none` — pyjwt accepts it, which would make every token
+    # this service hands out trivially forgeable — so the setting is checked at
+    # boot rather than trusted.
+    _SUPPORTED_ALGORITHMS = frozenset({"HS256", "HS384", "HS512"})
+
     _SUPPORTED_SMS_BACKENDS = frozenset({"auto", "console", "twilio"})
+
+    _SUPPORTED_AI_BACKENDS = frozenset({"auto", "openai", "echo"})
 
     def _resolve_email_backend(self) -> str:
         """The concrete email transport to use: console | smtp | resend.
@@ -405,6 +505,55 @@ class Settings(BaseSettings):
         ):
             return "twilio"
         return "console"
+
+    def _ai_key_present(self) -> bool:
+        """True when a usable AI API key is configured.
+
+        A blank value does not count. ``.env.example`` ships ``AI_API_KEY=``
+        (empty), and treating that as "configured" would make a copied template
+        resolve to the real provider and then fail every turn with a 401 — the
+        exact opposite of the ``auto`` promise that an unconfigured deployment
+        still works. (``EMAIL_BACKEND`` has the same trap; this one is closed.)
+        """
+        if self.AI_API_KEY is None:
+            return False
+        return bool(self.AI_API_KEY.get_secret_value().strip())
+
+    def _resolve_ai_backend(self) -> str:
+        """The concrete assistant backend to use: openai | echo.
+
+        ``auto`` prefers a real model over the local rule engine: an API key is
+        a deliberate, single-purpose credential, so its presence is the signal
+        that the operator wants real completions. Callers should use this
+        rather than reading ``AI_BACKEND`` directly so the rule lives in one
+        place (the API lifespan and the ``/status`` endpoint both rely on it).
+        """
+        configured = self.AI_BACKEND.strip().lower()
+        if configured != "auto":
+            return configured
+        if self._ai_key_present():
+            return "openai"
+        return "echo"
+
+    def ai_model_for_level(self, level: str) -> str:
+        """The model id to call for an assistant ``level``.
+
+        The level vocabulary (``standard`` / ``advanced`` / ``priority``) is a
+        domain concept (see ``assistant_policy``); the model id is deployment
+        configuration. This is the one place the two meet.
+
+        A blank per-level setting — and any level this build does not know —
+        falls back to ``AI_MODEL``. That fallback is the whole reason the
+        feature is backwards compatible: an existing single-model deployment
+        that sets only ``AI_MODEL`` serves that model to every plan, exactly as
+        it did before per-level models existed.
+        """
+        by_level = {
+            "standard": self.AI_MODEL_STANDARD,
+            "advanced": self.AI_MODEL_ADVANCED,
+            "priority": self.AI_MODEL_PRIORITY,
+        }
+        return by_level.get(level.strip().lower(), "").strip() or self.AI_MODEL
 
     def _twilio_credentials_complete(self) -> bool:
         """True when every Twilio credential is present."""
@@ -485,8 +634,13 @@ class Settings(BaseSettings):
                 "window issues multipart URLs that are dead on arrival."
             )
 
-    def validate(self) -> None:
-        """Fail fast at startup when the configuration is unsafe for production."""
+    def validate_settings(self) -> None:
+        """Fail fast at startup when the configuration is unsafe for production.
+
+        Named ``validate_settings`` and NOT ``validate``: ``BaseSettings`` has a
+        (deprecated) ``validate`` classmethod, so a same-named instance method
+        silently shadows a pydantic API.
+        """
         environment = self.ENVIRONMENT.strip().lower()
 
         # Email transport. An explicit choice is honoured or rejected — never
@@ -540,7 +694,50 @@ class Settings(BaseSettings):
                 "no attempt ceiling is brute-forceable in seconds."
             )
 
+        # AI assistant. Same contract as email/SMS: an explicit choice is
+        # honoured or rejected, never silently downgraded. ``auto`` is exempt
+        # (it exists to resolve), and ``echo`` is always accepted — it is a
+        # working backend, not a broken one.
+        ai_backend = self.AI_BACKEND.strip().lower()
+        if ai_backend not in self._SUPPORTED_AI_BACKENDS:
+            raise ValueError(
+                f"Unsupported AI_BACKEND {self.AI_BACKEND!r}; expected one of "
+                f"{sorted(self._SUPPORTED_AI_BACKENDS)}."
+            )
+        if ai_backend == "openai" and not self._ai_key_present():
+            raise RuntimeError("AI_BACKEND=openai requires AI_API_KEY.")
+        if not self.AI_BASE_URL.startswith(("http://", "https://")):
+            # Without this, a typo (``api.openai.com/v1`` with no scheme) turns
+            # every assistant turn into an opaque transport error at runtime
+            # instead of a one-line startup failure.
+            raise RuntimeError(
+                f"AI_BASE_URL {self.AI_BASE_URL!r} must start with http:// or "
+                "https://."
+            )
+        if self.AI_MAX_TOOL_ITERATIONS < 1:
+            # Zero iterations means the model is never called, so every turn
+            # ends in the "ran out of steps" fallback. That is a configuration
+            # bug, not a feature.
+            raise RuntimeError(
+                "AI_MAX_TOOL_ITERATIONS must be >= 1 so the assistant can "
+                "produce at least one completion per turn."
+            )
+
         self._validate_upload_limits()
+
+        # Environment-independent: a forgeable signing algorithm is a hazard in
+        # development too (dev tokens are real tokens, and the same process
+        # configuration is what a deployment copies).
+        if self.ALGORITHM not in self._SUPPORTED_ALGORITHMS:
+            raise RuntimeError(
+                f"Unsupported ALGORITHM {self.ALGORITHM!r}; expected one of "
+                f"{sorted(self._SUPPORTED_ALGORITHMS)}."
+            )
+
+        if self.MAX_REQUEST_BODY_BYTES < 1024:
+            # A cap below 1 KiB would reject legitimate requests; a typo that
+            # made it 0 would reject everything. Fail loudly at boot.
+            raise RuntimeError("MAX_REQUEST_BODY_BYTES must be at least 1024 bytes.")
 
         if environment not in _SUPPORTED_ENVIRONMENTS:
             # Fail closed: an unrecognised value (e.g. "prod") must not silently
@@ -673,5 +870,5 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     settings = Settings()  # type: ignore[call-arg]
-    settings.validate()
+    settings.validate_settings()
     return settings

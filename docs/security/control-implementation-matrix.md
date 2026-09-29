@@ -110,8 +110,8 @@ for full rationale & gaps).
 | A.8.22 Segregation of networks | I | Separate per-service containers + `converter-net` + direct cloud connections. |
 | A.8.23 Web filtering | N/A | No outbound proxy required. |
 | A.8.24 Use of cryptography | I | `src/infrastructure/adapters/security/encryption.py` (AES-256-GCM, HKDF, AAD, rotation); JWT; SHA-256. |
-| A.8.25 Secure development lifecycle | I | Hexagonal layers; `settings.validate()` fail-fast; `sanitize.py`; `Agents.MD`. |
-| A.8.26 Application security reqs | I | `src/presentation/api/middleware/security_headers.py`; `settings.validate()` (G2/G3 gaps). |
+| A.8.25 Secure development lifecycle | I | Hexagonal layers; `settings.validate_settings()` fail-fast; `sanitize.py`; `Agents.MD`. |
+| A.8.26 Application security reqs | I | `src/presentation/api/middleware/security_headers.py`; `settings.validate_settings()` (G2/G3 gaps). |
 | A.8.27 Secure architecture | I | Clean architecture; tiered limits; ownership; per-owner keys. |
 | A.8.28 Secure coding | I | `sanitize.py`; arg-list `subprocess.run` (no shell); SQLAlchemy ORM parameterization. |
 | A.8.29 Security testing in dev | P | `tests/unit|integration|api`; **no SAST/DAST/pen-test** (G8). |

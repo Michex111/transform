@@ -474,6 +474,9 @@ def test_authorize_upload_size_rejects_a_declared_size_over_the_cap(service) -> 
         _run(service.authorize_upload_size(1, 5 * GB + 1))
 
     detail = exc.value.http_detail()
+    # The structured form is only produced when byte counts are known; the
+    # error degrades to a plain message otherwise.
+    assert isinstance(detail, dict)
     assert detail["code"] == "FILE_TOO_LARGE"
     assert detail["max_file_size_bytes"] == 5 * GB
     assert detail["file_size"] == 5 * GB + 1

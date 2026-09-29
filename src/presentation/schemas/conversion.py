@@ -17,7 +17,12 @@ class CreateConversionJobRequest(BaseModel):
     # client may send the RAW data key (base64) here; the server wraps it
     # immediately with the per-user Fernet key and never persists it in the
     # clear. ``client_encrypted`` flags that the uploaded object is FENCR.
-    data_key: str | None = None            # raw 32-byte key, base64 (not stored in clear)
+    #
+    # ``max_length`` is deliberately tiny: the field carries a base64-encoded
+    # 32-byte key (44 chars). Without a bound, a client could post an enormous
+    # string here and make the server base64-decode and buffer it before the
+    # 32-byte check ever runs — an unbounded request-body/memory DoS.
+    data_key: str | None = Field(default=None, max_length=512)  # raw 32-byte key, base64 (not stored in clear)
     client_encrypted: bool = False
 
 

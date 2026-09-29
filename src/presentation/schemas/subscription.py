@@ -44,6 +44,25 @@ def domain_tier_to_api(tier: DomainTier) -> SubscriptionTier:
     }[tier]
 
 
+class AiEntitlementResponse(BaseModel):
+    """The AI assistant allowances a plan carries, for the pricing page.
+
+    A deliberate SUBSET of the assistant status payload: this is a **public**
+    endpoint, so it exposes the model *level* and its human label but never a
+    concrete model id — naming the deployment's provider/model choices to
+    anonymous callers is not necessary to sell the plan. Every number here is
+    read from the domain policy, so the marketing page cannot advertise an
+    allowance the server does not enforce.
+    """
+
+    model_level: str
+    model_label: str
+    requests_per_hour: int
+    max_attachments: int
+    max_document_mb: int
+    max_actions_per_turn: int
+
+
 class SubscriptionPlanResponse(BaseModel):
     tier: SubscriptionTier
     name: str
@@ -51,6 +70,7 @@ class SubscriptionPlanResponse(BaseModel):
     storage_gb: int
     monthly_credits: int | None = None
     features: list[str]
+    ai: AiEntitlementResponse | None = None
 
 
 class CheckoutRequest(BaseModel):

@@ -17,6 +17,7 @@ means the two can never drift into disagreeing about the boundary — see
 """
 
 from dataclasses import dataclass
+from decimal import Decimal
 
 
 @dataclass(frozen=True)
@@ -51,15 +52,20 @@ class StorageQuotaDecision:
 
 
 def evaluate_storage_quota(
-    *, limit_bytes: int, used_bytes: int, file_size: int,
+    *,
+    limit_bytes: int | Decimal,
+    used_bytes: int | Decimal,
+    file_size: int | Decimal,
 ) -> StorageQuotaDecision:
     """Evaluate ``file_size`` against ``limit_bytes`` minus ``used_bytes``.
 
-    Every input is coerced to ``int`` before the decision is built. That is not
-    cosmetic tidiness — it is a fix for a real production-only failure.
+    The parameters are typed ``int | Decimal`` because that is genuinely what
+    arrives: ``used_bytes`` comes from ``SUM(file_size_bytes)``, which
+    **PostgreSQL returns as a ``Decimal``** while SQLite returns a plain
+    ``int``. Declaring ``int`` would describe only the SQLite case.
 
-    ``used_bytes`` comes from ``SUM(file_size_bytes)``, which **PostgreSQL
-    returns as a ``Decimal``** while SQLite returns a plain ``int``. The
+    Every input is coerced to ``int`` before the decision is built. That is not
+    cosmetic tidiness — it is a fix for a real production-only failure. The
     decision's numbers are embedded in the structured 413 body an over-quota
     upload gets back, and FastAPI's JSON encoder cannot serialise a ``Decimal``,
     so the refusal raised instead of responding: the API answered **500**

@@ -30,6 +30,21 @@ export function isTrustedDownloadUrl(url: string): boolean {
 }
 
 /**
+ * The URL to send the browser to, or `null` when it must not be trusted.
+ *
+ * The sibling of {@link isTrustedDownloadUrl} for a **navigation** rather than
+ * a download — an API-returned Stripe `checkout_url`/`portal_url` is just as
+ * attacker-influenced as a download URL, and `window.location.assign("javascript:…")`
+ * executes the script in the app's own origin (a `data:`/hosted redirect is an
+ * open-redirect phishing vector). Returning the URL only when the allowlist
+ * accepts it makes the guard impossible to skip at the call site: there is no
+ * way to obtain a value to assign without going through the check.
+ */
+export function trustedExternalUrl(url: string): string | null {
+  return isTrustedDownloadUrl(url) ? url : null;
+}
+
+/**
  * Trigger a browser download from a remote URL (no auth needed — presigned).
  *
  * Returns `false` (without navigating) when the URL's scheme is not trusted, so

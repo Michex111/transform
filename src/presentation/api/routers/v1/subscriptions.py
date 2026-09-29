@@ -5,6 +5,14 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
+from src.domain.assistant.policies.assistant_policy import (
+    hourly_quota,
+    max_actions_per_turn,
+    max_attachments_for_tier,
+    max_document_bytes_for_tier,
+    model_label_for_tier,
+    model_level_for_tier,
+)
 from src.domain.subscriptions.value_object.tier import SubscriptionTier as DomainTier
 from src.infrastructure.adapters.payment.stripe_service import StripeService
 from src.infrastructure.adapters.repository.sql_subscription_repo import SQLSubscriptionRepository
@@ -15,6 +23,7 @@ from src.presentation.api.dependencies.service_dependencies import (
     get_subscription_repository,
 )
 from src.presentation.schemas.subscription import (
+    AiEntitlementResponse,
     CancelSubscriptionResponse,
     CheckoutRequest,
     CheckoutResponse,
@@ -28,6 +37,25 @@ from src.presentation.schemas.subscription import (
 
 router = APIRouter(prefix="/api/v1/subscription", tags=["subscription"])
 
+
+def _ai_entitlement(tier: DomainTier) -> AiEntitlementResponse:
+    """Build a plan's AI allowance block straight from the domain policy.
+
+    This is the anti-drift bridge: exactly the ``assistant_policy`` functions
+    the assistant enforces with are the ones this public page reports, so the
+    pricing page and the runtime can never disagree. ``max_document_mb`` is
+    converted to whole MiB here (display only) — the policy keeps bytes.
+    """
+    return AiEntitlementResponse(
+        model_level=model_level_for_tier(tier),
+        model_label=model_label_for_tier(tier),
+        requests_per_hour=hourly_quota(tier),
+        max_attachments=max_attachments_for_tier(tier),
+        max_document_mb=max_document_bytes_for_tier(tier) // (1024 * 1024),
+        max_actions_per_turn=max_actions_per_turn(tier),
+    )
+
+
 # Subscription plans definition
 _PLANS = [
     SubscriptionPlanResponse(
@@ -37,6 +65,7 @@ _PLANS = [
         storage_gb=5,
         monthly_credits=50,
         features=["5 GB storage", "50 conversions/month", "10 API calls/month", "Community support"],
+        ai=_ai_entitlement(DomainTier.FREE),
     ),
     SubscriptionPlanResponse(
         tier=SubscriptionTier.PRO,
@@ -45,6 +74,7 @@ _PLANS = [
         storage_gb=50,
         monthly_credits=500,
         features=["50 GB storage", "500 conversions/month", "100 API calls/month", "Priority support"],
+        ai=_ai_entitlement(DomainTier.PRO),
     ),
     SubscriptionPlanResponse(
         tier=SubscriptionTier.PRO_PLUS,
@@ -53,6 +83,7 @@ _PLANS = [
         storage_gb=100,
         monthly_credits=2000,
         features=["100 GB storage", "2000 conversions/month", "1000 API calls/month", "Priority processing", "24/7 support"],
+        ai=_ai_entitlement(DomainTier.PRO_PLUS),
     ),
     SubscriptionPlanResponse(
         tier=SubscriptionTier.ENTERPRISE,
@@ -61,6 +92,7 @@ _PLANS = [
         storage_gb=1000,
         monthly_credits=None,
         features=["Custom storage", "Unlimited conversions", "Unlimited API access", "Dedicated support", "SLA guarantee", "Custom integrations"],
+        ai=_ai_entitlement(DomainTier.ENTERPRISE),
     ),
 ]
 

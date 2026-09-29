@@ -180,3 +180,30 @@ def test_password_reset_endpoints_use_the_strict_auth_bucket() -> None:
         key, limit = mw._resolve_limit(_FakeRequest(path))  # type: ignore[arg-type]
         assert key.endswith(":auth"), path
         assert limit == 10, path
+
+
+def test_in_memory_fallback_bounds_the_number_of_tracked_keys(monkeypatch) -> None:
+    """Regression: the fallback store must not grow with attacker-chosen keys.
+
+    The limiter key is derived from a client-supplied credential (a bearer token
+    or API key) or the client IP, and it is only reached when Redis is
+    unavailable. Before the bound, every distinct credential created a permanent
+    dictionary entry — a one-request-one-entry memory-exhaustion DoS against the
+    component that is supposed to be protecting the service.
+    """
+    import asyncio
+
+    from src.presentation.api.middleware import rate_limit as module
+
+    monkeypatch.setattr(module, "_IN_MEMORY_MAX_KEYS", 16)
+    mw = _middleware()
+    mw._settings = type("S", (), {"RATE_LIMIT_AUTHENTICATED": 600})()  # type: ignore[assignment]
+
+    async def _flood() -> None:
+        # Every key is distinct, exactly as a flood of random bearer tokens is.
+        for index in range(500):
+            await mw._is_allowed(f"user:token-{index}", 600)
+
+    asyncio.run(_flood())
+
+    assert len(mw._store) <= 16

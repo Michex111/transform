@@ -111,6 +111,25 @@ class ConversionService:
         """
         return await self.db_repository.list_user_history(user_id, offset, limit, since=since)
 
+    async def search_jobs(
+        self,
+        user_id: int,
+        *,
+        query: str | None = None,
+        fmt: str | None = None,
+        limit: int = 10,
+    ) -> list[ConversionJob]:
+        """Find the user's jobs by a name substring and/or a format.
+
+        The natural-language counterpart to :meth:`list_history`: "the homework
+        one I converted" has no offset and no total, just the jobs that match,
+        newest first. Ownership is the repository's ``user_id`` scope, so the
+        assistant cannot widen it.
+        """
+        return await self.db_repository.search_jobs(
+            user_id, query=query, fmt=fmt, limit=limit
+        )
+
     async def delete_history_job(self, job_id: str, user_id: int) -> bool:
         """Delete a single conversion-history record owned by ``user_id``.
 

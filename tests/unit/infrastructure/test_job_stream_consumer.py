@@ -16,8 +16,10 @@ paths can be exercised without a live Redis.
 
 import asyncio
 from types import SimpleNamespace
+from typing import cast
 
 import pytest
+from redis.asyncio import Redis
 
 import src.infrastructure.adapters.queues.redis_stream_job_queue as queue_module
 from src.domain.conversions.entities.conversion_job import ConversionJob
@@ -26,6 +28,15 @@ from src.infrastructure.adapters.queues.redis_stream_job_queue import (
     JobStream,
     JobStreamConsumer,
 )
+
+
+def _consumer(consumer_name: str, redis: "StubRedisStream") -> JobStreamConsumer:
+    """Build a consumer over the in-memory Redis stub.
+
+    ``StubRedisStream`` models only the stream commands the consumer issues, so
+    it is cast to the real client type at this boundary.
+    """
+    return JobStreamConsumer("conversion-workers", consumer_name, cast(Redis, redis))
 
 
 def _fields(job_id: str, **overrides: object) -> dict:
@@ -193,7 +204,7 @@ def test_fetch_job_returns_every_stream_a_single_read_delivered() -> None:
     redis = StubRedisStream()
     redis.add("conversion_jobs:high", _fields("high-job"))
     redis.add("conversion_jobs:low", _fields("low-job"))
-    consumer = JobStreamConsumer("conversion-workers", "worker-a", redis)
+    consumer = _consumer("worker-a", redis)
 
     first = asyncio.run(consumer.fetch_job())
     second = asyncio.run(consumer.fetch_job())
@@ -232,7 +243,7 @@ def test_ack_is_routed_to_the_stream_the_message_came_from() -> None:
     redis.one_stream_per_read = True
     redis.add("conversion_jobs:high", _fields("job-a"), message_id="5-0")
     redis.add("conversion_jobs:low", _fields("job-b"), message_id="5-0")
-    consumer = JobStreamConsumer("conversion-workers", "worker-a", redis)
+    consumer = _consumer("worker-a", redis)
 
     first = asyncio.run(consumer.fetch_job())
     second = asyncio.run(consumer.fetch_job())
@@ -266,7 +277,7 @@ def test_reclaim_stale_jobs_redelivers_a_job_abandoned_by_a_crashed_worker() -> 
     """
     redis = StubRedisStream()
     redis.add("conversion_jobs:normal", _fields("crashed-job", user_id="7"))
-    crashed = JobStreamConsumer("conversion-workers", "worker-dead", redis)
+    crashed = _consumer("worker-dead", redis)
 
     delivered = asyncio.run(crashed.fetch_job())
     assert delivered is not None
@@ -275,7 +286,7 @@ def test_reclaim_stale_jobs_redelivers_a_job_abandoned_by_a_crashed_worker() -> 
 
     redis.now += 3_600_000  # an hour passes before another worker sweeps
 
-    live = JobStreamConsumer("conversion-workers", "worker-live", redis)
+    live = _consumer("worker-live", redis)
     assert asyncio.run(live.reclaim_stale_jobs(min_idle_ms=60_000)) == 1
 
     redelivered = asyncio.run(live.fetch_job())
@@ -300,7 +311,7 @@ def test_reclaim_stale_jobs_leaves_fresh_pending_jobs_alone() -> None:
     """
     redis = StubRedisStream()
     redis.add("conversion_jobs:low", _fields("in-flight-job"))
-    consumer = JobStreamConsumer("conversion-workers", "worker-a", redis)
+    consumer = _consumer("worker-a", redis)
     assert asyncio.run(consumer.fetch_job()) is not None
 
     assert asyncio.run(consumer.reclaim_stale_jobs(min_idle_ms=600_000)) == 0
@@ -318,7 +329,7 @@ def test_reclaim_stale_jobs_acks_the_original_after_requeueing() -> None:
     """
     redis = StubRedisStream()
     redis.add("conversion_jobs:high", _fields("stale-job"))
-    consumer = JobStreamConsumer("conversion-workers", "worker-a", redis)
+    consumer = _consumer("worker-a", redis)
     asyncio.run(consumer.fetch_job())
     redis.now += 3_600_000
 
@@ -348,7 +359,7 @@ def test_describe_endpoint_never_leaks_credentials() -> None:
         "username": "default",
         "password": "super-secret",
     }
-    consumer = JobStreamConsumer("conversion-workers", "worker-a", redis)
+    consumer = _consumer("worker-a", redis)
 
     assert consumer.describe_endpoint() == "upstash.example:6379/0"
 
@@ -357,7 +368,7 @@ def test_startup_log_reports_endpoint_streams_and_group(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     redis = StubRedisStream()
-    consumer = JobStreamConsumer("conversion-workers", "worker-a", redis)
+    consumer = _consumer("worker-a", redis)
     logger = CapturingLogger()
     monkeypatch.setattr(queue_module, "worker_logger", logger)
 
@@ -379,7 +390,7 @@ def test_startup_log_reports_endpoint_streams_and_group(
 def test_dead_letter_stream_is_bounded() -> None:
     """The dead-letter stream has no consumer, so it needs an explicit cap."""
     redis = StubRedisStream()
-    consumer = JobStreamConsumer("conversion-workers", "worker-a", redis)
+    consumer = _consumer("worker-a", redis)
 
     asyncio.run(
         consumer.dead_letter_job("conversion_jobs:high:1-0", "boom", _job("dead-job"))
@@ -400,7 +411,7 @@ def test_publish_job_does_not_trim_the_input_streams() -> None:
     the memory saving; the DLQ and event streams are the unbounded ones.
     """
     redis = StubRedisStream()
-    publisher = JobStream(redis)
+    publisher = JobStream(cast(Redis, redis))
 
     asyncio.run(publisher.publish_job(_job("new-job")))
 

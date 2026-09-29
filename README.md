@@ -374,12 +374,16 @@ deployment/
 ├── docker/              # Dockerfile (API + workers) and compose stack
 └── ...
 render.yaml              # Render Blueprint: transform-api + transform-web
+pyrefly.toml            # Static type-checker config (import root + `default` preset)
 .github/workflows/       # ci.yml (quality gates) + deploy.yml (both services)
 ```
 
 ## Testing
 
 ```bash
+# Static type check (the same command CI gates on)
+uv run pyrefly check
+
 # Run all tests
 uv run pytest
 

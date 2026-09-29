@@ -1,12 +1,14 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { AnimatePresence, motion } from "motion/react";
-import { Check, CaretDown } from "@phosphor-icons/react";
+import { Check, CaretDown, Sparkle } from "@phosphor-icons/react";
 import { api } from "@/api/client";
 import { useAuth } from "@/auth/AuthContext";
 import { useToast } from "@/auth/ToastContext";
 import { Button, Card, Skeleton } from "@/components/ui";
+import { trustedExternalUrl } from "@/lib/download";
 import { Stagger, Item, Reveal } from "@/lib/motion";
+import { aiPlanFeatures } from "@/lib/planFeatures";
 import type { SubscriptionPlanResponse } from "@/api/types";
 
 const FAQS = [
@@ -40,7 +42,12 @@ export function PricingPage() {
     setCheckoutLoading(tier);
     try {
       const { checkout_url } = await api.checkout(tier);
-      window.location.assign(checkout_url);
+      // Guard the navigation the same way downloads are guarded: an API-supplied
+      // `javascript:`/`data:` URL assigned to `location` would run in this
+      // origin, and an arbitrary host would be an open redirect.
+      const target = trustedExternalUrl(checkout_url);
+      if (!target) throw new Error("Could not start checkout");
+      window.location.assign(target);
     } catch (err) {
       error(err instanceof Error ? err.message : "Could not start checkout");
       setCheckoutLoading(null);
@@ -75,6 +82,7 @@ export function PricingPage() {
         {plans.map((plan) => {
           const popular = plan.tier === "PRO_PLUS";
           const enterprise = plan.tier === "ENTERPRISE";
+          const aiRows = aiPlanFeatures(plan.ai);
           return (
             <Item key={plan.tier} className="h-full">
               <div
@@ -106,6 +114,25 @@ export function PricingPage() {
                     </li>
                   ))}
                 </ul>
+                {/* A distinct group for the assistant, only when the plan has
+                    one. `aiPlanFeatures` owns the wording (and returns `[]` for
+                    a plan without AI), so nothing hardcoded leaks in here. */}
+                {aiRows.length > 0 && (
+                  <div className="mt-5 rounded-xl border border-outline bg-surface-variant/40 p-3">
+                    <p className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-muted">
+                      <Sparkle size={13} weight="fill" className="shrink-0 text-primary" aria-hidden />
+                      AI assistant
+                    </p>
+                    <ul className="mt-2.5 space-y-2">
+                      {aiRows.map((row) => (
+                        <li key={row} className="flex items-start gap-2 text-sm text-on-background">
+                          <Check size={16} weight="bold" className="mt-0.5 shrink-0 text-primary" />
+                          {row}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
                 <div className="mt-6">
                   {enterprise ? (
                     <Link to="/app/support" className="block">

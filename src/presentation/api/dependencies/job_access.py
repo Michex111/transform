@@ -7,7 +7,7 @@ from src.domain.conversions.policies.job_ownership import is_job_owner
 from src.infrastructure.logging.audit import log_permission_denied
 
 
-def assert_job_owner(job: ConversionJob | None, user_id: int | None) -> None:
+def assert_job_owner(job: ConversionJob | None, user_id: int | None) -> ConversionJob:
     """Raise 404 unless ``job`` belongs to the authenticated ``user_id``.
 
     A missing job, an ownerless (guest) job, and a job owned by someone else
@@ -15,6 +15,9 @@ def assert_job_owner(job: ConversionJob | None, user_id: int | None) -> None:
     recorded as a ``permission_denied`` audit event, which is the documented
     signal for a possible IDOR / horizontal-privilege attempt
     (docs/security/access-control-policy.md, incident-response-plan.md).
+
+    Returns the job so callers can write ``job = assert_job_owner(job, ...)``
+    and carry the non-``None`` type forward instead of re-checking it.
     """
     if not is_job_owner(job, user_id):
         log_permission_denied(
@@ -23,3 +26,4 @@ def assert_job_owner(job: ConversionJob | None, user_id: int | None) -> None:
             actor=str(user_id) if user_id is not None else "anonymous",
         )
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    return job

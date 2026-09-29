@@ -45,8 +45,7 @@ async def stream_job_events(
         A COMPLETED event additionally carries output_file, the stored object key.
     """
     # Ownership check: an authenticated user may only watch their own jobs.
-    job = await repository.get_conversion_job(job_id)
-    assert_job_owner(job, current_user.id)
+    assert_job_owner(await repository.get_conversion_job(job_id), current_user.id)
 
     async def event_generator():
         try:

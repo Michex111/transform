@@ -276,10 +276,15 @@ def test_verify_creates_file_record_at_root(tmp_path) -> None:
         response = client.post("/api/uploads/sessions/sess-1/verify")
         assert response.status_code == 200
         assert response.json()["status"] == "completed"
+        # The verify response now carries the id of the file record it created,
+        # so the SPA can link to the new file without a follow-up listing.
+        file_id = response.json()["file_id"]
+        assert file_id
 
         # The file record should appear in the root file listing.
         listing = client.get("/api/v1/files").json()
         assert listing["total"] == 1
+        assert listing["files"][0]["id"] == file_id
         assert listing["files"][0]["file_name"] == "report.pdf"
         assert listing["files"][0]["file_size_bytes"] == 4096
         assert listing["files"][0]["mime_type"] == "application/pdf"

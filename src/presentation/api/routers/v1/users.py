@@ -221,7 +221,7 @@ def email_verification_is_enforced(settings: Settings) -> bool:
     Requiring confirmation for a link that can never be sent would lock out
     every new sign-up permanently, with no self-service way out — the user
     cannot verify an address they never receive mail at. So when delivery is not
-    configured the gate stays open and ``Settings.validate()`` logs an ERROR
+    configured the gate stays open and ``Settings.validate_settings()`` logs an ERROR
     naming the missing setting. Accounts are still created unverified and marked
     correctly, so enforcement switches on by itself the moment a transport is
     configured — no data migration, no code change.
@@ -1076,7 +1076,7 @@ def _render_avatar(data: bytes) -> bytes:
         top = (height - side) // 2
         image = image.crop((left, top, left + side, top + side))
 
-        image = image.resize((AVATAR_SIZE_PX, AVATAR_SIZE_PX), Image.LANCZOS)
+        image = image.resize((AVATAR_SIZE_PX, AVATAR_SIZE_PX), Image.Resampling.LANCZOS)
 
         buffer = io.BytesIO()
         image.save(

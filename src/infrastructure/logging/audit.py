@@ -76,7 +76,7 @@ class AuditFormatter(logging.Formatter):
         args = record.args
         if isinstance(args, Mapping):
             for key, value in args.items():
-                payload[str(key)] = value
+                payload[key] = value
         # Merge structured `extra` fields, excluding reserved LogRecord keys.
         for key, value in record.__dict__.items():
             if key in self._RESERVED or key.startswith("_"):

@@ -66,7 +66,13 @@ def _extract(input_file: str, dest_dir: str) -> None:
             total = sum(m.size for m in members)
             if total > MAX_ARCHIVE_EXPAND_BYTES:
                 raise RuntimeError("Archive expands beyond the permitted size (zip-bomb guard).")
-            tf.extractall(dest_dir)
+            # `filter="data"` refuses absolute paths, `..` escapes and unsafe
+            # links. Linux Python 3.12+ already defaults to it (so this is not a
+            # behaviour change on the deployed 3.14 image) — it is pinned here so
+            # the protection cannot depend on the interpreter's default, which is
+            # exactly the kind of thing that silently regresses on a base-image
+            # bump.
+            tf.extractall(dest_dir, filter="data")
     elif name.endswith((".gz", ".bz2", ".xz", ".lzma")):
         # Single-file compression: decompress to a plain file in dest_dir.
         mode = "r:gz" if name.endswith(".gz") else "r:bz2" if name.endswith(".bz2") else "r:xz"
@@ -77,7 +83,7 @@ def _extract(input_file: str, dest_dir: str) -> None:
             total = sum(m.size for m in members)
             if total > MAX_ARCHIVE_EXPAND_BYTES:
                 raise RuntimeError("Archive expands beyond the permitted size (zip-bomb guard).")
-            tf.extractall(dest_dir)
+            tf.extractall(dest_dir, filter="data")
     else:
         raise RuntimeError(f"Cannot extract archive type: {input_file}")
 

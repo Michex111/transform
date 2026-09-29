@@ -3,9 +3,12 @@ from datetime import UTC, datetime
 from src.infrastructure.database.models import ConversionJobModel
 from src.domain.conversions.entities.conversion_job import ConversionJob
 from src.domain.conversions.value_object.conversion_type import ConversionType
+from src.domain.conversions.value_object.job_status import JobStatus
 
 from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from src.infrastructure.adapters.repository.like_escape import escape_like
 
 class SQLConversionJobRepository:
 
@@ -141,6 +144,51 @@ class SQLConversionJobRepository:
         rows = (await self.session.execute(rows_q)).scalars().all()
         return [self._to_entity(r) for r in rows], total
 
+    async def search_jobs(
+        self,
+        user_id: int,
+        *,
+        query: str | None = None,
+        fmt: str | None = None,
+        limit: int = 10,
+    ) -> list[ConversionJob]:
+        """The user's jobs filtered by a name substring and/or a format.
+
+        WHY a separate method rather than more arguments on
+        ``list_user_history``: that one is a paginated listing whose
+        ``(rows, total)`` contract the History page depends on, whereas this
+        answers the assistant's "the homework one I converted" — an
+        unpaginated, natural-language lookup. Both ends of a conversion are
+        searched (``input_file`` OR ``output_file``), because the user names a
+        job by whichever side they remember.
+
+        Literal-name safety: ``%`` and ``_`` in ``query`` are escaped (see
+        :func:`escape_like`) so a substring like ``draft_1`` cannot match
+        ``draftA1``. ``fmt`` is an exact, case-insensitive format match on
+        either side — "pdf" should mean the pdf jobs, not every job whose name
+        happens to contain those letters.
+        """
+        stmt = select(ConversionJobModel).where(ConversionJobModel.user_id == user_id)
+        if query is not None and query.strip():
+            pattern = f"%{escape_like(query.strip())}%"
+            stmt = stmt.where(
+                or_(
+                    ConversionJobModel.input_file.ilike(pattern, escape="\\"),
+                    ConversionJobModel.output_file.ilike(pattern, escape="\\"),
+                )
+            )
+        if fmt is not None and fmt.strip():
+            needle = fmt.strip().lstrip(".").lower()
+            stmt = stmt.where(
+                or_(
+                    func.lower(ConversionJobModel.source_format) == needle,
+                    func.lower(ConversionJobModel.target_format) == needle,
+                )
+            )
+        stmt = stmt.order_by(ConversionJobModel.created_at.desc()).limit(limit)
+        rows = (await self.session.execute(stmt)).scalars().all()
+        return [self._to_entity(r) for r in rows]
+
     async def delete_job(self, job_id: str, user_id: int) -> bool:
         """Delete a single job owned by ``user_id``. Returns True when a row was
         removed. Jobs owned by another user (or missing) are untouched."""
@@ -197,6 +245,100 @@ class SQLConversionJobRepository:
             if status in counts:
                 counts[status] = count
         return counts
+
+    @staticmethod
+    def _job_filters(
+        user_id: int,
+        *,
+        since: datetime | None,
+        fmt: str | None,
+        status: str | None,
+    ) -> tuple[list, bool]:
+        """Shared WHERE pieces for the assistant's job aggregations.
+
+        Returns ``(clauses, valid)``; ``valid`` is False when ``status`` is not a
+        known job status, which the callers turn into an empty (all-zero) result
+        rather than silently ignoring the filter. ``fmt`` matching either side of
+        the conversion is what lets "how many PDF conversions" mean both "made
+        from PDF" and "made into PDF".
+        """
+        clauses: list = [ConversionJobModel.user_id == user_id]
+        if since is not None:
+            clauses.append(ConversionJobModel.created_at >= since)
+        if fmt is not None and fmt.strip():
+            needle = fmt.strip().lower()
+            clauses.append(
+                or_(
+                    func.lower(ConversionJobModel.source_format) == needle,
+                    func.lower(ConversionJobModel.target_format) == needle,
+                )
+            )
+        if status is not None and status.strip():
+            try:
+                clauses.append(ConversionJobModel.status == JobStatus(status.strip().upper()))
+            except ValueError:
+                return clauses, False
+        return clauses, True
+
+    async def counts_by_status(
+        self,
+        user_id: int,
+        *,
+        since: datetime | None = None,
+        fmt: str | None = None,
+        status: str | None = None,
+    ) -> dict[str, int]:
+        """Job counts by status, optionally windowed by time/format/status.
+
+        Returns the same keys as :meth:`count_by_status` (``COMPLETED``,
+        ``FAILED`` and the ``TOTAL``); an unknown ``status`` yields all zeros
+        instead of an unfiltered count.
+        """
+        clauses, valid = self._job_filters(user_id, since=since, fmt=fmt, status=status)
+        if not valid:
+            return {"COMPLETED": 0, "FAILED": 0, "TOTAL": 0}
+        stmt = (
+            select(ConversionJobModel.status, func.count())
+            .where(*clauses)
+            .group_by(ConversionJobModel.status)
+        )
+        result = await self.session.execute(stmt)
+        counts: dict[str, int] = {"COMPLETED": 0, "FAILED": 0, "TOTAL": 0}
+        for job_status, count in result.all():
+            counts["TOTAL"] += count
+            key = str(job_status)
+            if key in counts:
+                counts[key] = count
+        return counts
+
+    async def count_jobs_by_target_format(
+        self,
+        user_id: int,
+        *,
+        since: datetime | None = None,
+        fmt: str | None = None,
+        status: str | None = None,
+    ) -> list[tuple[str, int]]:
+        """Job counts grouped by target format, ordered most frequent first.
+
+        Ordered because the assistant reports the list to a human, and a stable
+        order (count desc, then format asc) keeps two identical questions from
+        producing differently-ordered answers.
+        """
+        clauses, valid = self._job_filters(user_id, since=since, fmt=fmt, status=status)
+        if not valid:
+            return []
+        stmt = (
+            select(ConversionJobModel.target_format, func.count())
+            .where(*clauses)
+            .group_by(ConversionJobModel.target_format)
+            .order_by(
+                func.count().desc(),
+                ConversionJobModel.target_format.asc(),
+            )
+        )
+        result = await self.session.execute(stmt)
+        return [(str(target), int(count)) for target, count in result.all()]
 
     @staticmethod
     def _deletable_history_filter(user_id: int, since: datetime | None):
