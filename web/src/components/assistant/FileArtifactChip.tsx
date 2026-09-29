@@ -103,11 +103,14 @@ export function FileArtifactChip({ artifact }: { artifact: AssistantArtifact }) 
           },
         ]}
       />
-      {/* The modal fetches the bytes itself; an id and a name are enough. */}
+      {/* The modal fetches the bytes itself; an id and a name are enough. A
+          library artifact is always a `user_files` row, hence `kind: "library"`
+          — the modal distinguishes it from a conversion output because the two
+          id spaces are different (see `PreviewTarget`). */}
       <FilePreviewModal
         open={previewOpen}
         onClose={() => setPreviewOpen(false)}
-        file={{ id, file_name: name }}
+        target={{ kind: "library", id, file_name: name }}
       />
     </div>
   );

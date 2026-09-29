@@ -91,8 +91,13 @@ def _columns(engine: sa.Engine) -> set[str]:
 
 def _indexes(engine: sa.Engine) -> dict[str, bool]:
     with engine.connect() as connection:
+        # ``bool(...)`` is load-bearing, NOT redundant: SQLAlchemy annotates
+        # ``unique`` as ``bool``, but SQLite's reflection hands back the raw
+        # PRAGMA value, which is the int ``1``/``0`` — and the assertions below
+        # compare with ``is True`` / ``is False``, which ``1`` fails. Do not
+        # "simplify" this away to satisfy a type checker.
         return {
-            name: idx.get("unique")
+            name: bool(idx.get("unique"))
             for idx in sa.inspect(connection).get_indexes("users")
             if (name := idx["name"]) is not None
         }

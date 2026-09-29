@@ -20,6 +20,10 @@ from pathlib import Path
 
 import pytest
 import sqlalchemy as sa
+# Imported explicitly rather than reached through ``sa.exc``: the latter is an
+# implicit re-export, which pyrefly reports as ``implicit-import`` (and the fix
+# is a real import, not a suppression).
+from sqlalchemy.exc import IntegrityError
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 
@@ -100,8 +104,13 @@ def _columns(engine: sa.Engine) -> set[str]:
 
 def _indexes(engine: sa.Engine) -> dict[str, bool]:
     with engine.connect() as connection:
+        # ``bool(...)`` is load-bearing, NOT redundant: SQLAlchemy annotates
+        # ``unique`` as ``bool``, but SQLite's reflection hands back the raw
+        # PRAGMA value, which is the int ``1``/``0`` — and the assertions below
+        # compare with ``is True`` / ``is False``, which ``1`` fails. Do not
+        # "simplify" this away to satisfy a type checker.
         return {
-            name: idx.get("unique")
+            name: bool(idx.get("unique"))
             for idx in sa.inspect(connection).get_indexes("users")
             if (name := idx["name"]) is not None
         }
@@ -152,7 +161,7 @@ def test_the_unique_phone_index_tolerates_many_nulls(migration) -> None:
         assert [row[0] for row in rows] == [None, None]
         # ...but a duplicate real number does not.
         connection.execute(sa.text("UPDATE users SET phone_number = '+14155552671' WHERE username = 'ada'"))
-    with pytest.raises(sa.exc.IntegrityError):  #pyrefly: ignore[implicit-import]
+    with pytest.raises(IntegrityError):
         with engine.begin() as connection:
             connection.execute(
                 sa.text("UPDATE users SET phone_number = '+14155552671' WHERE username = 'bob'")
