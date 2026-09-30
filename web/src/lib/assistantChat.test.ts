@@ -597,6 +597,26 @@ describe("mergeArtifacts", () => {
     ]);
     expect(merged).toEqual([artifact({ id: "a", name: "new" })]);
   });
+
+  it("keeps a delete artifact alongside the file artifact for the same id", () => {
+    // The keys are `type:id`, so a file the assistant both surfaced and proposed
+    // deleting must produce two entries — a chip *and* the confirmation card.
+    // Deduping them by id alone would drop one of the two.
+    const file = artifact({ id: "f1" });
+    const deletion = artifact({ type: "delete", id: "f1", meta: { state: "pending" } });
+    const merged = mergeArtifacts([file], [deletion, deletion]);
+    expect(merged).toEqual([file, deletion]);
+  });
+
+  it("routes a delete artifact frame onto the pending answer", () => {
+    const deletion = artifact({
+      type: "delete",
+      id: "f1",
+      meta: { state: "pending", conversation_id: "c1" },
+    });
+    const state = applyStreamEvent(started(), { type: "artifact", artifact: deletion });
+    expect(state.messages[1].artifacts).toEqual([deletion]);
+  });
 });
 
 describe("conversationTitle", () => {

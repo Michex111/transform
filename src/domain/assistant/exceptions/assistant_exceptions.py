@@ -63,3 +63,18 @@ class AssistantAttachmentLimitExceeded(AssistantError):
     assistant look like it ignored what it was given. Raised before the stream
     starts, so the router answers with a real HTTP 403.
     """
+
+
+class AssistantDeletionNotFound(AssistantError):
+    """No live deletion proposal exists for that file in the caller's chat.
+
+    Raised when the user confirms (or cancels) a deletion the assistant never
+    proposed, or confirms the same proposal twice. It is the safeguard that
+    stops ``POST /conversations/{id}/deletions`` from being a blind "delete any
+    file I own" endpoint: the proposal — recorded in the caller's own
+    conversation — must already exist, and its state must still be ``pending``.
+
+    Mapped to 404 so that "no such proposal" is indistinguishable from "not
+    your conversation", which keeps both conversation and file ids
+    unenumerable.
+    """

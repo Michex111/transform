@@ -44,6 +44,7 @@ from src.domain.assistant.entities.conversation import Conversation
 from src.domain.assistant.exceptions.assistant_exceptions import (
     AssistantAttachmentLimitExceeded,
     AssistantAttachmentNotFound,
+    AssistantDeletionNotFound,
     AssistantDisabledError,
     AssistantQuotaExceeded,
     AssistantToolError,
@@ -81,10 +82,12 @@ from src.presentation.schemas.assistant import (
     ConversationListResponse,
     ConversationResponse,
     CreateConversationRequest,
+    DeletionOutcomeResponse,
     MessageResponse,
     RecommendationItemResponse,
     RecommendationResponse,
     RecommendRequest,
+    ResolveDeletionRequest,
     SummarizeRequest,
     SummaryResponse,
 )
@@ -512,6 +515,67 @@ async def truncate_conversation_from_message(
         message_id=message_id,
     )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# ---------------------------------------------------------------------------
+# Deletion confirmations
+# ---------------------------------------------------------------------------
+
+
+@router.post(
+    "/conversations/{conversation_id}/deletions",
+    response_model=DeletionOutcomeResponse,
+)
+async def resolve_deletion(
+    conversation_id: str,
+    payload: ResolveDeletionRequest,
+    current_user: CurrentUser,
+    assistant: Annotated[AssistantService, Depends(get_assistant_service)],
+) -> DeletionOutcomeResponse:
+    """Confirm or cancel an AI-proposed deletion of one of the caller's files.
+
+    This is the only path that can actually delete a file on the assistant's
+    behalf, and it is reachable *only* by an authenticated click — the model
+    itself has no tool that reaches the deletion. The service requires a live
+    ``pending`` proposal in the caller's own conversation, so this cannot be
+    used as a blind "delete any file I own by id" endpoint and a second click
+    on the same prompt resolves to a 404 instead of deleting twice.
+
+    Deliberately NOT gated on the assistant tier or hourly quota: this is the
+    user acting on their own file, the same authority the existing
+    ``DELETE /api/v1/files/{id}`` already grants. Charging an assistant quota
+    for a confirmation click — or refusing a click because the plan changed
+    after the proposal was made — would be wrong.
+    """
+    try:
+        outcome = await assistant.resolve_deletion(
+            user_id=current_user.id,
+            conversation_id=conversation_id,
+            file_id=payload.file_id,
+            approve=payload.approve,
+        )
+    except (AssistantConversationNotFound, AssistantDeletionNotFound) as exc:
+        # One 404 for "no such conversation", "not your conversation" and "no
+        # live proposal for that file": telling them apart would let a caller
+        # enumerate conversation ids and probe which files were ever proposed
+        # for deletion. The SPA only needs to know the prompt is stale.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"code": "DELETION_NOT_FOUND", "message": str(exc)},
+        ) from exc
+    log_data_access(
+        user_id=str(current_user.id),
+        action="delete" if payload.approve else "cancel",
+        resource="ai_file_deletion",
+        conversation_id=conversation_id,
+        file_id=outcome.file_id,
+        state=outcome.state,
+    )
+    return DeletionOutcomeResponse(
+        file_id=outcome.file_id,
+        file_name=outcome.file_name,
+        state=outcome.state,
+    )
 
 
 # ---------------------------------------------------------------------------

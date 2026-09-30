@@ -98,6 +98,38 @@ class ConversationDetailResponse(BaseModel):
     messages: list[MessageResponse]
 
 
+class ResolveDeletionRequest(BaseModel):
+    """The user's decision on an AI-proposed deletion.
+
+    Only the file id and the yes/no decision travel: the conversation the
+    proposal belongs to is in the path, and everything else (name, size) is
+    re-read server-side from the recorded proposal so a client cannot rename or
+    invent a file in the request body.
+    """
+
+    file_id: str = Field(
+        min_length=1,
+        max_length=64,
+        description="Id of the file whose deletion the assistant proposed",
+    )
+    approve: bool = Field(
+        description="True to delete the file now; False to cancel the proposal",
+    )
+
+
+class DeletionOutcomeResponse(BaseModel):
+    """The resolved outcome of a deletion confirmation.
+
+    ``state`` is one of ``deleted`` / ``cancelled`` / ``failed``; ``failed``
+    means the file was already gone by the time the user confirmed, which is a
+    resolved outcome rather than an error.
+    """
+
+    file_id: str = Field(description="Id of the file the proposal was about")
+    file_name: str = Field(description="Display name of the file at proposal time")
+    state: str = Field(description="deleted | cancelled | failed")
+
+
 class SummarizeRequest(BaseModel):
     file_id: str = Field(min_length=1, max_length=64)
 

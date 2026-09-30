@@ -867,20 +867,47 @@ export interface AssistantChatRequest {
 }
 
 /**
- * A file, folder or job the assistant surfaced while answering.
+ * A file, folder, job or pending deletion the assistant surfaced while
+ * answering.
  *
  * A `"folder"` artifact carries the folder's own `id` in `id`, its name in
  * `name`, and its location in `meta.parent_id` (null at the drive root) — the
- * opposite direction to a file artifact's `meta.folder_id`. `"unknown"` stays
- * the fallback for a kind this bundle does not recognise (an API newer than the
- * SPA), so such an artifact still renders as a neutral chip instead of being
- * dropped.
+ * opposite direction to a file artifact's `meta.folder_id`. `"delete"` carries
+ * a *proposal* to delete a library file, with its lifecycle in
+ * `meta.state` (`lib/assistantDeletion.ts` maps that to the card the user sees)
+ * and its conversation in `meta.conversation_id`, precisely so the card does not
+ * need the conversation threaded down through the transcript — which also
+ * renders inside the floating mini chat, where no conversation id exists.
+ * `"unknown"` stays the fallback for a kind this bundle does not recognise (an
+ * API newer than the SPA), so such an artifact still renders as a neutral chip
+ * instead of being dropped.
  */
 export interface AssistantArtifact {
-  type: "file" | "job" | "folder" | "unknown"
+  type: "file" | "job" | "folder" | "delete" | "unknown"
   id: string
   name: string
   meta?: Record<string, unknown> | null
+}
+
+/**
+ * The lifecycle state of a `delete` artifact, read from its `meta.state`.
+ *
+ * `"pending"` is the only one that is actionable; the others are records of a
+ * decision already made, which is what a reloaded conversation shows.
+ */
+export type AssistantDeletionState = "pending" | "deleted" | "cancelled" | "failed"
+
+/** Body of `POST /assistant/conversations/{id}/deletions`. */
+export interface AssistantDeletionRequest {
+  file_id: string
+  approve: boolean
+}
+
+/** The server's answer: the outcome, which the card shows instead of buttons. */
+export interface AssistantDeletionResponse {
+  file_id: string
+  file_name: string
+  state: Exclude<AssistantDeletionState, "pending">
 }
 
 export interface AssistantToolEvent {
@@ -973,3 +1000,10 @@ export const ASSISTANT_ATTACHMENT_LIMIT_EXCEEDED = "ATTACHMENT_LIMIT_EXCEEDED"
  * attachments and keeps the typed message so the user can resend without it.
  */
 export const ASSISTANT_ATTACHMENT_NOT_FOUND = "ATTACHMENT_NOT_FOUND"
+/**
+ * Returned (404) when an approve/reject names a file with no pending deletion
+ * proposal in that conversation — usually because another tab already resolved
+ * it. The card reports the failure and stops offering the buttons rather than
+ * retrying against a proposal that no longer exists.
+ */
+export const ASSISTANT_DELETION_NOT_FOUND = "DELETION_NOT_FOUND"
