@@ -23,6 +23,7 @@ import {
   normalizeAssistantConversation,
   normalizeAssistantConversationDetail,
   normalizeAssistantConversationList,
+  normalizeAssistantDeletion,
   normalizeAssistantMessage,
   normalizeAssistantRecommend,
   normalizeAssistantStatus,
@@ -1056,6 +1057,48 @@ describe("normalizeAssistantArtifact", () => {
       status: "COMPLETED",
     });
   });
+
+  it("passes a delete artifact and its meta through untouched", () => {
+    // The one type whose meta is load-bearing: dropping it (or folding the type
+    // to "unknown") would leave a pending deletion with no card and no buttons.
+    const artifact = normalizeAssistantArtifact({
+      type: "delete",
+      id: "f1",
+      name: "report.pdf",
+      meta: { state: "pending", conversation_id: "c1", extension: "pdf", size_bytes: 10 },
+    });
+    expect(artifact.type).toBe("delete");
+    expect(artifact.meta).toEqual({
+      state: "pending",
+      conversation_id: "c1",
+      extension: "pdf",
+      size_bytes: 10,
+    });
+  });
+
+  it("survives a malformed delete artifact without inventing fields", () => {
+    const artifact = normalizeAssistantArtifact({ type: "delete", meta: "nope" });
+    expect(artifact).toEqual({ type: "delete", id: "", name: "", meta: null });
+  });
+});
+
+describe("normalizeAssistantDeletion", () => {
+  it("keeps the two success outcomes", () => {
+    expect(
+      normalizeAssistantDeletion({ file_id: "f1", file_name: "a.pdf", state: "deleted" }),
+    ).toEqual({ file_id: "f1", file_name: "a.pdf", state: "deleted" });
+    expect(
+      normalizeAssistantDeletion({ file_id: "f1", file_name: "a.pdf", state: "cancelled" }).state,
+    ).toBe("cancelled");
+  });
+
+  it("degrades an unrecognised state to failed, never to deleted", () => {
+    // Claiming success on an unreadable state would tell the user a file is
+    // gone when it may not be.
+    expect(normalizeAssistantDeletion({ state: "weird" }).state).toBe("failed");
+    expect(normalizeAssistantDeletion({}).state).toBe("failed");
+    expect(normalizeAssistantDeletion(null).state).toBe("failed");
+  });
 });
 
 describe("normalizeAssistantStreamEvent", () => {
@@ -1166,5 +1209,21 @@ describe("normalizeAssistantStreamEvent", () => {
   it("normalises an unknown tool status to running rather than dropping it", () => {
     const event = normalizeAssistantStreamEvent("tool", '{"name":"t","status":"weird"}');
     expect(event && event.type === "tool" ? event.tool.status : "").toBe("unknown");
+  });
+
+  it("carries a delete artifact frame with its meta", () => {
+    const event = normalizeAssistantStreamEvent(
+      "artifact",
+      '{"type":"delete","id":"f1","name":"report.pdf","meta":{"state":"pending","conversation_id":"c1"}}',
+    );
+    expect(event).toEqual({
+      type: "artifact",
+      artifact: {
+        type: "delete",
+        id: "f1",
+        name: "report.pdf",
+        meta: { state: "pending", conversation_id: "c1" },
+      },
+    });
   });
 });

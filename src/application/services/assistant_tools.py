@@ -36,6 +36,14 @@ from src.application.ports.document_text_port import (
 )
 from src.application.ports.llm_port import LlmMessage, LlmToolSpec
 from src.application.services.assistant_prompts import SUMMARY_PROMPT
+from src.application.services.file_listing import (
+    DEFAULT_FILE_SORT,
+    DEFAULT_FILE_SORT_ORDER,
+    FileSortKey,
+    FileSortOrder,
+    parse_file_sort,
+    parse_file_sort_order,
+)
 from src.domain.assistant.exceptions.assistant_exceptions import (
     AssistantAttachmentNotFound,
 )
@@ -242,6 +250,7 @@ _TOOL_LABELS: dict[str, str] = {
     "list_recent_conversions": "Looking at your recent conversions",
     "create_folder": "Creating the folder",
     "move_file": "Moving the file",
+    "delete_file": "Preparing your confirmation",
     "get_account_overview": "Checking your account usage",
 }
 
@@ -289,12 +298,24 @@ class AssistantFileServicePort(Protocol):
         ...
 
     async def list_files(
-        self, user_id: int, folder_id: str | None = None, *, offset: int = 0, limit: int = 20
+        self, user_id: int, folder_id: str | None = None, *, offset: int = 0, limit: int = 20,
+        sort: FileSortKey = DEFAULT_FILE_SORT,
+        order: FileSortOrder = DEFAULT_FILE_SORT_ORDER,
     ) -> tuple[list[UserFileModel], int]:
         ...
 
+    async def list_all_files(
+        self, user_id: int, *, offset: int = 0, limit: int = 20,
+        sort: FileSortKey = DEFAULT_FILE_SORT,
+        order: FileSortOrder = DEFAULT_FILE_SORT_ORDER,
+    ) -> tuple[list[UserFileModel], int]:
+        """Every file the user owns, in any folder, ordered by the database."""
+        ...
+
     async def search_files(
-        self, user_id: int, query: str, *, offset: int = 0, limit: int = 50
+        self, user_id: int, query: str, *, offset: int = 0, limit: int = 50,
+        sort: FileSortKey = DEFAULT_FILE_SORT,
+        order: FileSortOrder = DEFAULT_FILE_SORT_ORDER,
     ) -> tuple[list[UserFileModel], int]:
         ...
 
@@ -306,6 +327,15 @@ class AssistantFileServicePort(Protocol):
     async def move_file(
         self, user_id: int, file_id: str, folder_id: str | None
     ) -> UserFileModel:
+        ...
+
+    async def delete_file(self, user_id: int, file_id: str) -> None:
+        """Delete an owned file (object + record). Foreign/missing is an error.
+
+        Declared on the port so the toolbox can offer the one deletion path a
+        *user confirmation* is allowed to reach (``delete_owned_file``), while
+        remaining unable to expose it to the model — no tool ever calls it.
+        """
         ...
 
 
@@ -350,6 +380,34 @@ class FolderLookupPort(Protocol):
         self, user_id: int, parent_id: str | None, *, offset: int = 0, limit: int = 20
     ) -> tuple[list[UserFolderModel], int]:
         ...
+
+
+def _actions_taken(artifacts: Sequence[Artifact]) -> int:
+    """Count the destructive actions this turn has already accumulated.
+
+    Two artifact kinds consume the same per-turn budget, because they are the
+    same kind of risk — something the model made happen to real user data:
+
+    * a conversion the model *started* (``meta["started"] is True``);
+    * a deletion the model *proposed* (a ``delete`` artifact left ``pending``).
+
+    Read-only tools' artifacts (a file it merely listed, a job it merely
+    reported) carry neither marker and cost nothing. Counting from the caller's
+    own accumulator means the limit needs no per-turn state: the list of
+    artifacts IS the record of what this turn has done.
+
+    Both conditions name the artifact ``type`` as well as the marker key. The
+    markers alone would be enough today, but ``state`` is a generic-sounding key
+    that a future artifact kind could plausibly carry, and a read-only artifact
+    silently consuming the destructive budget would show up as the assistant
+    refusing work for no reason the user can see.
+    """
+    return sum(
+        1
+        for artifact in artifacts
+        if (artifact.type == "job" and artifact.meta.get("started") is True)
+        or (artifact.type == "delete" and artifact.meta.get("state") == "pending")
+    )
 
 
 def _tool_schema(
@@ -490,7 +548,13 @@ class AssistantToolBox:
                     "WHOLE drive (every folder) for a case-insensitive file-name "
                     "substring, so use it for 'find my invoice'. Passing `folder` "
                     "narrows the listing — and any `query` — to that one folder. "
-                    "Use this to resolve a file the user referred to by name."
+                    "`all_folders: true` lists the whole drive with no name "
+                    "filter, which is what a question about the drive as a whole "
+                    "needs. `sort` + `order` + a small `limit` answer superlatives "
+                    "in one call — for 'what is my largest file?' use "
+                    "{all_folders: true, sort: 'size', order: 'desc', limit: 1} "
+                    "and report ONLY the file that comes back. Use this to "
+                    "resolve a file the user referred to by name."
                 ),
                 parameters=_tool_schema(
                     {
@@ -509,11 +573,41 @@ class AssistantToolBox:
                                 "across all folders when no folder is given."
                             ),
                         },
+                        "all_folders": {
+                            "type": ["boolean"],
+                            "description": (
+                                "List every folder, not just the root. Use for "
+                                "questions about the drive as a whole ('my largest "
+                                "file'). Without it, a listing with no folder and "
+                                "no query returns root-level files only."
+                            ),
+                        },
+                        "sort": {
+                            "type": ["string", "null"],
+                            "enum": [key.value for key in FileSortKey],
+                            "description": (
+                                "Order the results by 'name', 'size' or 'date' "
+                                "(the default). Applied by the server before "
+                                "`limit`, so 'size' really does return the "
+                                "largest/smallest files."
+                            ),
+                        },
+                        "order": {
+                            "type": ["string", "null"],
+                            "enum": [value.value for value in FileSortOrder],
+                            "description": (
+                                "'desc' (the default: largest, newest, Z-first) "
+                                "or 'asc' (smallest, oldest, A-first)."
+                            ),
+                        },
                         "limit": {
                             "type": "integer",
                             "minimum": 1,
                             "maximum": _MAX_LIST_LIMIT,
-                            "description": "Maximum files to return (default 20).",
+                            "description": (
+                                "Maximum files to return (default 20). Use a small "
+                                "value for a superlative — 1 for 'the largest'."
+                            ),
                         },
                     }
                 ),
@@ -679,6 +773,31 @@ class AssistantToolBox:
                 ),
             ),
             LlmToolSpec(
+                name="delete_file",
+                description=(
+                    "Propose deleting one of the user's files. This does NOT "
+                    "delete anything: it asks the user to confirm the deletion "
+                    "in the app, and the file is only removed if they click to "
+                    "confirm. Call it at most once per file the user asked to "
+                    "remove, then tell the user you need their confirmation. "
+                    "NEVER say or imply a file has been deleted — you cannot "
+                    "delete files yourself."
+                ),
+                parameters=_tool_schema(
+                    {
+                        "file_id": {"type": "string", "description": "The file's id."},
+                        "reason": {
+                            "type": ["string", "null"],
+                            "description": (
+                                "Short reason for the deletion, to show the user "
+                                "why you are asking."
+                            ),
+                        },
+                    },
+                    required=["file_id"],
+                ),
+            ),
+            LlmToolSpec(
                 name="get_account_overview",
                 description=(
                     "Read the user's own account usage: remaining credits, storage, "
@@ -764,6 +883,13 @@ class AssistantToolBox:
             return f"Created the folder {result.get('name', '')}".strip()
         if name == "move_file":
             return f"Moved {result.get('file_name', 'the file')}"
+        if name == "delete_file":
+            # Truthful by construction: the tool did not delete anything, so the
+            # line says what is actually true — the user has to confirm.
+            return (
+                f"Waiting for you to confirm deleting "
+                f"{result.get('file_name', 'the file')}"
+            )
         if name == "get_account_overview":
             jobs = result.get("jobs")
             total = jobs.get("total", 0) if isinstance(jobs, dict) else 0
@@ -787,16 +913,29 @@ class AssistantToolBox:
         user_id: int,
         tier: SubscriptionTier,
         artifacts: list[Artifact],
+        conversation_id: str | None = None,
     ) -> dict[str, Any]:
         """Run tool ``name`` and return a JSON-safe result.
 
         ``artifacts`` is the caller's accumulator: the tool appends the files and
         jobs it touched, and that same list is how ``start_conversion`` counts
         the mutations already made in this turn.
+
+        ``conversation_id`` is supplied only so a ``delete`` proposal can record
+        which chat it belongs to: the SPA renders artifacts in floating/embedded
+        components that do not receive the conversation id, so the artifact has
+        to carry it. Defaults to ``None`` because a direct ``execute`` call (as
+        in the unit tests, or any future non-chat caller) has no conversation;
+        the artifact is still emitted, with ``"conversation_id": None``.
         """
         try:
             return await self._dispatch(
-                name, arguments, user_id=user_id, tier=tier, artifacts=artifacts
+                name,
+                arguments,
+                user_id=user_id,
+                tier=tier,
+                artifacts=artifacts,
+                conversation_id=conversation_id,
             )
         except Exception as exc:  # noqa: BLE001 — a tool must never abort the loop
             # Deliberately broad: every failure mode of a tool (a storage error,
@@ -814,6 +953,7 @@ class AssistantToolBox:
         user_id: int,
         tier: SubscriptionTier,
         artifacts: list[Artifact],
+        conversation_id: str | None,
     ) -> dict[str, Any]:
         if name == "list_files":
             return await self._list_files(user_id, arguments, artifacts)
@@ -837,6 +977,10 @@ class AssistantToolBox:
             return await self._create_folder(user_id, arguments, artifacts)
         if name == "move_file":
             return await self._move_file(user_id, arguments, artifacts)
+        if name == "delete_file":
+            return await self._delete_file(
+                user_id, tier, arguments, artifacts, conversation_id=conversation_id
+            )
         if name == "get_account_overview":
             return await self._get_account_overview(user_id, arguments)
         return {"error": f"Unknown tool {name!r}."}
@@ -958,22 +1102,34 @@ class AssistantToolBox:
         limit = self._as_limit(arguments, "limit", 20)
         query = self._as_str(arguments, "query")
         folder_ref = self._as_str(arguments, "folder")
+        sort = parse_file_sort(arguments.get("sort"))
+        order = parse_file_sort_order(arguments.get("order"))
+        all_folders = arguments.get("all_folders") is True
 
-        # The three shapes of this call are deliberately distinct, because they
+        # The four shapes of this call are deliberately distinct, because they
         # search genuinely different places:
-        #   folder given          -> that one folder (a `query`, if any, narrows it);
-        #   no folder, `query`    -> the WHOLE drive;
-        #   no folder, no `query` -> the root listing.
+        #   folder given              -> that one folder (a `query`, if any, narrows it);
+        #   no folder, `query`        -> the WHOLE drive, by name;
+        #   no folder, `all_folders`  -> the WHOLE drive, no name filter;
+        #   none of the above         -> the root listing.
         # Collapsing the middle case into the root listing was the bug: "find my
         # invoice" would only ever look at root-level files and miss every
-        # document the user had filed away.
+        # document the user had filed away. Collapsing `all_folders` into the
+        # root listing was the same bug for "what is my largest file?" — and that
+        # one is worse, because "the largest of the three files at the top level"
+        # is a confident wrong answer rather than an obviously empty one.
+        #
+        # `sort`/`order` are pushed down to the repository rather than applied
+        # here: ordering a page we already fetched would rank only the rows that
+        # happened to come back, which is precisely what makes a "largest file"
+        # answer untrustworthy.
         if folder_ref is not None:
             folder_id = await self._resolve_folder_id(user_id, folder_ref)
             if folder_id is None:
                 return await self._folder_argument_error(user_id, folder_ref)
             scan = limit if query is None else _QUERY_SCAN_LIMIT
             rows, total = await self._files.list_files(
-                user_id, folder_id, offset=0, limit=scan
+                user_id, folder_id, offset=0, limit=scan, sort=sort, order=order
             )
             if query is not None:
                 needle = query.casefold()
@@ -983,14 +1139,22 @@ class AssistantToolBox:
             scope = "folder"
         elif query is not None:
             rows, total = await self._files.search_files(
-                user_id, query, offset=0, limit=limit
+                user_id, query, offset=0, limit=limit, sort=sort, order=order
             )
             # The repository's total is the number of matches, not the page it
             # returned, so "12 matches, showing 5" stays honest.
             matched = total
             scope = "all_folders"
+        elif all_folders:
+            rows, total = await self._files.list_all_files(
+                user_id, offset=0, limit=limit, sort=sort, order=order
+            )
+            matched = len(rows)
+            scope = "all_folders"
         else:
-            rows, total = await self._files.list_files(user_id, None, offset=0, limit=limit)
+            rows, total = await self._files.list_files(
+                user_id, None, offset=0, limit=limit, sort=sort, order=order
+            )
             matched = len(rows)
             scope = "root"
 
@@ -1000,6 +1164,10 @@ class AssistantToolBox:
             "count": matched,
             "total": total,
             "scope": scope,
+            # Stated explicitly so the model describes the order it actually got
+            # instead of assuming "newest first" and getting the ranking backwards
+            # in its answer ("here is your largest file" over the smallest one).
+            "ordered_by": {"key": sort.value, "direction": order.value},
         }
         if query is not None and matched == 0:
             result["note"] = (
@@ -1067,6 +1235,94 @@ class AssistantToolBox:
         artifacts.append(_file_artifact(row))
         return {"file_id": row.id, "file_name": row.file_name, "folder_id": row.folder_id}
 
+    async def _delete_file(
+        self,
+        user_id: int,
+        tier: SubscriptionTier,
+        arguments: dict[str, Any],
+        artifacts: list[Artifact],
+        *,
+        conversation_id: str | None,
+    ) -> dict[str, Any]:
+        """Record a deletion PROPOSAL. This method never deletes anything.
+
+        The whole security model of this feature rests on that sentence: the
+        model can only *ask* for a file to be removed, and the removal itself
+        happens later, from an independently authenticated confirmation click
+        (``AssistantService.resolve_deletion`` -> ``delete_owned_file``). That
+        is why ``self._files.delete_file`` is deliberately not called anywhere
+        in this class's tool dispatch — a model that could delete directly is a
+        model that a single prompt injection can turn into data loss.
+
+        ``reason`` is accepted because the schema offers it (so the model can
+        state a justification in its own prose), but it is intentionally not
+        persisted: the ``delete`` artifact's ``meta`` shape is a frozen
+        cross-stack contract with the SPA, which has no field for it.
+        """
+        action_budget = max_actions_per_turn(tier)
+        if _actions_taken(artifacts) >= action_budget:
+            # Same shared budget as ``start_conversion``: one instruction must
+            # not let the model queue an unbounded pile of destructive actions,
+            # conversions and deletion proposals together. The number in the
+            # message is the one the check enforced.
+            return {
+                "error": (
+                    f"I can propose at most {action_budget} deletions in one "
+                    "message. Ask the user which one to do next."
+                )
+            }
+        file_id = self._as_str(arguments, "file_id")
+        if file_id is None:
+            return {"error": "A file id is required."}
+        # Delegated like every other tool: ``get_file`` refuses a foreign or
+        # unknown id, so the proposal cannot be raised against a file the caller
+        # does not own.
+        row = await self._files.get_file(user_id, file_id)
+        artifacts.append(
+            Artifact(
+                type="delete",
+                id=row.id,
+                name=row.file_name,
+                meta={
+                    # "pending" is the UI's single source of truth: it is what
+                    # turns the chip into an actionable Confirm/Cancel prompt.
+                    "state": "pending",
+                    # Carried on the artifact because the components that render
+                    # it (the floating mini chat) do not receive the id.
+                    "conversation_id": conversation_id,
+                    "extension": row.file_extension,
+                    "size_bytes": row.file_size_bytes,
+                    "folder_id": row.folder_id,
+                },
+            )
+        )
+        return {
+            "status": "awaiting_confirmation",
+            "file_id": row.id,
+            "file_name": row.file_name,
+            "extension": row.file_extension,
+            "size_bytes": row.file_size_bytes,
+            "folder_id": row.folder_id,
+        }
+
+    async def delete_owned_file(self, user_id: int, file_id: str) -> str:
+        """Delete an owned file and return its display name.
+
+        NOT reachable from the model: no tool dispatch calls this, and the tool
+        signature cannot reach it. It exists solely for
+        ``AssistantService.resolve_deletion``, which runs only from the
+        authenticated confirmation endpoint, so the model's only path to a
+        deletion remains a proposal a human had to approve.
+
+        Ownership is enforced by ``FileService.delete_file`` itself (it calls
+        ``get_file`` before touching storage), so it is deliberately not
+        re-implemented here — one ownership rule, in one place.
+        """
+        row = await self._files.get_file(user_id, file_id)
+        name = row.file_name
+        await self._files.delete_file(user_id, file_id)
+        return name
+
     # ------------------------------------------------------------------
     # Formats and conversions
     # ------------------------------------------------------------------
@@ -1095,20 +1351,17 @@ class AssistantToolBox:
         arguments: dict[str, Any],
         artifacts: list[Artifact],
     ) -> dict[str, Any]:
-        already = sum(
-            1
-            for artifact in artifacts
-            if artifact.type == "job" and artifact.meta.get("started") is True
-        )
+        already = _actions_taken(artifacts)
         action_budget = max_actions_per_turn(tier)
         if already >= action_budget:
             # Counted from this turn's own artifacts so the limit needs no
             # per-turn state: the accumulator IS the record of what this turn
-            # has already done. Only artifacts marked ``started`` count — a job
-            # that a read-only tool merely *reported* is not an action taken.
-            # The budget is the caller's tier entitlement (a FREE plan gets 1),
-            # read from the shared policy so the message names the same number
-            # the check enforced.
+            # has already done. Started conversions AND proposed deletions share
+            # the budget — both are destructive actions on the user's real data
+            # — while a job a read-only tool merely *reported* is not an action
+            # taken. The budget is the caller's tier entitlement (a FREE plan
+            # gets 1), read from the shared policy so the message names the same
+            # number the check enforced.
             return {
                 "error": (
                     f"I can start at most {action_budget} conversions in one "

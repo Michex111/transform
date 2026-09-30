@@ -20,11 +20,13 @@ from src.application.dtos.assistant_dto import (
     AssistantError,
     AssistantTextDelta,
     AssistantToolEvent,
+    DeletionOutcome,
 )
 from src.application.services.assistant_service import AssistantConversationNotFound
 from src.domain.assistant.exceptions.assistant_exceptions import (
     AssistantAttachmentLimitExceeded,
     AssistantAttachmentNotFound,
+    AssistantDeletionNotFound,
     AssistantDisabledError,
     AssistantQuotaExceeded,
 )
@@ -189,8 +191,15 @@ class StubQuota:
 class StubAssistantService:
     """Raises or streams exactly what a test asks it to."""
 
-    def __init__(self, error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        error: Exception | None = None,
+        *,
+        deletion_error: Exception | None = None,
+    ) -> None:
         self.error = error
+        self.deletion_error = deletion_error
+        self.resolved: list[tuple[str, str, bool]] = []
 
     async def stream_chat(
         self, *, user_id, tier, message, conversation_id, file_ids=None, context=None
@@ -201,6 +210,19 @@ class StubAssistantService:
         yield AssistantTextDelta(text="Hello")
         yield AssistantDone(
             conversation_id="conv-1", message_id="msg-1", content="Hello"
+        )
+
+    async def resolve_deletion(
+        self, *, user_id: int, conversation_id: str, file_id: str, approve: bool
+    ) -> DeletionOutcome:
+        del user_id
+        self.resolved.append((conversation_id, file_id, approve))
+        if self.deletion_error is not None:
+            raise self.deletion_error
+        return DeletionOutcome(
+            file_id=file_id,
+            file_name="report.pdf",
+            state="deleted" if approve else "cancelled",
         )
 
     async def summarize_file(self, *, user_id: int, file_id: str):
@@ -399,3 +421,70 @@ def test_recommend_requires_a_file_or_a_format() -> None:
         response = client.post("/api/v1/assistant/recommend", json={})
     assert response.status_code == 422
     assert response.json()["detail"]["code"] == "MISSING_SOURCE"
+
+
+# ---------------------------------------------------------------------------
+# Deletion confirmations
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_deletion_returns_the_outcome_shape() -> None:
+    stub = StubAssistantService()
+    with _client(SubscriptionTier.FREE, stub) as client:
+        response = client.post(
+            "/api/v1/assistant/conversations/conv-1/deletions",
+            json={"file_id": "file-1", "approve": True},
+        )
+    assert response.status_code == 200
+    assert response.json() == {
+        "file_id": "file-1",
+        "file_name": "report.pdf",
+        "state": "deleted",
+    }
+    assert stub.resolved == [("conv-1", "file-1", True)]
+
+
+def test_resolve_deletion_cancel_reports_cancelled() -> None:
+    with _client(SubscriptionTier.FREE, StubAssistantService()) as client:
+        response = client.post(
+            "/api/v1/assistant/conversations/conv-1/deletions",
+            json={"file_id": "file-1", "approve": False},
+        )
+    assert response.status_code == 200
+    assert response.json()["state"] == "cancelled"
+
+
+def test_resolve_deletion_without_a_live_proposal_is_404_deletion_not_found() -> None:
+    with _client(
+        SubscriptionTier.FREE,
+        StubAssistantService(deletion_error=AssistantDeletionNotFound("stale")),
+    ) as client:
+        response = client.post(
+            "/api/v1/assistant/conversations/conv-1/deletions",
+            json={"file_id": "file-1", "approve": True},
+        )
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == "DELETION_NOT_FOUND"
+
+
+def test_resolve_deletion_of_an_unowned_conversation_is_404_deletion_not_found() -> None:
+    with _client(
+        SubscriptionTier.FREE,
+        StubAssistantService(
+            deletion_error=AssistantConversationNotFound("not yours")
+        ),
+    ) as client:
+        response = client.post(
+            "/api/v1/assistant/conversations/conv-x/deletions",
+            json={"file_id": "file-1", "approve": True},
+        )
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == "DELETION_NOT_FOUND"
+
+
+def test_resolve_deletion_requires_a_file_id() -> None:
+    with _client(SubscriptionTier.FREE, StubAssistantService()) as client:
+        response = client.post(
+            "/api/v1/assistant/conversations/conv-1/deletions", json={"approve": True}
+        )
+    assert response.status_code == 422

@@ -18,9 +18,18 @@ import {
  * the file chip and the folder/unknown chips in `ArtifactChips` cannot drift.
  * `min-w-0`/`max-w-full` are load-bearing: without them the flex row reports an
  * intrinsic min-width of its widest child and overflows the message column.
+ *
+ * `py-0.5` with a `2xs` (16px) thumb keeps the pointer-fine chip near 22px
+ * instead of ~30px, so a row of referenced files no longer dominates the answer.
+ * The file chip itself is taller than that: its ⋮ trigger is a deliberate 32px
+ * control (`RowMenu`) shared with the data tables, and shrinking it here would
+ * make this one surface's menu a smaller target than everywhere else.
+ *
+ * The `pointer-coarse:min-h-11` on the interactive parts is what stops the
+ * smaller visual height from becoming a smaller touch target.
  */
 export const artifactChipClass =
-  "inline-flex min-w-0 max-w-full items-center gap-2 rounded-lg border border-outline bg-surface-variant/60 px-2 py-1.5 text-xs transition-colors hover:border-primary/60";
+  "inline-flex min-w-0 max-w-full items-center gap-1 rounded-lg border border-outline bg-surface-variant/60 px-2 py-0.5 text-xs transition-colors hover:border-primary/60";
 
 /** A name that shrinks and truncates rather than pushing the chip wider. */
 export const artifactChipNameClass =
@@ -75,7 +84,7 @@ export function FileArtifactChip({ artifact }: { artifact: AssistantArtifact }) 
 
   return (
     <div className={artifactChipClass}>
-      <FormatThumb format={extension} size="xs" label="" className="shrink-0" />
+      <FormatThumb format={extension} size="2xs" label="" className="shrink-0" />
       <span className={artifactChipNameClass} title={name}>
         {name}
       </span>

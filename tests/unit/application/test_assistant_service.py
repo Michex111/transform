@@ -19,8 +19,10 @@ from src.application.dtos.assistant_dto import (
     AssistantDone,
     AssistantTextDelta,
     AssistantToolEvent,
+    DeletionOutcome,
     SummaryResult,
 )
+from src.application.exceptions.file_system_exceptions import FileRecordNotFoundError
 from src.application.ports.document_text_port import ExtractedDocument
 from src.application.ports.llm_port import LlmMessage, LlmToolCall, LlmToolSpec
 from src.application.services.assistant_service import (
@@ -37,6 +39,7 @@ from src.domain.assistant.exceptions.assistant_exceptions import (
     AssistantAttachmentLimitExceeded,
     AssistantAttachmentNotFound,
     AssistantConversationNotFound,
+    AssistantDeletionNotFound,
     AssistantDisabledError,
     AssistantQuotaExceeded,
     AssistantToolError,
@@ -64,6 +67,7 @@ class FakeConversationRepository:
         self.messages: dict[str, list[Message]] = {}
         self.created: list[str] = []
         self.deleted: list[str] = []
+        self.meta_updates: list[tuple[str, dict]] = []
 
     async def create_conversation(self, *, user_id: int, title: str) -> Conversation:
         conversation = Conversation(
@@ -113,6 +117,16 @@ class FakeConversationRepository:
     ) -> list[Message]:
         return self.messages.get(conversation_id, [])[-limit:]
 
+    async def update_message_meta(self, message_id: str, meta: dict) -> bool:
+        """Rewrite a stored message's meta in place, like the SQL repository."""
+        self.meta_updates.append((message_id, meta))
+        for messages in self.messages.values():
+            for index, message in enumerate(messages):
+                if message.id == message_id:
+                    messages[index] = replace(message, meta=meta)
+                    return True
+        return False
+
 
 class FakeQuota:
     def __init__(self, error: Exception | None = None) -> None:
@@ -141,6 +155,8 @@ class ScriptedToolBox:
         summary: dict | None = None,
         source_format: str = "pdf",
         attachments: list[AttachmentRef] | None = None,
+        file_names: dict[str, str] | None = None,
+        delete_error: Exception | None = None,
     ) -> None:
         self.results = results if results is not None else {"list_files": {"files": [], "count": 0}}
         self.artifacts = artifacts or {}
@@ -149,6 +165,11 @@ class ScriptedToolBox:
         self.source_format = source_format
         self.attachments = {item.file_id: item for item in attachments or []}
         self.executed: list[tuple[str, dict]] = []
+        #: The names ``delete_owned_file`` reports, and the ids it removed: a
+        #: test asserts on both, the second to prove a cancel deleted nothing.
+        self.file_names = file_names or {}
+        self.delete_error = delete_error
+        self.deleted: list[str] = []
 
     def specs(self) -> list[LlmToolSpec]:
         return [
@@ -172,11 +193,20 @@ class ScriptedToolBox:
         user_id: int,
         tier: SubscriptionTier,
         artifacts: list[Artifact],
+        conversation_id: str | None = None,
     ) -> dict:
-        del user_id, tier
+        del user_id, tier, conversation_id
         self.executed.append((name, arguments))
         artifacts.extend(self.artifacts.get(name, []))
         return self.results.get(name, {})
+
+    async def delete_owned_file(self, user_id: int, file_id: str) -> str:
+        """The confirm-only deletion the service calls; records what it removed."""
+        del user_id
+        if self.delete_error is not None:
+            raise self.delete_error
+        self.deleted.append(file_id)
+        return self.file_names.get(file_id, file_id)
 
     async def read_document(
         self, *, user_id: int, file_id: str, tier: SubscriptionTier
@@ -394,6 +424,164 @@ def test_a_conversation_owned_by_somebody_else_raises_not_found() -> None:
 
     with pytest.raises(AssistantConversationNotFound):
         asyncio.run(_first())
+
+
+# ---------------------------------------------------------------------------
+# The deletion handshake
+# ---------------------------------------------------------------------------
+#
+# The model only ever proposes; this service method is the authenticated half
+# that actually removes a file. Every test here exists to prove the proposal is
+# required and that a decision is made exactly once.
+
+
+def _conversation_with_pending_delete(
+    *,
+    file_id: str = "file-1",
+    name: str = "report.pdf",
+    state: str = "pending",
+    user_id: int = USER,
+) -> FakeConversationRepository:
+    """A conversation whose newest assistant message carries a delete artifact."""
+    conversations = FakeConversationRepository(
+        [Conversation(id="conv-1", user_id=user_id, title="Cleanup", created_at=NOW, updated_at=NOW)]
+    )
+    asyncio.run(
+        conversations.add_message(
+            Message(
+                id="msg-1",
+                conversation_id="conv-1",
+                position=0,
+                role=MessageRole.ASSISTANT,
+                content="Shall I delete report.pdf?",
+                meta={
+                    "artifacts": [
+                        {
+                            "type": "delete",
+                            "id": file_id,
+                            "name": name,
+                            "meta": {
+                                "state": state,
+                                "conversation_id": "conv-1",
+                                "extension": "pdf",
+                                "size_bytes": 1024,
+                                "folder_id": None,
+                            },
+                        }
+                    ]
+                },
+            )
+        )
+    )
+    return conversations
+
+
+def test_resolve_deletion_approve_deletes_and_resolves_the_artifact() -> None:
+    conversations = _conversation_with_pending_delete()
+    toolbox = ScriptedToolBox(file_names={"file-1": "report.pdf"})
+    service = _service(conversations=conversations, toolbox=toolbox)
+
+    outcome = asyncio.run(
+        service.resolve_deletion(
+            user_id=USER, conversation_id="conv-1", file_id="file-1", approve=True
+        )
+    )
+
+    assert outcome == DeletionOutcome(
+        file_id="file-1", file_name="report.pdf", state="deleted"
+    )
+    assert toolbox.deleted == ["file-1"]
+    # The artifact on the carrying message is rewritten, so a reload shows a
+    # resolved record instead of a live Confirm prompt.
+    assert conversations.meta_updates[-1][0] == "msg-1"
+    stored = conversations.messages["conv-1"][0]
+    assert stored.meta is not None
+    assert stored.meta["artifacts"][0]["meta"]["state"] == "deleted"
+    # Nothing is appended: an orphan tool row would be dropped by
+    # build_bounded_history, and a user row would fabricate speech.
+    assert len(conversations.messages["conv-1"]) == 1
+
+
+def test_resolve_deletion_cancel_deletes_nothing() -> None:
+    conversations = _conversation_with_pending_delete()
+    toolbox = ScriptedToolBox(file_names={"file-1": "report.pdf"})
+    service = _service(conversations=conversations, toolbox=toolbox)
+
+    outcome = asyncio.run(
+        service.resolve_deletion(
+            user_id=USER, conversation_id="conv-1", file_id="file-1", approve=False
+        )
+    )
+
+    assert outcome.state == "cancelled"
+    assert outcome.file_name == "report.pdf"
+    assert toolbox.deleted == []
+    stored = conversations.messages["conv-1"][0]
+    assert stored.meta is not None
+    assert stored.meta["artifacts"][0]["meta"]["state"] == "cancelled"
+
+
+def test_resolve_deletion_a_second_time_is_not_found() -> None:
+    conversations = _conversation_with_pending_delete()
+    service = _service(
+        conversations=conversations,
+        toolbox=ScriptedToolBox(file_names={"file-1": "report.pdf"}),
+    )
+    first = asyncio.run(
+        service.resolve_deletion(
+            user_id=USER, conversation_id="conv-1", file_id="file-1", approve=True
+        )
+    )
+    assert first.state == "deleted"
+    # A double-click must not delete twice: the state is no longer pending, so
+    # there is nothing left to resolve.
+    with pytest.raises(AssistantDeletionNotFound):
+        asyncio.run(
+            service.resolve_deletion(
+                user_id=USER, conversation_id="conv-1", file_id="file-1", approve=True
+            )
+        )
+
+
+def test_resolve_deletion_requires_an_owned_conversation() -> None:
+    conversations = _conversation_with_pending_delete(user_id=OTHER)
+    service = _service(conversations=conversations)
+
+    with pytest.raises(AssistantConversationNotFound):
+        asyncio.run(
+            service.resolve_deletion(
+                user_id=USER, conversation_id="conv-1", file_id="file-1", approve=True
+            )
+        )
+
+
+def test_resolve_deletion_requires_a_pending_proposal() -> None:
+    conversations = _conversation_with_pending_delete()
+    service = _service(conversations=conversations)
+
+    with pytest.raises(AssistantDeletionNotFound):
+        asyncio.run(
+            service.resolve_deletion(
+                user_id=USER, conversation_id="conv-1", file_id="other-file", approve=True
+            )
+        )
+
+
+def test_resolve_deletion_reports_a_file_already_gone_as_failed() -> None:
+    """The file vanished between the proposal and the click: not a server error."""
+    conversations = _conversation_with_pending_delete()
+    toolbox = ScriptedToolBox(delete_error=FileRecordNotFoundError())
+    service = _service(conversations=conversations, toolbox=toolbox)
+
+    outcome = asyncio.run(
+        service.resolve_deletion(
+            user_id=USER, conversation_id="conv-1", file_id="file-1", approve=True
+        )
+    )
+
+    assert outcome.state == "failed"
+    assert outcome.file_name == "report.pdf"
+    assert toolbox.deleted == []
 
 
 # ---------------------------------------------------------------------------

@@ -3,13 +3,51 @@
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, UTC
+from typing import Any
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import SQLColumnExpression, delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.application.services.file_listing import (
+    DEFAULT_FILE_SORT,
+    DEFAULT_FILE_SORT_ORDER,
+    FileSortKey,
+    FileSortOrder,
+)
 from src.infrastructure.adapters.repository.like_escape import escape_like
 from src.infrastructure.adapters.storage.sanitize import normalize_extension
 from src.infrastructure.database.models import UserFileModel, UserModel
+
+#: The column behind each sort key. Exhaustive by construction: the dict is keyed
+#: by the enum, so adding a ``FileSortKey`` without a column is a type error here
+#: rather than a listing that silently orders by the wrong thing. ``name`` goes
+#: through ``lower()`` so the order does not depend on letter case.
+#:
+#: The values are typed ``SQLColumnExpression`` rather than ``ColumnElement``
+#: because that is the type the mix actually shares: ``func.lower(...)`` returns a
+#: function and ``UserFileModel.file_name`` an ``InstrumentedAttribute``, which is
+#: an ORM expression but not a ``ColumnElement``.
+_SORT_COLUMNS: dict[FileSortKey, SQLColumnExpression[Any]] = {
+    FileSortKey.NAME: func.lower(UserFileModel.file_name),
+    FileSortKey.SIZE: UserFileModel.file_size_bytes,
+    FileSortKey.DATE: UserFileModel.created_at,
+}
+
+
+def _order_clause(
+    sort: FileSortKey, order: FileSortOrder
+) -> list[SQLColumnExpression[Any]]:
+    """Ordering for a file listing, always with a deterministic tie-break.
+
+    The secondary ``id`` key is not cosmetic. Two files of the same size (or the
+    same ``created_at``, which is resolved to the microsecond but still collides
+    for a batch insert) are otherwise returned in whatever order the backend
+    likes — so two identical requests could report a *different* "largest file"
+    or, worse, a paging walk could show the same row twice and skip another.
+    """
+    column = _SORT_COLUMNS[sort]
+    primary = column.asc() if order is FileSortOrder.ASC else column.desc()
+    return [primary, UserFileModel.id.asc()]
 
 
 @dataclass(frozen=True)
@@ -91,13 +129,20 @@ class SQLUserFileRepository:
     async def list_by_user(
         self, user_id: int, *, folder_id: str | None = None,
         offset: int = 0, limit: int = 20,
+        sort: FileSortKey = DEFAULT_FILE_SORT,
+        order: FileSortOrder = DEFAULT_FILE_SORT_ORDER,
     ) -> tuple[list[UserFileModel], int]:
         """
-        Return a paginated list of files for a user, newest first.
+        Return a paginated list of files in ONE folder, newest first by default.
 
         When ``folder_id`` is provided only files directly inside that folder
         are returned; when omitted, only root-level files (``folder_id IS
         NULL``) are returned.
+
+        ``sort``/``order`` are applied by the database, before ``offset`` and
+        ``limit``. That is the whole point: sorting a fetched page in Python
+        would answer "the largest file" from an arbitrary page of rows. See
+        :func:`list_all_by_user` to order the WHOLE drive rather than one folder.
 
         Returns:
             (rows, total_count)
@@ -110,13 +155,48 @@ class SQLUserFileRepository:
         count_q = select(func.count()).select_from(base.subquery())
         total = (await self._session.execute(count_q)).scalar_one()
 
-        rows_q = base.order_by(UserFileModel.created_at.desc()).offset(offset).limit(limit)
+        rows_q = (
+            base.order_by(*_order_clause(sort, order)).offset(offset).limit(limit)
+        )
+        rows = (await self._session.execute(rows_q)).scalars().all()
+
+        return list(rows), total
+
+    async def list_all_by_user(
+        self, user_id: int, *, offset: int = 0, limit: int = 20,
+        sort: FileSortKey = DEFAULT_FILE_SORT,
+        order: FileSortOrder = DEFAULT_FILE_SORT_ORDER,
+    ) -> tuple[list[UserFileModel], int]:
+        """Return a paginated list of EVERY file a user owns, in any folder.
+
+        ``list_by_user`` cannot answer this: its omitted ``folder_id`` means "the
+        root", not "everywhere", which is why ``search_by_name`` exists for the
+        name-search case and this method exists for the *ordered* one. "What is
+        my largest file?" is a question about the drive, and a filed-away
+        document is still part of the drive.
+
+        Ordering is applied by the database before ``offset``/``limit``, so
+        ``sort=size, order=desc, limit=1`` really is the single largest file.
+
+        Returns:
+            (rows, total_count)
+        """
+        base = select(UserFileModel).where(UserFileModel.user_id == user_id)
+
+        count_q = select(func.count()).select_from(base.subquery())
+        total = (await self._session.execute(count_q)).scalar_one()
+
+        rows_q = (
+            base.order_by(*_order_clause(sort, order)).offset(offset).limit(limit)
+        )
         rows = (await self._session.execute(rows_q)).scalars().all()
 
         return list(rows), total
 
     async def search_by_name(
         self, user_id: int, query: str, *, offset: int = 0, limit: int = 50,
+        sort: FileSortKey = DEFAULT_FILE_SORT,
+        order: FileSortOrder = DEFAULT_FILE_SORT_ORDER,
     ) -> tuple[list[UserFileModel], int]:
         """Name-substring search across ALL of a user's folders, newest first.
 
@@ -125,6 +205,10 @@ class SQLUserFileRepository:
         file the user has filed away. This method exists for exactly that
         question: it ignores ``folder_id`` entirely and matches ``file_name``
         anywhere in the drive.
+
+        ``sort``/``order`` apply to the *matches* (ordered before ``offset`` and
+        ``limit``), so a query can be ranked as well as filtered — "my biggest
+        invoice" is one call rather than a fetch-then-sort.
 
         The match is a case-insensitive substring. ``%`` and ``_`` in ``query``
         are escaped (see :func:`escape_like`) so a literal name such as
@@ -141,7 +225,9 @@ class SQLUserFileRepository:
         count_q = select(func.count()).select_from(base.subquery())
         total = (await self._session.execute(count_q)).scalar_one()
 
-        rows_q = base.order_by(UserFileModel.created_at.desc()).offset(offset).limit(limit)
+        rows_q = (
+            base.order_by(*_order_clause(sort, order)).offset(offset).limit(limit)
+        )
         rows = (await self._session.execute(rows_q)).scalars().all()
 
         return list(rows), total

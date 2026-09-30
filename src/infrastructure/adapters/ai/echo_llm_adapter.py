@@ -58,6 +58,18 @@ _LIST_WORDS = re.compile(
     r"do i have)\b",
     re.IGNORECASE,
 )
+#: A superlative about size ("what's my largest file?"). These are answered by
+#: *ranking* the drive rather than listing it, so they are matched before the
+#: generic listing rule: `_LIST_WORDS` also matches "which of my files are the
+#: largest?", and the generic branch would return a page of rows for a question
+#: whose answer is one file.
+_BIGGEST_WORDS = re.compile(r"\b(largest|biggest|heaviest)\b", re.IGNORECASE)
+_SMALLEST_WORDS = re.compile(r"\b(smallest|tiniest|lightest)\b", re.IGNORECASE)
+#: Rows returned for a superlative. "the largest file" wants one row; "which of
+#: my files are the largest" is plural and gets a short ranked handful.
+_SUPERLATIVE_LIMIT = 1
+_SUPERLATIVE_PLURAL_LIMIT = 3
+_PLURAL_FILES = re.compile(r"\bfiles\b", re.IGNORECASE)
 _FOLDER_WORDS = re.compile(r"\b(folders?|director\w+)\b", re.IGNORECASE)
 #: ``to pdf`` / ``into .docx`` — the trailing format of a conversion request.
 _TARGET_FORMAT = re.compile(r"\b(?:to|into)\s+\.?([a-z][a-z0-9]{1,5})\b", re.IGNORECASE)
@@ -115,6 +127,45 @@ def _named_file(text: str) -> str | None:
 def _target_format(text: str) -> str | None:
     match = _TARGET_FORMAT.search(text)
     return match.group(1).lower() if match else None
+
+
+def _superlative_label(ordered_by: object) -> str | None:
+    """The adjective a ranked size listing answers, or ``None``.
+
+    Reads the ``ordered_by`` block the tool put in its result rather than the
+    user's wording, because the wording only *asked* for a ranking — whether the
+    rows are actually ranked is a fact about the tool result, and claiming
+    "your largest file" over an unranked page is the lie this backend must never
+    tell.
+    """
+    if not isinstance(ordered_by, dict):
+        return None
+    if ordered_by.get("key") != "size":
+        return None
+    direction = ordered_by.get("direction")
+    if direction == "desc":
+        return "largest"
+    if direction == "asc":
+        return "smallest"
+    return None
+
+
+def _describe_ranked(entry: dict[str, Any]) -> str:
+    """``**name** (2.1 MB)``, omitting the size when the tool did not report one."""
+    described = f"**{entry.get('file_name', '?')}**"
+    size = entry.get("size_bytes")
+    if isinstance(size, int) and not isinstance(size, bool):
+        described += f" ({_human_bytes(size)})"
+    return described
+
+
+def _human_bytes(size_bytes: int) -> str:
+    """Compact byte size for a prose answer (presentation only, never a limit)."""
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    if size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.0f} KB"
+    return f"{size_bytes / (1024 * 1024):.1f} MB"
 
 
 class EchoLlmAdapter:
@@ -185,6 +236,9 @@ class EchoLlmAdapter:
                 name="list_supported_targets",
                 arguments={"source_format": source_format},
             )
+        superlative = self._superlative_arguments(text)
+        if superlative is not None:
+            return LlmToolCall(id=_CALL_ID, name="list_files", arguments=superlative)
         if wants_action or _LIST_WORDS.search(text):
             query = _named_file(text)
             arguments: dict[str, Any] = {"limit": 20}
@@ -228,6 +282,30 @@ class EchoLlmAdapter:
                     arguments={"file_id": file_id, "target_format": target},
                 )
         return None
+
+    @staticmethod
+    def _superlative_arguments(text: str) -> dict[str, Any] | None:
+        """``list_files`` arguments that rank the drive, or ``None``.
+
+        Returns the arguments for a size superlative ("my largest file") and
+        nothing for anything else, so the caller falls through to the ordinary
+        listing rules. ``all_folders`` is set because the question is about the
+        drive as a whole: without it the tool would list root-level files and
+        the "largest" of those is usually not the largest file the user owns.
+        """
+        if _BIGGEST_WORDS.search(text):
+            order = "desc"
+        elif _SMALLEST_WORDS.search(text):
+            order = "asc"
+        else:
+            return None
+        plural = _PLURAL_FILES.search(text) is not None
+        return {
+            "all_folders": True,
+            "sort": "size",
+            "order": order,
+            "limit": _SUPERLATIVE_PLURAL_LIMIT if plural else _SUPERLATIVE_LIMIT,
+        }
 
     @staticmethod
     def _single_file_id(content: str) -> str | None:
@@ -341,6 +419,19 @@ class EchoLlmAdapter:
         entries = [entry for entry in files if isinstance(entry, dict)] if isinstance(files, list) else []
         if not entries:
             return "I couldn't find any files matching that."
+
+        # A ranked size lookup is a superlative, not a listing, so it is answered
+        # as one: "here are the 20 files you own, the first one is biggest" is
+        # technically true and completely useless.
+        superlative = _superlative_label(payload.get("ordered_by"))
+        if superlative is not None:
+            described = [_describe_ranked(entry) for entry in entries]
+            if len(described) == 1:
+                return f"Your {superlative} file is {described[0]}."
+            return f"Your {superlative} files are:\n" + "\n".join(
+                f"- {item}" for item in described
+            )
+
         lines = [
             f"- **{entry.get('file_name', '?')}** (`{entry.get('extension', '?')}`)"
             for entry in entries[:10]

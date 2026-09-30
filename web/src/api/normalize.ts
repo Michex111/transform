@@ -33,6 +33,7 @@ import type {
   AssistantConversationListResponse,
   AssistantMessage,
   AssistantMessageRole,
+  AssistantDeletionResponse,
   AssistantRecommendation,
   AssistantRecommendResponse,
   AssistantStatus,
@@ -922,11 +923,39 @@ export function normalizeAssistantArtifact(value: unknown): AssistantArtifact {
     // Every kind this bundle knows is passed through verbatim; anything else —
     // a kind added by a newer API, or plain junk — degrades to `unknown`
     // rather than being dropped, so the chip still renders something.
+    //
+    // `"delete"` must be listed explicitly or a pending deletion would collapse
+    // to the neutral `unknown` chip: the card that asks the user to confirm the
+    // deletion would never render, and the file would look merely *mentioned*.
     type:
-      rawType === "file" || rawType === "job" || rawType === "folder" ? rawType : "unknown",
+      rawType === "file" || rawType === "job" || rawType === "folder" || rawType === "delete"
+        ? rawType
+        : "unknown",
     id: asString(o.id),
     name: asString(o.name),
+    // `meta` is kept whole, including keys this bundle does not know about:
+    // the delete card reads `state`/`conversation_id`/`extension`/`size_bytes`
+    // out of it, and a future field must survive the round-trip rather than be
+    // stripped here.
     meta: asNullableRecord(o.meta),
+  }
+}
+
+/**
+ * The answer to an approve/reject of a deletion proposal.
+ *
+ * Only the three terminal states are accepted. An unrecognised state degrades
+ * to `"failed"` rather than to `"deleted"`: the card would otherwise claim a
+ * file was destroyed on the strength of a string it could not read, and this is
+ * the one place in the app where a false success is unrecoverable.
+ */
+export function normalizeAssistantDeletion(value: unknown): AssistantDeletionResponse {
+  const o = asObject(value)
+  const rawState = asString(o.state)
+  return {
+    file_id: asString(o.file_id),
+    file_name: asString(o.file_name),
+    state: rawState === "deleted" || rawState === "cancelled" ? rawState : "failed",
   }
 }
 

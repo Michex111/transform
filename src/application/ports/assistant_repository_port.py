@@ -7,7 +7,7 @@ failure must never take the feature down (see ``RedisAssistantQuota``).
 """
 
 from collections.abc import Sequence
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from src.domain.assistant.entities.conversation import Conversation, Message
 
@@ -49,6 +49,17 @@ class ConversationRepositoryPort(Protocol):
         self, conversation_id: str, *, limit: int = 100
     ) -> Sequence[Message]:
         """The conversation's messages in ascending position order."""
+        ...
+
+    async def update_message_meta(self, message_id: str, meta: dict[str, Any]) -> bool:
+        """Replace the stored ``meta`` of one message. False when the id is unknown.
+
+        Exists so the deletion handshake can flip a ``delete`` artifact's state
+        from ``pending`` to a resolved value on the message that carried it.
+        Rewriting the meta (rather than appending a new message) is what stops a
+        page reload from re-rendering a live Confirm prompt for a decision the
+        user already made.
+        """
         ...
 
 

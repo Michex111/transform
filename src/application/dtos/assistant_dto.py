@@ -33,6 +33,23 @@ class Artifact:
 
 
 @dataclass(frozen=True)
+class DeletionOutcome:
+    """The result of the user confirming or cancelling an AI-proposed deletion.
+
+    ``state`` uses the same four-string vocabulary as the ``delete`` artifact's
+    ``meta["state"]`` — ``pending`` / ``deleted`` / ``cancelled`` / ``failed`` —
+    so the SPA can re-render the record from either the confirmation response
+    or the stored artifact without translating between two vocabularies. A
+    response is never ``pending`` (the click resolves it), but the value is
+    documented here because this DTO is the one place the vocabulary is defined.
+    """
+
+    file_id: str
+    file_name: str
+    state: str
+
+
+@dataclass(frozen=True)
 class AssistantTextDelta:
     """Incremental assistant text to append to the message being rendered."""
 
