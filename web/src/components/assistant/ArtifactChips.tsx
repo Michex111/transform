@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { FileText, FolderSimple } from "@phosphor-icons/react";
 import type { AssistantArtifact } from "@/api/types";
 import { ConversionCard } from "@/components/assistant/ConversionCard";
+import { DeletionCard } from "@/components/assistant/DeletionCard";
 import {
   FileArtifactChip,
   artifactChipClass as CHIP_CLASS,
@@ -26,6 +27,12 @@ const VISIBLE_LIMIT = 4;
  * Jobs therefore get their own full-width `ConversionCard`, which shows live
  * progress and ends with Download / Save to Drive.
  *
+ * A *delete* artifact is different once more, and gets its own full-width
+ * `DeletionCard`: it is a question the model is asking on the user's behalf, and
+ * the answer destroys data, so it can never be squeezed into a chip row (nor
+ * counted toward the chip `+N more` cap, where the question could be hidden
+ * behind a toggle).
+ *
  * The file chips are still capped behind a `+N more` disclosure so a turn that
  * surfaced a dozen files cannot grow the bubble without bound; the toggle is a
  * real button and the full list is always in the DOM while collapsed, so nothing
@@ -36,10 +43,13 @@ export function ArtifactChips({ artifacts }: { artifacts: AssistantArtifact[] })
 
   if (artifacts.length === 0) return null;
 
-  // Jobs and files are laid out differently, so they are split before either is
-  // capped: a card is never squeezed into a chip row.
+  // Jobs, deletions and files are laid out differently, so they are split before
+  // the chips are capped: a card is never squeezed into a chip row.
   const jobs = artifacts.filter((artifact) => artifact.type === "job");
-  const rest = artifacts.filter((artifact) => artifact.type !== "job");
+  const deletions = artifacts.filter((artifact) => artifact.type === "delete");
+  const rest = artifacts.filter(
+    (artifact) => artifact.type !== "job" && artifact.type !== "delete",
+  );
 
   const hiddenCount = rest.length - VISIBLE_LIMIT;
   const visible = expanded || hiddenCount <= 0 ? rest : rest.slice(0, VISIBLE_LIMIT);
@@ -56,11 +66,21 @@ export function ArtifactChips({ artifacts }: { artifacts: AssistantArtifact[] })
         </ul>
       )}
 
+      {deletions.length > 0 && (
+        <ul className="w-full min-w-0 space-y-2" aria-label="Deletion requests">
+          {deletions.map((artifact) => (
+            <li key={`${artifact.type}:${artifact.id || artifact.name}`} className="min-w-0">
+              <DeletionCard artifact={artifact} />
+            </li>
+          ))}
+        </ul>
+      )}
+
       {rest.length > 0 && (
         // `w-full min-w-0` is the fix for the overflow: without it the flex row
         // reports an intrinsic min-width of its widest chip and refuses to wrap
         // inside the bubble's `max-w-[85%]`.
-        <ul className="flex w-full min-w-0 flex-wrap gap-2" aria-label="Referenced items">
+        <ul className="flex w-full min-w-0 flex-wrap gap-1" aria-label="Referenced items">
           {visible.map((artifact) => (
             <li
               key={`${artifact.type}:${artifact.id || artifact.name}`}
@@ -75,7 +95,7 @@ export function ArtifactChips({ artifacts }: { artifacts: AssistantArtifact[] })
                 type="button"
                 onClick={() => setExpanded((value) => !value)}
                 aria-expanded={expanded}
-                className="inline-flex min-w-0 max-w-full items-center rounded-lg border border-outline px-2 py-1.5 text-xs text-muted transition-colors hover:border-primary/60 hover:text-on-background pointer-coarse:min-h-11"
+                className="inline-flex min-w-0 max-w-full items-center rounded-lg border border-outline px-2 py-0.5 text-xs text-muted transition-colors hover:border-primary/60 hover:text-on-background pointer-coarse:min-h-11"
               >
                 {expanded ? "Show less" : `+${hiddenCount} more`}
               </button>

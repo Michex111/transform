@@ -183,6 +183,25 @@ describe("buildTranscript", () => {
     expect(transcript[1].artifacts.map((item) => item.id)).toEqual(["f1", "f2"]);
   });
 
+  it("carries a delete artifact through a replay without re-bucketing it", () => {
+    // The deletion card is rendered from this artifact, so a reload must keep it
+    // (and its `meta.state`, which decides whether the reload shows a live
+    // prompt or a resolved record) exactly as the server stored it.
+    const deletion = artifact({
+      type: "delete",
+      id: "f9",
+      name: "old.pdf",
+      meta: { state: "deleted", conversation_id: "c1", extension: "pdf" },
+    });
+    const transcript = buildTranscript([
+      user("delete that"),
+      toolRequest({ meta: { tool_calls: [{ id: "c", name: "delete_file", arguments: {} }] } }),
+      toolRow({ artifacts: [deletion] }),
+      answer("Done.", { artifacts: [deletion] }),
+    ]);
+    expect(transcript[1].artifacts).toEqual([deletion]);
+  });
+
   it("keeps a turn that has steps but no answer text (no empty bubble)", () => {
     const transcript = buildTranscript([user("q"), toolRequest(), toolRow()]);
     expect(transcript).toHaveLength(2);

@@ -13,6 +13,12 @@ from src.application.exceptions.file_system_exceptions import (
     FolderNotFoundError,
     StorageQuotaExceededError,
 )
+from src.application.services.file_listing import (
+    DEFAULT_FILE_SORT,
+    DEFAULT_FILE_SORT_ORDER,
+    FileSortKey,
+    FileSortOrder,
+)
 from src.application.services.file_service import FileService
 from src.domain.subscriptions.policies.tier_policy import TierPolicy
 from src.domain.subscriptions.value_object.tier import SubscriptionTier
@@ -22,6 +28,26 @@ from src.infrastructure.database.models import UserFileModel, UserFolderModel
 # ---------------------------------------------------------------------------
 # Fakes
 # ---------------------------------------------------------------------------
+
+def _sorted_files(
+    rows: list[UserFileModel], sort: FileSortKey, order: FileSortOrder
+) -> list[UserFileModel]:
+    """Order in-memory rows the way the SQL repository orders real ones.
+
+    Mirrors the repository's contract only where a test can observe it: the
+    requested key first, then ``id`` so the order is total. Missing values (a
+    fake row built without ``created_at``) sort as empty rather than raising,
+    because a fake that cannot hold a row the real schema allows would fail in
+    the fake rather than in the code under test.
+    """
+    keys = {
+        FileSortKey.NAME: lambda row: (row.file_name or "").casefold(),
+        FileSortKey.SIZE: lambda row: row.file_size_bytes or 0,
+        FileSortKey.DATE: lambda row: row.created_at.isoformat() if row.created_at else "",
+    }
+    ranked = sorted(rows, key=lambda row: (keys[sort](row), row.id))
+    return list(reversed(ranked)) if order is FileSortOrder.DESC else ranked
+
 
 class FakeFileRepo:
     def __init__(self) -> None:
@@ -49,9 +75,36 @@ class FakeFileRepo:
                 return row
         return None
 
-    async def list_by_user(self, user_id, *, folder_id=None, offset=0, limit=20):
+    async def list_by_user(
+        self, user_id, *, folder_id=None, offset=0, limit=20,
+        sort: FileSortKey = DEFAULT_FILE_SORT,
+        order: FileSortOrder = DEFAULT_FILE_SORT_ORDER,
+    ):
         rows = [f for f in self.files.values() if f.user_id == user_id and f.folder_id == folder_id]
-        rows.sort(key=lambda f: f.id)
+        rows = _sorted_files(rows, sort, order)
+        return rows[offset:offset + limit], len(rows)
+
+    async def list_all_by_user(
+        self, user_id, *, offset=0, limit=20,
+        sort: FileSortKey = DEFAULT_FILE_SORT,
+        order: FileSortOrder = DEFAULT_FILE_SORT_ORDER,
+    ):
+        rows = [f for f in self.files.values() if f.user_id == user_id]
+        rows = _sorted_files(rows, sort, order)
+        return rows[offset:offset + limit], len(rows)
+
+    async def search_by_name(
+        self, user_id, query, *, offset=0, limit=50,
+        sort: FileSortKey = DEFAULT_FILE_SORT,
+        order: FileSortOrder = DEFAULT_FILE_SORT_ORDER,
+    ):
+        needle = query.casefold()
+        rows = [
+            f
+            for f in self.files.values()
+            if f.user_id == user_id and needle in (f.file_name or "").casefold()
+        ]
+        rows = _sorted_files(rows, sort, order)
         return rows[offset:offset + limit], len(rows)
 
     async def move(self, file_id: str, folder_id: str | None) -> bool:
@@ -368,6 +421,41 @@ def test_list_files_requires_folder_ownership(service) -> None:
 
     with pytest.raises(FolderNotFoundError):
         _run(service.list_files(2, folder.id))
+
+
+def test_list_all_files_spans_folders_and_ranks_by_size(service, file_repo) -> None:
+    """``list_all_files`` is the drive-wide, ordered listing.
+
+    Distinct from ``list_files(user, None)``, which is the ROOT listing: the
+    largest file is often filed away, and answering from the root alone would be
+    a confident wrong answer. The ranking itself is the repository's job (pinned
+    against SQL separately); this pins that the service scopes by user, spans
+    folders, and passes the ordering through.
+    """
+    folder = _run(service.create_folder(user_id=1, name="Mine"))
+    _run(file_repo.save(user_id=1, file_key="k/small.pdf", file_name="small.pdf",
+                        file_size_bytes=100, mime_type="x"))
+    _run(file_repo.save(user_id=1, file_key="k/big.pdf", file_name="big.pdf",
+                        file_size_bytes=900_000, mime_type="x", folder_id=folder.id))
+    _run(file_repo.save(user_id=2, file_key="k/theirs.pdf", file_name="theirs.pdf",
+                        file_size_bytes=9_999_999, mime_type="x"))
+
+    rows, total = _run(
+        service.list_all_files(1, sort=FileSortKey.SIZE, order=FileSortOrder.DESC, limit=1)
+    )
+    assert total == 2  # the other user's file is not counted, let alone returned
+    assert [row.file_name for row in rows] == ["big.pdf"]
+
+    # A folder-scoped listing can be ranked too, and search matches can be.
+    root_rows, _ = _run(
+        service.list_files(1, None, sort=FileSortKey.SIZE, order=FileSortOrder.ASC)
+    )
+    assert [row.file_name for row in root_rows] == ["small.pdf"]
+    matches, match_total = _run(
+        service.search_files(1, ".pdf", sort=FileSortKey.SIZE, order=FileSortOrder.DESC)
+    )
+    assert match_total == 2
+    assert [row.file_name for row in matches] == ["big.pdf", "small.pdf"]
 
 
 # ---------------------------------------------------------------------------

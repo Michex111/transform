@@ -398,6 +398,11 @@ def test_status_requires_authentication(tmp_path) -> None:
         assert harness.client.post(
             "/api/v1/assistant/chat", json={"message": "hi"}
         ).status_code == 401
+        # The only endpoint that can delete a file is authenticated like the rest.
+        assert harness.client.post(
+            "/api/v1/assistant/conversations/conv-x/deletions",
+            json={"file_id": "anything", "approve": True},
+        ).status_code == 401
 
 
 def test_status_reports_the_resolved_backend_and_access(tmp_path) -> None:
@@ -566,6 +571,50 @@ def test_chat_streams_a_tool_call_and_persists_the_transcript(tmp_path) -> None:
 
     # ... and the model was handed the tool result, not left to guess.
     assert llm.calls[1][0][-1].role == "tool"
+
+
+def test_a_ranked_listing_hands_the_model_only_the_files_it_asked_for(tmp_path) -> None:
+    """End-to-end proof of the reported bug, through the real SQLite repository.
+
+    "What's the largest file in my drive?" used to hand the model the whole
+    drive, so it answered by listing everything. This drives the exact ranked
+    call the tool description prescribes and asserts what the model received:
+    one file, the largest, ranked by the database — and that the turn's chips
+    show that one file rather than the drive.
+    """
+    llm = FakeLlmPort(
+        [
+            tool_response(
+                "list_files",
+                {"all_folders": True, "sort": "size", "order": "desc", "limit": 1},
+            ),
+            text_response("Your largest file is the deck."),
+        ]
+    )
+    files = [
+        ("notes.txt", "objects/notes.txt", b"x" * 40, USER_ID),
+        ("deck.key", "objects/deck.key", b"y" * 4_000, USER_ID),
+        ("photo.png", "objects/photo.png", b"z" * 400, USER_ID),
+    ]
+    with assistant_app(str(tmp_path / "ranked.db"), seed_files=files, llm=llm) as harness:
+        response = _chat(harness, "what's the largest file in my drive?")
+        assert response.status_code == 200
+        frames = _frames(response)
+
+    assert [payload["id"] for name, payload in frames if name == "artifact"] == [
+        "objects/deck.key"
+    ]
+    assert frames[-1][1]["content"] == "Your largest file is the deck."
+
+    # What the model was actually given: one row, the largest one, and the
+    # ranking stated so it can describe the order honestly.
+    tool_message = llm.calls[1][0][-1]
+    assert tool_message.role == "tool"
+    payload = json.loads(tool_message.content)
+    assert [row["file_name"] for row in payload["files"]] == ["deck.key"]
+    assert payload["count"] == 1
+    assert payload["scope"] == "all_folders"
+    assert payload["ordered_by"] == {"key": "size", "direction": "desc"}
 
 
 def test_chat_surfaces_a_folder_artifact_after_create_folder(tmp_path) -> None:
@@ -956,3 +1005,130 @@ def test_the_model_cannot_convert_another_users_file(tmp_path) -> None:
     # The model is told, so it can explain, and the error frame is never used.
     assert "error" in llm.calls[1][0][-1].content
     assert frames[-1][1]["content"] == "I could not do that."
+
+
+# ---------------------------------------------------------------------------
+# AI-proposed deletions (the two-phase handshake)
+# ---------------------------------------------------------------------------
+#
+# The model can only propose; a file is removed only after the authenticated
+# owner confirms. These tests run the whole thing over the real API and the
+# real SQLite transcript, because that boundary is where the security model
+# either holds or does not.
+
+
+def _chat_and_propose_deletion(harness: Harness) -> str:
+    """Run one chat turn that proposes a deletion; return the conversation id.
+
+    The model is scripted to call ``delete_file`` and then answer, which is the
+    shape a real turn takes, so the proposal is persisted exactly as it would be
+    in production.
+    """
+    frames = _frames(_chat(harness, "please delete report.pdf"))
+    done = frames[-1][1]
+    assert done["artifacts"], "the delete proposal must reach the client"
+    return done["conversation_id"]
+
+
+def test_ai_deletion_waits_for_the_users_confirmation(tmp_path) -> None:
+    llm = FakeLlmPort(
+        [
+            tool_response("delete_file", {"file_id": "objects/report.pdf"}),
+            text_response("I need you to confirm the deletion."),
+        ]
+    )
+    files = [("report.pdf", "objects/report.pdf", minimal_pdf("bye"), USER_ID)]
+    with assistant_app(
+        str(tmp_path / "delete-flow.db"), seed_files=files, llm=llm
+    ) as harness:
+        frames = _frames(_chat(harness, "delete report.pdf"))
+        done = frames[-1][1]
+        conversation_id = done["conversation_id"]
+
+        # Phase 1: the model proposed — and NOTHING was deleted.
+        assert "objects/report.pdf" in harness.storage.objects
+        proposal = [item for item in done["artifacts"] if item["type"] == "delete"][0]
+        assert proposal["meta"]["state"] == "pending"
+        assert proposal["meta"]["conversation_id"] == conversation_id
+        assert proposal["meta"]["extension"] == "pdf"
+
+        # Phase 2: the authenticated owner confirms.
+        response = harness.client.post(
+            f"/api/v1/assistant/conversations/{conversation_id}/deletions",
+            json={"file_id": "objects/report.pdf", "approve": True},
+        )
+        assert response.status_code == 200
+        assert response.json() == {
+            "file_id": "objects/report.pdf",
+            "file_name": "report.pdf",
+            "state": "deleted",
+        }
+        assert "objects/report.pdf" not in harness.storage.objects
+
+        # The artifact is rewritten on the message that carried it, so a reload
+        # shows a resolved record rather than a live prompt.
+        detail = harness.client.get(
+            f"/api/v1/assistant/conversations/{conversation_id}"
+        ).json()
+        stored = [
+            artifact
+            for message in detail["messages"]
+            for artifact in (message["meta"] or {}).get("artifacts", [])
+            if artifact["type"] == "delete"
+        ]
+        assert stored[-1]["meta"]["state"] == "deleted"
+
+        # A second click on the same prompt is a 404, never a second delete.
+        again = harness.client.post(
+            f"/api/v1/assistant/conversations/{conversation_id}/deletions",
+            json={"file_id": "objects/report.pdf", "approve": True},
+        )
+        assert again.status_code == 404
+        assert again.json()["detail"]["code"] == "DELETION_NOT_FOUND"
+
+
+def test_ai_deletion_can_be_cancelled(tmp_path) -> None:
+    llm = FakeLlmPort(
+        [
+            tool_response("delete_file", {"file_id": "objects/report.pdf"}),
+            text_response("Waiting for your confirmation."),
+        ]
+    )
+    files = [("report.pdf", "objects/report.pdf", minimal_pdf("bye"), USER_ID)]
+    with assistant_app(
+        str(tmp_path / "delete-cancel.db"), seed_files=files, llm=llm
+    ) as harness:
+        conversation_id = _chat_and_propose_deletion(harness)
+        response = harness.client.post(
+            f"/api/v1/assistant/conversations/{conversation_id}/deletions",
+            json={"file_id": "objects/report.pdf", "approve": False},
+        )
+    assert response.status_code == 200
+    assert response.json()["state"] == "cancelled"
+    # Cancelling is a dismissal, not a deletion.
+    assert "objects/report.pdf" in harness.storage.objects
+
+
+def test_ai_deletion_of_an_unowned_conversation_is_404(tmp_path) -> None:
+    db_path = str(tmp_path / "delete-ownership.db")
+    with assistant_app(db_path) as harness:
+        foreign = _seed_conversation(db_path, OTHER_USER_ID)
+        response = harness.client.post(
+            f"/api/v1/assistant/conversations/{foreign}/deletions",
+            json={"file_id": "objects/report.pdf", "approve": True},
+        )
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == "DELETION_NOT_FOUND"
+
+
+def test_ai_deletion_without_a_proposal_is_404(tmp_path) -> None:
+    with assistant_app(str(tmp_path / "delete-missing.db")) as harness:
+        created = harness.client.post(
+            "/api/v1/assistant/conversations", json={"title": "No proposals"}
+        ).json()
+        response = harness.client.post(
+            f"/api/v1/assistant/conversations/{created['id']}/deletions",
+            json={"file_id": "objects/report.pdf", "approve": True},
+        )
+    assert response.status_code == 404
+    assert response.json()["detail"]["code"] == "DELETION_NOT_FOUND"

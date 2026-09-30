@@ -10,6 +10,8 @@ import asyncio
 import json
 from collections.abc import Sequence
 
+import pytest
+
 from src.application.ports.llm_port import (
     LlmMessage,
     LlmStreamChunk,
@@ -93,6 +95,89 @@ def test_a_listing_question_calls_list_files() -> None:
     calls = _tool_calls([_user("What files do I have?")])
     assert [call.name for call in calls] == ["list_files"]
     assert calls[0].arguments["limit"] == 20
+
+
+# ---------------------------------------------------------------------------
+# Ranking the drive
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "question",
+    [
+        "What's the largest file in my drive?",
+        "Which of my files are the largest?",
+        "show me my biggest file",
+    ],
+)
+def test_a_superlative_asks_for_a_RANKED_whole_drive_listing(question: str) -> None:
+    """A superlative is answered by the server ranking the drive, not by a page.
+
+    The rule engine cannot sort anything itself: the whole point of asking the
+    tool for ``all_folders`` + ``sort: size`` is that the *database* knows which
+    file is biggest. Answering from a listing it ordered itself would make the
+    offline backend state a fact it cannot know.
+    """
+    calls = _tool_calls([_user(question)])
+    assert [call.name for call in calls] == ["list_files"]
+    arguments = calls[0].arguments
+    assert arguments["all_folders"] is True
+    assert arguments["sort"] == "size"
+    assert arguments["order"] == "desc"
+
+
+def test_the_superlative_limit_matches_the_number_of_files_asked_about() -> None:
+    """"the largest file" is one file; "which of my files are the largest" is a few."""
+    singular = _tool_calls([_user("what's my largest file?")])[0].arguments
+    plural = _tool_calls([_user("which of my files are the largest?")])[0].arguments
+    assert singular["limit"] == 1
+    assert plural["limit"] == 3
+
+
+def test_a_smallest_question_ranks_ascending() -> None:
+    calls = _tool_calls([_user("what is my smallest file?")])
+    assert calls[0].arguments["order"] == "asc"
+
+
+def test_a_ranked_size_result_is_answered_as_a_superlative() -> None:
+    """The ranking is read from the tool result, never from the user's wording."""
+    messages = [
+        _user("what's my largest file?"),
+        LlmMessage(
+            role="tool",
+            content=json.dumps(
+                {
+                    "files": [{"file_id": "f1", "file_name": "video.mkv", "size_bytes": 9_000_000}],
+                    "count": 1,
+                    "ordered_by": {"key": "size", "direction": "desc"},
+                }
+            ),
+            tool_call_id="call_echo",
+            name="list_files",
+        ),
+    ]
+    reply = _reply(messages)
+    assert "largest" in reply
+    assert "video.mkv" in reply
+    assert "8.6 MB" in reply
+    # The listing phrasing would be "I found 1 file:" — which answers a question
+    # nobody asked.
+    assert "I found" not in reply
+
+
+def test_an_unranked_listing_is_never_described_as_a_superlative() -> None:
+    """Without ``ordered_by`` the rows are just a listing, whatever was asked.
+
+    This is the honesty guard: the wording prompts a superlative, but the result
+    carries no ranking, so claiming "your largest file" would invent a fact.
+    """
+    messages = [
+        _user("what's my largest file?"),
+        _list_files_result([{"file_id": "f1", "file_name": "video.mkv", "size_bytes": 9_000_000}]),
+    ]
+    reply = _reply(messages)
+    assert "largest" not in reply
+    assert "I found 1 file:" in reply
 
 
 def test_a_conversion_request_resolves_the_named_file_first() -> None:

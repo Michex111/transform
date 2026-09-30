@@ -8,7 +8,7 @@
 import type { CSSProperties } from "react";
 import { formatTint, formatVisual } from "@/lib/formatVisual";
 
-export type FormatThumbSize = "xs" | "sm" | "md" | "lg" | "xl";
+export type FormatThumbSize = "2xs" | "xs" | "sm" | "md" | "lg" | "xl";
 
 interface FormatThumbProps {
   /** Extension or label hint (case-insensitive), e.g. "pdf", ".PNG". */
@@ -27,13 +27,17 @@ interface FormatThumbProps {
   title?: string;
 }
 
-const DIM: Record<FormatThumbSize, number> = { xs: 20, sm: 28, md: 36, lg: 52, xl: 72 };
-const GLYPH: Record<FormatThumbSize, number> = { xs: 12, sm: 16, md: 20, lg: 26, xl: 34 };
-const RADIUS: Record<FormatThumbSize, number> = { xs: 4, sm: 6, md: 8, lg: 11, xl: 15 };
-const FOLD: Record<FormatThumbSize, number> = { xs: 6, sm: 8, md: 11, lg: 15, xl: 21 };
+// `2xs` (16px) exists for the compact chat chips, whose height is the point:
+// at 20px the tile alone forced the chip to ~30px. The remaining sizes are
+// untouched so nothing else in the product shifts.
+const DIM: Record<FormatThumbSize, number> = { "2xs": 16, xs: 20, sm: 28, md: 36, lg: 52, xl: 72 };
+const GLYPH: Record<FormatThumbSize, number> = { "2xs": 10, xs: 12, sm: 16, md: 20, lg: 26, xl: 34 };
+const RADIUS: Record<FormatThumbSize, number> = { "2xs": 3, xs: 4, sm: 6, md: 8, lg: 11, xl: 15 };
+const FOLD: Record<FormatThumbSize, number> = { "2xs": 5, xs: 6, sm: 8, md: 11, lg: 15, xl: 21 };
 
 /** Badge metrics per size — `null` means the tile is too small for text. */
 const BADGE: Record<FormatThumbSize, { h: number; font: number; pad: number } | null> = {
+  "2xs": null,
   xs: null,
   sm: null,
   md: { h: 15, font: 8, pad: 3 },

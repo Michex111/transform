@@ -23,6 +23,7 @@ import {
 import { createAssistantChatStore, type AssistantChatStore } from "@/lib/assistantChatStore";
 import { fileNameExtension } from "@/lib/format";
 import { useAssistantChat } from "@/lib/useAssistantChat";
+import { useChatColumnHeight } from "@/lib/useChatViewport";
 
 /** Navigation state the Files page uses to hand a file question to the assistant. */
 interface AssistantPrefill {
@@ -79,6 +80,11 @@ export function AssistantPage() {
 
   const drawerRef = useRef<HTMLElement>(null);
   const drawerTriggerRef = useRef<HTMLButtonElement>(null);
+
+  // The chat column is sized from a measurement of the *visible* viewport
+  // rather than from `dvh`. See the JSX below and `lib/chatViewport.ts`.
+  const chatColumnRef = useRef<HTMLDivElement>(null);
+  const chatHeight = useChatColumnHeight(chatColumnRef);
 
   // ---- Status ----
   useEffect(() => {
@@ -283,11 +289,27 @@ export function AssistantPage() {
   const isEmpty = chat.messages.length === 0 && !chat.streaming && !historyLoading;
 
   return (
-    // The `100dvh - …` height fills the shell's content area, so the subtracted
-    // amount tracks `main`'s vertical padding (AppShell). It is `py-5` now, so
-    // the old `11rem`/`6rem` (which assumed `py-6`) would leave the card 8px
-    // short of the bottom.
-    <div className="mx-auto flex h-[calc(100dvh-10.5rem)] min-h-[24rem] max-w-5xl gap-4 lg:h-[calc(100dvh-5.5rem)]">
+    // The column's height is MEASURED, never computed from a viewport unit.
+    //
+    // It used to be `h-[calc(100dvh-10.5rem)]`, which is correct everywhere
+    // except the platform that matters here: iOS Safari does not shrink `dvh`
+    // when the on-screen keyboard opens. Picking an attachment re-focuses the
+    // composer's textarea, the keyboard slides up, a `dvh` column keeps its full
+    // height, and its bottom — the composer — ends up underneath the keyboard.
+    // `useChatColumnHeight` reads `window.visualViewport` (which *does* shrink)
+    // and subtracts the shell above and below, so `dvh`/`vh` no longer appear
+    // anywhere in this column's chain. See `lib/chatViewport.ts`.
+    //
+    // `sm:min-h-[24rem]` is the only floor left, and it is deliberately scoped
+    // to `sm` and up: an unconditional floor is exactly what would force a short
+    // phone viewport taller than the space it has and push the composer out
+    // again. Measured (not clipped) height plus the transcript's
+    // `min-h-0 flex-1` is what keeps the composer pinned inside the column.
+    <div
+      ref={chatColumnRef}
+      style={chatHeight != null ? { height: chatHeight } : undefined}
+      className="mx-auto flex w-full max-w-5xl gap-4 sm:min-h-[24rem]"
+    >
       {/* Desktop rail */}
       <aside className="hidden w-64 shrink-0 overflow-hidden rounded-xl border border-outline bg-surface lg:flex">
         <ConversationList
