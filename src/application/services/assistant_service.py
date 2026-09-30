@@ -28,10 +28,12 @@ from src.application.dtos.assistant_dto import (
     AssistantEvent,
     AssistantTextDelta,
     AssistantToolEvent,
+    DeletionOutcome,
     RecommendationItem,
     RecommendationResult,
     SummaryResult,
 )
+from src.application.exceptions.file_system_exceptions import FileRecordNotFoundError
 from src.application.ports.assistant_model_port import AssistantModelResolver
 from src.application.ports.assistant_repository_port import (
     AssistantQuotaPort,
@@ -56,6 +58,7 @@ from src.domain.assistant.entities.conversation import (
 from src.domain.assistant.exceptions.assistant_exceptions import (
     AssistantAttachmentLimitExceeded,
     AssistantConversationNotFound,
+    AssistantDeletionNotFound,
     AssistantDisabledError,
     AssistantToolError,
 )
@@ -129,6 +132,36 @@ def _artifact_to_dict(artifact: Artifact) -> dict[str, Any]:
         "name": artifact.name,
         "meta": artifact.meta,
     }
+
+
+def _with_deletion_state(
+    meta: dict[str, Any] | None, file_id: str, state: str
+) -> dict[str, Any]:
+    """Return a copy of a message's ``meta`` with its ``delete`` artifact resolved.
+
+    Only the artifact that is still ``pending`` for ``file_id`` is touched, so
+    an earlier, already-resolved proposal for the same file keeps its own
+    history. Everything else in the message's meta is preserved verbatim,
+    because the same blob also carries the provider tool-call bookkeeping the
+    next request needs — dropping it would invalidate the replayed history.
+    """
+    updated = dict(meta or {})
+    raw = updated.get("artifacts")
+    if not isinstance(raw, list):
+        return updated
+    entries: list[Any] = []
+    for entry in raw:
+        if (
+            isinstance(entry, dict)
+            and entry.get("type") == "delete"
+            and entry.get("id") == file_id
+        ):
+            entry_meta = entry.get("meta")
+            if isinstance(entry_meta, dict) and entry_meta.get("state") == "pending":
+                entry = {**entry, "meta": {**entry_meta, "state": state}}
+        entries.append(entry)
+    updated["artifacts"] = entries
+    return updated
 
 
 def _auto_title(first_message: str) -> str:
@@ -432,7 +465,15 @@ class AssistantService:
                 yield AssistantToolEvent(name=call.name, label=label, status="running")
                 before = len(artifacts)
                 result = await self._toolbox.execute(
-                    call.name, call.arguments, user_id=user_id, tier=tier, artifacts=artifacts
+                    call.name,
+                    call.arguments,
+                    user_id=user_id,
+                    tier=tier,
+                    artifacts=artifacts,
+                    # The delete proposal records which chat it belongs to, so
+                    # the artifact can be resolved from a component (the mini
+                    # chat) that does not know the conversation id itself.
+                    conversation_id=conversation.id,
                 )
                 produced = list(artifacts[before:])
                 collected.extend(produced)
@@ -543,6 +584,103 @@ class AssistantService:
     # ------------------------------------------------------------------
     # Standalone operations
     # ------------------------------------------------------------------
+
+    async def resolve_deletion(
+        self,
+        *,
+        user_id: int,
+        conversation_id: str,
+        file_id: str,
+        approve: bool,
+    ) -> DeletionOutcome:
+        """Execute or dismiss an AI-proposed file deletion.
+
+        This is the SECOND half of the two-phase deletion handshake: the model
+        can only *propose* a deletion (see ``AssistantToolBox._delete_file``),
+        and the file is removed here only because the authenticated owner
+        clicked Confirm. Requiring a live ``pending`` proposal in the caller's
+        own conversation is what stops this from being a blind "delete any file
+        I own" API, and it makes a second confirm (or a cancel after a confirm)
+        resolve to not-found rather than acting twice.
+
+        Deliberately does NOT append a transcript message: an orphan
+        ``MessageRole.TOOL`` row would be silently dropped by
+        ``build_bounded_history`` (so it would be pointless), and appending a
+        USER row would fabricate speech the user never typed. Rewriting the
+        artifact's state via ``update_message_meta`` is the whole record — and
+        it is what stops a page reload from re-showing a live Confirm prompt
+        for a decision already made.
+        """
+        conversation = await self._conversations.get_conversation(
+            conversation_id, user_id
+        )
+        if conversation is None:
+            raise AssistantConversationNotFound("Conversation not found")
+
+        messages = await self._conversations.list_messages(conversation.id)
+        pending = self._pending_deletion(messages, file_id)
+        if pending is None:
+            raise AssistantDeletionNotFound(
+                "There is no deletion waiting to be confirmed for that file."
+            )
+        message, artifact = pending
+
+        if approve:
+            try:
+                file_name = await self._toolbox.delete_owned_file(user_id, file_id)
+                state = "deleted"
+            except FileRecordNotFoundError:
+                # The file was already removed between the proposal and the
+                # click (another tab, another device). "It is already gone" is a
+                # resolved outcome, not a server error, so it is reported as a
+                # failed attempt rather than raised.
+                file_name = artifact.name
+                state = "failed"
+        else:
+            # Cancelling deletes nothing and touches no file: it is purely the
+            # user dismissing the prompt.
+            file_name = artifact.name
+            state = "cancelled"
+
+        await self._conversations.update_message_meta(
+            message.id, _with_deletion_state(message.meta, file_id, state)
+        )
+        return DeletionOutcome(file_id=file_id, file_name=file_name, state=state)
+
+    @staticmethod
+    def _pending_deletion(
+        messages: Sequence[Message], file_id: str
+    ) -> tuple[Message, Artifact] | None:
+        """Newest assistant message carrying a ``pending`` delete artifact.
+
+        Scanned newest-first so a file proposed, cancelled and proposed again
+        resolves against the latest proposal. Only assistant messages are
+        considered: the artifact is recorded on the turn the model requested the
+        tool, and accepting it from any other role would let a crafted tool
+        result masquerade as a user-facing proposal.
+        """
+        for message in reversed(list(messages)):
+            if message.role is not MessageRole.ASSISTANT:
+                continue
+            raw = (message.meta or {}).get("artifacts")
+            if not isinstance(raw, list):
+                continue
+            for entry in raw:
+                if not isinstance(entry, dict):
+                    continue
+                if entry.get("type") != "delete" or entry.get("id") != file_id:
+                    continue
+                meta = entry.get("meta")
+                if not isinstance(meta, dict) or meta.get("state") != "pending":
+                    continue
+                name = entry.get("name")
+                return message, Artifact(
+                    type="delete",
+                    id=file_id,
+                    name=name if isinstance(name, str) else "",
+                    meta=dict(meta),
+                )
+        return None
 
     async def summarize_file(
         self, *, user_id: int, tier: SubscriptionTier, file_id: str

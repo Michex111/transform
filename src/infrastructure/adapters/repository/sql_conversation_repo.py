@@ -209,6 +209,22 @@ class SQLConversationRepository:
         rows.reverse()
         return [_to_message(row) for row in rows]
 
+    async def update_message_meta(self, message_id: str, meta: dict[str, Any]) -> bool:
+        """Replace the stored ``meta`` of one message. False when the id is absent.
+
+        A whole-column overwrite (rather than a JSON merge) because the caller
+        already holds the full, reconstructed meta dict from
+        :meth:`list_messages`, and a merge would leave a stale nested key behind
+        if the caller dropped one. ``None`` clears the column, matching the
+        storage layout used by :meth:`add_message`.
+        """
+        row = await self._session.get(AiMessageModel, message_id)
+        if row is None:
+            return False
+        row.meta = json.dumps(meta, default=str) if meta else None
+        await self._session.commit()
+        return True
+
     async def _next_position(self, conversation_id: str) -> int:
         result = await self._session.execute(
             select(func.count())

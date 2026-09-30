@@ -543,3 +543,65 @@ describe("fetchConversionOutput", () => {
   });
 });
 
+/* ------------------------------------------------------------------ *
+ * Assistant deletions
+ * ------------------------------------------------------------------ */
+
+describe("assistantResolveDeletion", () => {
+  it("POSTs the file id and the decision to the conversation's deletions route", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(200, { file_id: "f1", file_name: "report.pdf", state: "deleted" }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    stubLocalStorage();
+
+    const { api } = await loadClient();
+    const result = await api.assistantResolveDeletion("c1", { file_id: "f1", approve: true });
+
+    const [url, options] = fetchMock.mock.calls[0];
+    expect(url).toBe("/api/v1/assistant/conversations/c1/deletions");
+    expect((options as RequestInit).method).toBe("POST");
+    expect(JSON.parse((options as RequestInit).body as string)).toEqual({
+      file_id: "f1",
+      approve: true,
+    });
+    expect(result).toEqual({ file_id: "f1", file_name: "report.pdf", state: "deleted" });
+  });
+
+  it("sends approve:false for the keep path", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(200, { file_id: "f1", file_name: "report.pdf", state: "cancelled" }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    stubLocalStorage();
+
+    const { api } = await loadClient();
+    const result = await api.assistantResolveDeletion("c1", { file_id: "f1", approve: false });
+
+    expect(JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string)).toEqual({
+      file_id: "f1",
+      approve: false,
+    });
+    expect(result.state).toBe("cancelled");
+  });
+
+  it("surfaces a 404 DELETION_NOT_FOUND as a typed ApiError", async () => {
+    // FastAPI serialises an HTTPException's `detail` verbatim, so the code lives
+    // inside it — the shape the card branches on to decide between "resolved" and
+    // "retry".
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse(404, { detail: { code: "DELETION_NOT_FOUND", message: "No pending deletion" } }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    stubLocalStorage();
+
+    const { api } = await loadClient();
+    const err = (await api
+      .assistantResolveDeletion("c1", { file_id: "f1", approve: true })
+      .catch((e: unknown) => e)) as { code?: string; status?: number };
+
+    expect(err.status).toBe(404);
+    expect(err.code).toBe("DELETION_NOT_FOUND");
+  });
+});
+

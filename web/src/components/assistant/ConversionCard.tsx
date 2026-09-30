@@ -180,6 +180,11 @@ export function ConversionCard({ artifact }: { artifact: AssistantArtifact }) {
         // form, which is the same rule the rest of this app's touch affordances
         // use.
         //
+        // `min-h-9 min-w-9` (36px), not the app-wide 44px: two square icon
+        // buttons set the height of the row they sit in, and at 44px they read as
+        // oversized next to the 12px status line and the progress bar above them.
+        // 36px still clears the touch-target floor this app holds itself to.
+        //
         // Both buttons therefore need an explicit `aria-label`: hiding the text
         // with `display: none` removes it from the accessible name, so without
         // one a screen reader would announce nothing but "button".
@@ -190,7 +195,7 @@ export function ConversionCard({ artifact }: { artifact: AssistantArtifact }) {
             onClick={() => void download()}
             disabled={busy}
             aria-label={downloading ? `Downloading ${name}` : `Download ${name}`}
-            className="pointer-coarse:min-h-11 pointer-coarse:min-w-11"
+            className="pointer-coarse:min-h-9 pointer-coarse:min-w-9 pointer-coarse:px-2"
           >
             {downloading ? (
               <CircleNotch size={15} className="animate-spin" aria-hidden />
@@ -207,7 +212,7 @@ export function ConversionCard({ artifact }: { artifact: AssistantArtifact }) {
             onClick={() => void saveToDefaultFolder(job)}
             disabled={busy}
             aria-label={saving ? `Saving ${name} to your drive` : `Save ${name} to your drive`}
-            className="pointer-coarse:min-h-11 pointer-coarse:min-w-11"
+            className="pointer-coarse:min-h-9 pointer-coarse:min-w-9 pointer-coarse:px-2"
           >
             {/* A spinner, not just the word: once the label is hidden on touch,
                 the icon is the only thing that can report that a save started. */}

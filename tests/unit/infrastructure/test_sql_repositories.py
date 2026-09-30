@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from src.application.services.file_listing import FileSortKey, FileSortOrder
 from src.domain.assistant.entities.conversation import Message, MessageRole
 from src.domain.conversions.entities.conversion_job import ConversionJob
 from src.domain.conversions.value_object.conversion_type import ConversionType
@@ -705,6 +706,122 @@ def test_user_file_search_by_name_spans_folders_and_escapes_wildcards() -> None:
                 percent_rows, percent_total = await repo.search_by_name(user.id, "%")
                 assert percent_total == 1
                 assert [r.id for r in percent_rows] == ["c"]
+
+        asyncio.run(_run())
+
+
+def test_file_listings_can_be_ranked_by_size_across_folders() -> None:
+    """The reported bug, at the layer that has to get it right.
+
+    "What is my largest file?" is a question about the whole drive, so it cannot
+    go through ``list_by_user`` (whose omitted ``folder_id`` means the root) and
+    it cannot be sorted in the caller (which would only rank a page). Both halves
+    are pinned here: the drive-wide scope, and that the database applies the
+    ordering *before* ``offset``/``limit`` so ``limit=1`` really is one row.
+    """
+    with sqlite_session_factory() as factory:
+
+        async def _run() -> None:
+            async with factory() as session:
+                user = await _create_user(factory)
+                now = datetime.now(UTC)
+
+                def row(
+                    file_id: str, folder_id: str | None, name: str, size: int,
+                    created_at: datetime,
+                ) -> UserFileModel:
+                    return UserFileModel(
+                        id=file_id,
+                        user_id=user.id,
+                        folder_id=folder_id,
+                        file_key=f"objects/{file_id}",
+                        file_name=name,
+                        file_extension=name.rsplit(".", 1)[-1].lower(),
+                        file_size_bytes=size,
+                        mime_type="application/octet-stream",
+                        is_favorite=False,
+                        created_at=created_at,
+                    )
+
+                session.add_all(
+                    [
+                        UserFolderModel(
+                            id="f-decks", user_id=user.id, name="Decks",
+                            parent_id=None, created_at=now, updated_at=now,
+                        ),
+                        # The biggest file is filed away, NOT at the root — the
+                        # whole reason a root-only listing cannot answer this.
+                        row("small", None, "notes.txt", 2_000, now - timedelta(days=4)),
+                        row("biggest", "f-decks", "conference.key", 90_000_000, now - timedelta(days=3)),
+                        row("middle", None, "photo.png", 400_000, now - timedelta(days=2)),
+                    ]
+                )
+                await session.commit()
+                repo = SQLUserFileRepository(session)
+
+                rows, total = await repo.list_all_by_user(
+                    user.id, sort=FileSortKey.SIZE, order=FileSortOrder.DESC, limit=1
+                )
+                assert total == 3
+                assert [r.id for r in rows] == ["biggest"]
+
+                # Ascending is the other end of the same ranking.
+                rows, _ = await repo.list_all_by_user(
+                    user.id, sort=FileSortKey.SIZE, order=FileSortOrder.ASC, limit=2
+                )
+                assert [r.id for r in rows] == ["small", "middle"]
+
+                # The default is unchanged: newest first, root-scoped only.
+                root, root_total = await repo.list_by_user(user.id)
+                assert root_total == 2
+                assert [r.id for r in root] == ["middle", "small"]
+
+                # A folder listing can be ranked too.
+                decks, _ = await repo.list_by_user(
+                    user.id, folder_id="f-decks", sort=FileSortKey.NAME
+                )
+                assert [r.id for r in decks] == ["biggest"]
+
+        asyncio.run(_run())
+
+
+def test_file_listing_ranking_is_deterministic_under_ties() -> None:
+    """Equal sort keys must still produce one fixed order.
+
+    Two files of the same size are the normal case, not an edge case, and a
+    backend is free to return them in any order. Without the ``id`` tie-break,
+    "the largest file" could name a different file on the next call, which reads
+    to the user as the assistant changing its mind.
+    """
+    with sqlite_session_factory() as factory:
+
+        async def _run() -> None:
+            async with factory() as session:
+                user = await _create_user(factory)
+                now = datetime.now(UTC)
+                for file_id in ("z-last", "a-first", "m-middle"):
+                    session.add(
+                        UserFileModel(
+                            id=file_id,
+                            user_id=user.id,
+                            folder_id=None,
+                            file_key=f"objects/{file_id}",
+                            file_name=f"{file_id}.bin",
+                            file_extension="bin",
+                            file_size_bytes=5_000,
+                            mime_type="application/octet-stream",
+                            is_favorite=False,
+                            created_at=now,
+                        )
+                    )
+                await session.commit()
+                repo = SQLUserFileRepository(session)
+
+                first, _ = await repo.list_all_by_user(user.id, sort=FileSortKey.SIZE)
+                again, _ = await repo.list_all_by_user(user.id, sort=FileSortKey.SIZE)
+                ids = [r.id for r in first]
+                assert ids == [r.id for r in again]
+                assert ids == sorted(ids)
 
         asyncio.run(_run())
 

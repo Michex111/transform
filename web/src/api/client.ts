@@ -8,6 +8,7 @@ import {
   normalizeAssistantConversation,
   normalizeAssistantConversationDetail,
   normalizeAssistantConversationList,
+  normalizeAssistantDeletion,
   normalizeAssistantRecommend,
   normalizeAssistantStatus,
   normalizeAssistantStreamEvent,
@@ -51,6 +52,7 @@ import {
 import type {
   APIKeyCreateRequest,
   AssistantChatRequest,
+  AssistantDeletionRequest,
   AssistantRecommendRequest,
   AssistantStreamEvent,
   BatchDeleteRequest,
@@ -1376,6 +1378,30 @@ export class ApiClient {
       `/v1/assistant/conversations/${conversationId}/messages/${messageId}`,
       { method: 'DELETE' },
     )
+
+  /**
+   * Approve or reject the assistant's pending proposal to delete a file.
+   *
+   * The assistant may only *propose* a deletion; this call is the user actually
+   * deciding. `approve: true` deletes the file permanently, `false` cancels the
+   * proposal — the endpoint is the same either way, which is why this is one
+   * method with a boolean rather than two.
+   *
+   * The conversation id is in the path and the file id in the body because a
+   * proposal belongs to a conversation: the same file could in principle be
+   * proposed twice, and only the pair identifies which one is being answered. A
+   * pair with no pending proposal answers 404 `DELETION_NOT_FOUND`, which the
+   * card surfaces rather than retries.
+   *
+   * Being a non-GET, `request` clears the read cache on success, so the file
+   * listing and the drive breakdown are refetched fresh on the next navigation
+   * instead of serving a cached row for a file that no longer exists.
+   */
+  assistantResolveDeletion = (conversationId: string, body: AssistantDeletionRequest) =>
+    this.request<unknown>(`/v1/assistant/conversations/${conversationId}/deletions`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }).then(normalizeAssistantDeletion)
 
   /** Summarise one library file. */
   assistantSummarize = (fileId: string) =>

@@ -19,6 +19,12 @@ from src.application.services.assistant_tools import (
     format_category,
     format_label,
 )
+from src.application.services.file_listing import (
+    DEFAULT_FILE_SORT,
+    DEFAULT_FILE_SORT_ORDER,
+    FileSortKey,
+    FileSortOrder,
+)
 from src.domain.assistant.policies.assistant_policy import max_actions_per_turn
 from src.domain.conversions.entities.conversion_job import ConversionJob
 from src.domain.conversions.value_object.conversion_type import ConversionType
@@ -65,6 +71,15 @@ class FakeFileService:
         self.files = {row.id: row for row in files}
         self.list_calls: list[int] = []
         self.search_calls: list[str] = []
+        #: Recorded so a test can prove a whole-drive listing was asked for,
+        #: rather than inferred from the rows it happened to return.
+        self.list_all_calls: int = 0
+        #: Recorded so a test can prove the toolbox pushes the ranking down to
+        #: the service instead of sorting a fetched page itself.
+        self.order_calls: list[tuple[str, str]] = []
+        #: Recorded so a test can prove the delete tool never reaches the real
+        #: deletion path (it must only ever propose).
+        self.deleted: list[str] = []
 
     async def get_file(self, user_id: int, file_id: str) -> UserFileModel:
         row = self.files.get(file_id)
@@ -74,8 +89,26 @@ class FakeFileService:
             raise FileRecordNotFoundError()
         return row
 
+    def _ranked(
+        self,
+        rows: list[UserFileModel],
+        sort: FileSortKey,
+        order: FileSortOrder,
+    ) -> list[UserFileModel]:
+        """Order rows like the real repository does, and record the request."""
+        self.order_calls.append((sort.value, order.value))
+        keys = {
+            FileSortKey.NAME: lambda row: (row.file_name or "").casefold(),
+            FileSortKey.SIZE: lambda row: row.file_size_bytes or 0,
+            FileSortKey.DATE: lambda row: row.created_at.isoformat() if row.created_at else "",
+        }
+        ranked = sorted(rows, key=lambda row: (keys[sort](row), row.id))
+        return list(reversed(ranked)) if order is FileSortOrder.DESC else ranked
+
     async def list_files(
-        self, user_id: int, folder_id: str | None = None, *, offset: int = 0, limit: int = 20
+        self, user_id: int, folder_id: str | None = None, *, offset: int = 0, limit: int = 20,
+        sort: FileSortKey = DEFAULT_FILE_SORT,
+        order: FileSortOrder = DEFAULT_FILE_SORT_ORDER,
     ) -> tuple[list[UserFileModel], int]:
         self.list_calls.append(limit)
         rows = [
@@ -83,10 +116,23 @@ class FakeFileService:
             for row in self.files.values()
             if row.user_id == user_id and row.folder_id == folder_id
         ]
-        return rows[offset : offset + limit], len(rows)
+        ranked = self._ranked(rows, sort, order)
+        return ranked[offset : offset + limit], len(rows)
+
+    async def list_all_files(
+        self, user_id: int, *, offset: int = 0, limit: int = 20,
+        sort: FileSortKey = DEFAULT_FILE_SORT,
+        order: FileSortOrder = DEFAULT_FILE_SORT_ORDER,
+    ) -> tuple[list[UserFileModel], int]:
+        self.list_all_calls += 1
+        rows = [row for row in self.files.values() if row.user_id == user_id]
+        ranked = self._ranked(rows, sort, order)
+        return ranked[offset : offset + limit], len(rows)
 
     async def search_files(
-        self, user_id: int, query: str, *, offset: int = 0, limit: int = 50
+        self, user_id: int, query: str, *, offset: int = 0, limit: int = 50,
+        sort: FileSortKey = DEFAULT_FILE_SORT,
+        order: FileSortOrder = DEFAULT_FILE_SORT_ORDER,
     ) -> tuple[list[UserFileModel], int]:
         """Literal, case-insensitive substring search across every folder.
 
@@ -101,7 +147,8 @@ class FakeFileService:
             for row in self.files.values()
             if row.user_id == user_id and needle in row.file_name.casefold()
         ]
-        return rows[offset : offset + limit], len(rows)
+        ranked = self._ranked(rows, sort, order)
+        return ranked[offset : offset + limit], len(rows)
 
     async def create_folder(
         self, user_id: int, name: str, parent_id: str | None = None
@@ -121,6 +168,17 @@ class FakeFileService:
         row = await self.get_file(user_id, file_id)
         row.folder_id = folder_id
         return row
+
+    async def delete_file(self, user_id: int, file_id: str) -> None:
+        """Remove the row like the real service, so "still present" means something.
+
+        The tool must never call this; if a regression ever made it call, the
+        object would disappear from ``files`` and the "not called" assertion
+        would be the first thing to fail.
+        """
+        row = await self.get_file(user_id, file_id)
+        self.deleted.append(row.id)
+        del self.files[row.id]
 
 
 class FakeConversionService:
@@ -264,6 +322,8 @@ def _file(
     extension: str = "pdf",
     folder_id: str | None = None,
     key: str = "objects/report.pdf",
+    size_bytes: int = 1024,
+    created_at: datetime = NOW,
 ) -> UserFileModel:
     return UserFileModel(
         id=file_id,
@@ -272,10 +332,10 @@ def _file(
         file_key=key,
         file_name=name,
         file_extension=extension,
-        file_size_bytes=1024,
+        file_size_bytes=size_bytes,
         mime_type="application/pdf",
         is_favorite=False,
-        created_at=NOW,
+        created_at=created_at,
     )
 
 
@@ -330,6 +390,7 @@ def _run(
     arguments: dict | None = None,
     *,
     tier: SubscriptionTier = SubscriptionTier.FREE,
+    conversation_id: str | None = None,
 ) -> tuple[dict, list[Artifact]]:
     artifacts: list[Artifact] = []
     result = asyncio.run(
@@ -339,6 +400,7 @@ def _run(
             user_id=OWNER,
             tier=tier,
             artifacts=artifacts,
+            conversation_id=conversation_id,
         )
     )
     return result, artifacts
@@ -364,6 +426,7 @@ def test_every_tool_has_a_spec_a_label_and_a_schema() -> None:
         "list_recent_conversions",
         "create_folder",
         "move_file",
+        "delete_file",
         "get_account_overview",
     }
     for spec in specs.values():
@@ -488,6 +551,115 @@ def test_list_files_reports_a_missing_folder_with_the_known_names() -> None:
     result, _ = _run(box, "list_files", {"folder": "Taxes"})
     assert "error" in result
     assert "Invoices" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# Ranking ("what's my largest file?")
+# ---------------------------------------------------------------------------
+
+
+def test_list_files_ranks_the_whole_drive_by_size() -> None:
+    """The reported bug: "largest file" must return the largest file, and one of it.
+
+    A question about the drive is answered by the drive, ranked — not by a page
+    of files in whatever order they happened to come back, and not by the root
+    listing alone.
+    """
+    box = _toolbox(
+        files=[
+            _file("file-1", name="notes.txt", extension="txt", size_bytes=2_000),
+            _file("file-2", name="slides.key", size_bytes=90_000_000, folder_id="folder-1"),
+            _file("file-3", name="photo.png", extension="png", size_bytes=400_000),
+        ],
+        folders=[_folder("folder-1", "Decks")],
+    )
+    result, artifacts = _run(
+        box, "list_files", {"all_folders": True, "sort": "size", "order": "desc", "limit": 1}
+    )
+    assert "error" not in result
+    assert [row["file_name"] for row in result["files"]] == ["slides.key"]
+    assert result["count"] == 1
+    assert result["scope"] == "all_folders"
+    assert result["ordered_by"] == {"key": "size", "direction": "desc"}
+    assert [artifact.id for artifact in artifacts] == ["file-2"]
+
+
+def test_list_files_ranking_is_pushed_down_to_the_service() -> None:
+    """The DB ranks, not the toolbox.
+
+    Sorting a fetched page in Python is the defect this covers: with any page
+    size, "the largest file" would then mean "the largest of the first N rows",
+    which is a wrong answer stated confidently. The request has to reach the
+    repository, so the fake records what it was asked for.
+    """
+    box = _toolbox(files=[_file("file-1", size_bytes=10), _file("file-2", size_bytes=20)])
+    _run(box, "list_files", {"all_folders": True, "sort": "size", "order": "asc", "limit": 1})
+    service = box._files
+    assert isinstance(service, FakeFileService)
+    assert service.order_calls == [("size", "asc")]
+    assert service.list_all_calls == 1
+
+
+def test_list_files_without_all_folders_still_lists_only_the_root() -> None:
+    """``all_folders`` is opt-in: an unfiltered listing keeps its old meaning.
+
+    The assistant uses a bare listing to resolve a file the user just named, and
+    widening that to the whole drive would silently change which file "my
+    report" resolves to.
+    """
+    box = _toolbox(
+        files=[
+            _file("file-1", name="root.pdf"),
+            _file("file-2", name="filed.pdf", folder_id="folder-1", size_bytes=999_999),
+        ]
+    )
+    result, _ = _run(box, "list_files", {})
+    assert result["scope"] == "root"
+    assert [row["file_name"] for row in result["files"]] == ["root.pdf"]
+    service = box._files
+    assert isinstance(service, FakeFileService)
+    assert service.list_all_calls == 0
+
+
+def test_list_files_falls_back_to_the_default_order_for_a_nonsense_sort() -> None:
+    """A model-authored ``sort`` is a hint, exactly like ``limit``.
+
+    An unrecognised key must not raise (that ends the turn) and must not order
+    by something arbitrary either: it reads as the default, newest first.
+    """
+    box = _toolbox(files=[_file("file-1")])
+    result, _ = _run(box, "list_files", {"sort": "biggest", "order": "sideways"})
+    assert "error" not in result
+    assert result["ordered_by"] == {"key": "date", "direction": "desc"}
+    service = box._files
+    assert isinstance(service, FakeFileService)
+    assert service.order_calls == [("date", "desc")]
+
+
+def test_list_files_treats_a_non_boolean_all_folders_as_absent() -> None:
+    """Only an explicit ``true`` widens the listing.
+
+    ``"yes"``/``1``/``"true"`` are all things a JSON-writing model produces for a
+    boolean; accepting them would make the scope depend on how the model spelled
+    it, and a *widened* scope is the direction that leaks files the user did not
+    ask about.
+    """
+    box = _toolbox(files=[_file("file-1", name="root.pdf")])
+    for value in ("true", "yes", 1, [True]):
+        result, _ = _run(box, "list_files", {"all_folders": value})
+        assert result["scope"] == "root"
+
+
+def test_the_list_files_schema_publishes_the_sort_vocabulary() -> None:
+    """The model can only use the ranking if the schema tells it the words."""
+    spec = next(spec for spec in _toolbox().specs() if spec.name == "list_files")
+    properties = spec.parameters["properties"]
+    assert properties["sort"]["enum"] == [key.value for key in FileSortKey]
+    assert properties["order"]["enum"] == [order.value for order in FileSortOrder]
+    assert properties["all_folders"]["type"] == ["boolean"]
+    # The superlative recipe is spelled out, because it is the one case where the
+    # model has to combine three arguments to answer a one-line question.
+    assert "limit: 1" in spec.description
 
 
 def test_list_folders_lists_the_root_by_default() -> None:
@@ -856,6 +1028,164 @@ def test_move_file_emits_only_the_file_artifact_with_the_new_folder() -> None:
     _, artifacts = _run(box, "move_file", {"file_id": "file-1", "folder": "archive"})
     assert [artifact.type for artifact in artifacts] == ["file"]
     assert artifacts[0].meta["folder_id"] == "folder-1"
+
+
+# ---------------------------------------------------------------------------
+# Deletion proposals (never deletions)
+# ---------------------------------------------------------------------------
+#
+# The security model of the whole feature: the model can only *propose* a
+# deletion, and the removal happens later from an authenticated confirm click.
+# If any test here fails, a single prompt can remove user data with no human in
+# the loop.
+
+
+def test_delete_file_never_deletes_anything() -> None:
+    box = _toolbox(files=[_file("file-1")])
+    result, _ = _run(
+        box,
+        "delete_file",
+        {"file_id": "file-1", "reason": "user asked"},
+        conversation_id="conv-1",
+    )
+    service = box._files
+    assert isinstance(service, FakeFileService)
+    assert service.deleted == []
+    assert "file-1" in service.files
+    assert result["status"] == "awaiting_confirmation"
+
+
+def test_delete_file_emits_the_documented_artifact() -> None:
+    box = _toolbox(files=[_file("file-1", name="report.pdf", folder_id="folder-1")])
+    result, artifacts = _run(
+        box, "delete_file", {"file_id": "file-1"}, conversation_id="conv-9"
+    )
+    assert result == {
+        "status": "awaiting_confirmation",
+        "file_id": "file-1",
+        "file_name": "report.pdf",
+        "extension": "pdf",
+        "size_bytes": 1024,
+        "folder_id": "folder-1",
+    }
+    # Exactly the frozen cross-stack shape, conversation_id included: the
+    # components that render the chip (the floating mini chat) never learned the
+    # conversation id any other way.
+    assert artifacts == [
+        Artifact(
+            type="delete",
+            id="file-1",
+            name="report.pdf",
+            meta={
+                "state": "pending",
+                "conversation_id": "conv-9",
+                "extension": "pdf",
+                "size_bytes": 1024,
+                "folder_id": "folder-1",
+            },
+        )
+    ]
+
+
+def test_delete_file_without_a_conversation_still_emits_a_null_id() -> None:
+    """A direct ``execute`` call (the unit suite) has no conversation id."""
+    _, artifacts = _run(_toolbox(), "delete_file", {"file_id": "file-1"})
+    assert artifacts[0].meta["conversation_id"] is None
+
+
+def test_delete_file_rejects_another_users_file() -> None:
+    box = _toolbox(files=[_file("file-1", user_id=OTHER)])
+    result, artifacts = _run(
+        box, "delete_file", {"file_id": "file-1"}, conversation_id="conv-1"
+    )
+    assert "error" in result
+    assert artifacts == []
+
+
+def test_delete_file_rejects_an_unknown_file() -> None:
+    result, artifacts = _run(_toolbox(), "delete_file", {"file_id": "nope"})
+    assert "error" in result
+    assert artifacts == []
+
+
+def test_delete_file_requires_a_file_id() -> None:
+    result, artifacts = _run(_toolbox(), "delete_file", {})
+    assert "error" in result
+    assert artifacts == []
+
+
+def test_delete_file_budget_counts_started_conversions() -> None:
+    """One instruction must not be able to mix conversions and deletions freely."""
+    box = _toolbox(files=[_file("file-1")])
+    spent = [
+        Artifact(type="job", id="job-1", name="x.pdf", meta={"started": True})
+    ]
+    result = asyncio.run(
+        box.execute(
+            "delete_file",
+            {"file_id": "file-1"},
+            user_id=OWNER,
+            tier=SubscriptionTier.FREE,
+            artifacts=spent,
+            conversation_id="conv-1",
+        )
+    )
+    assert "error" in result
+    assert "at most 1" in result["error"]
+
+
+def test_delete_file_budget_counts_pending_deletions() -> None:
+    box = _toolbox(files=[_file("file-1"), _file("file-2", key="objects/2.pdf")])
+    spent = [Artifact(type="delete", id="file-2", name="b.pdf", meta={"state": "pending"})]
+    result = asyncio.run(
+        box.execute(
+            "delete_file",
+            {"file_id": "file-1"},
+            user_id=OWNER,
+            tier=SubscriptionTier.FREE,
+            artifacts=spent,
+            conversation_id="conv-1",
+        )
+    )
+    assert "error" in result
+    assert "at most 1" in result["error"]
+
+
+def test_read_only_artifacts_do_not_consume_the_delete_budget() -> None:
+    """A listed file or a reported job is not an action, so it costs nothing."""
+    box = _toolbox(files=[_file("file-1")])
+    reported = [
+        Artifact(type="file", id=f"f-{index}", name="x.pdf", meta={"extension": "pdf"})
+        for index in range(max_actions_per_turn(SubscriptionTier.FREE) * 2)
+    ]
+    result = asyncio.run(
+        box.execute(
+            "delete_file",
+            {"file_id": "file-1"},
+            user_id=OWNER,
+            tier=SubscriptionTier.FREE,
+            artifacts=reported,
+            conversation_id="conv-1",
+        )
+    )
+    assert "error" not in result
+
+
+def test_delete_file_describe_never_claims_a_deletion() -> None:
+    result, _ = _run(
+        _toolbox(), "delete_file", {"file_id": "file-1"}, conversation_id="conv-1"
+    )
+    summary = AssistantToolBox.describe("delete_file", result)
+    assert "report.pdf" in summary
+    assert "deleted" not in summary.lower()
+    assert "confirm" in summary.lower()
+
+
+def test_delete_file_spec_is_closed_and_takes_a_reason() -> None:
+    spec = next(spec for spec in _toolbox().specs() if spec.name == "delete_file")
+    assert spec.parameters["additionalProperties"] is False
+    assert spec.parameters["required"] == ["file_id"]
+    assert set(spec.parameters["properties"]) == {"file_id", "reason"}
 
 
 # ---------------------------------------------------------------------------
