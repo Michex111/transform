@@ -74,7 +74,7 @@ class JobEventSubscriber:
         while not terminal_seen:
             try:
                 entries = await self.redis_client.xread(  # type: ignore[arg-type]
-                    {self.stream_name: str(last_id)}, count=50, block=5000
+                    {self.stream_name: last_id}, count=50, block=5000
                 )
                 backoff = _REPLAY_RETRY_BASE_DELAY  # recovered — reset the backoff
             except Exception as e:  # noqa: BLE001

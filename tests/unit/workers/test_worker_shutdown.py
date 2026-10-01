@@ -60,7 +60,7 @@ def test_converter_worker_registers_sigterm_and_stops_gracefully(monkeypatch) ->
 
     # The handler only flips the run flag, so the job being processed still
     # finishes and is ACKed before the loop exits.
-    assert worker._running is False
+    assert worker._running is False     # pyrefly: ignore[unnecessary-comparison]
 
 
 def test_cleanup_worker_registers_sigterm_and_stops_gracefully(monkeypatch) -> None:
@@ -111,7 +111,7 @@ def test_signal_handler_falls_back_when_the_loop_cannot_register(monkeypatch) ->
 
     assert signal.SIGTERM in registered
     registered[signal.SIGTERM](signal.SIGTERM, None)  # type: ignore[operator]
-    assert worker._running is False
+    assert worker._running is False     # pyrefly: ignore[unnecessary-comparison]
 
 
 def test_close_queue_client_closes_the_redis_client() -> None:

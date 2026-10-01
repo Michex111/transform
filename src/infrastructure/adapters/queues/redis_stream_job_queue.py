@@ -215,6 +215,8 @@ class JobStreamConsumer(RedisStreamQueue):
         that key is what ``acknowledge_job``/``fail_job`` are given back, and
         it is what routes the ACK to the stream the message actually came from.
         """
+        # The single coercion point for the raw payload: every field below is
+        # read from `job`, so none of them needs its own `str()`.
         raw = dict(fields)
         job = {str(k): str(v) for k, v in raw.items()}
 
@@ -222,20 +224,20 @@ class JobStreamConsumer(RedisStreamQueue):
         self._message_streams[delivery_key] = stream
 
         conversation_job = ConversionJob(
-            job_id=str(job["job_id"]),
+            job_id=job["job_id"],
             conversion=ConversionType(
-                source_format=str(job["source_format"]),
-                target_format=str(job["target_format"]),
+                source_format=job["source_format"],
+                target_format=job["target_format"],
             ),
-            input_file=str(job["input_key"]),
-            object_key=str(job["object_key"]),
+            input_file=job["input_key"],
+            object_key=job["object_key"],
             output_file="",  # This will be set later when the job is completed
             status=JobStatus.PENDING,
             user_id=int(job["user_id"]) if job.get("user_id") else None,
             # Client-side (FENCR) encryption metadata. ``client_encrypted`` is a
             # "true"/"false" string in the stream; parse it back to a bool.
             client_encrypted=JobMessage._to_bool(job.get("client_encrypted")),
-            data_key_wrapped=str(job["data_key_wrapped"]) if job.get("data_key_wrapped") else None,
+            data_key_wrapped=job["data_key_wrapped"] if job.get("data_key_wrapped") else None,
         )
 
         return delivery_key, conversation_job

@@ -231,7 +231,9 @@ class SQLConversationRepository:
             .select_from(AiMessageModel)
             .where(AiMessageModel.conversation_id == conversation_id)
         )
-        return int(result.scalar_one())
+        # Coerced at the driver boundary: ``func.count()`` is annotated ``int``,
+        # but the annotation is not a runtime guarantee across backends.
+        return int(result.scalar_one())  # pyrefly: ignore[unnecessary-type-conversion]
 
     async def _touch_conversation(self, conversation_id: str) -> None:
         conversation = await self._session.get(AiConversationModel, conversation_id)

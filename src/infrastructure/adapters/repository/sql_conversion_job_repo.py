@@ -402,7 +402,9 @@ class SQLConversionJobRepository:
                 )
             )
         ).scalar_one()
-        return int(deletable), int(active)
+        # Both counts are coerced at the driver boundary: the annotation is not
+        # a runtime guarantee across backends (see `sql_user_file_repo`).
+        return int(deletable), int(active)  # pyrefly: ignore[unnecessary-type-conversion]
 
     async def delete_history_range(
         self, user_id: int, since: datetime | None

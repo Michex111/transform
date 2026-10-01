@@ -347,7 +347,7 @@ class SQLUserFileRepository:
             select(func.coalesce(func.sum(UserFileModel.file_size_bytes), 0))
             .where(UserFileModel.user_id == user_id)
         )
-        return int(result.scalar_one())
+        return int(result.scalar_one())  # pyrefly: ignore[unnecessary-type-conversion]
 
     async def lock_user_for_update(self, user_id: int) -> None:
         """Take a row lock on the user, serialising storage commits for them.

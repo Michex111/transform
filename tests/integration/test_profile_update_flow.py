@@ -241,7 +241,8 @@ def count_owned_rows(db_path: str, user_id: int) -> dict[str, int]:
             async with factory() as session:
                 async def count(model, *clauses) -> int:
                     stmt = select(func.count()).select_from(model).where(*clauses)
-                    return int((await session.execute(stmt)).scalar_one())
+                    # Coerced at the DB driver boundary, like the repositories do.
+                    return int((await session.execute(stmt)).scalar_one())  # pyrefly: ignore[unnecessary-type-conversion]
 
                 return {
                     "jobs": await count(

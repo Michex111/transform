@@ -28,7 +28,9 @@ class ConversionJobMessage:
             input_key=job.input_file,
             object_key=job.object_key,
             user_id=str(job.user_id) if job.user_id is not None else None,
-            client_encrypted=bool(job.client_encrypted),
+            # Coerced at the entity boundary: the declared type is not a
+            # runtime guarantee for a value that came from the database.
+            client_encrypted=bool(job.client_encrypted),  # pyrefly: ignore[unnecessary-type-conversion]
             data_key_wrapped=job.data_key_wrapped,
         )
 

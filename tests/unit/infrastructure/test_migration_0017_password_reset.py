@@ -97,7 +97,7 @@ def _indexes(engine: sa.Engine) -> dict[str, bool]:
         # compare with ``is True`` / ``is False``, which ``1`` fails. Do not
         # "simplify" this away to satisfy a type checker.
         return {
-            name: bool(idx.get("unique"))
+            name: bool(idx.get("unique"))  # pyrefly: ignore[unnecessary-type-conversion]
             for idx in sa.inspect(connection).get_indexes("users")
             if (name := idx["name"]) is not None
         }
