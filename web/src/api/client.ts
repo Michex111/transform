@@ -37,6 +37,7 @@ import {
   normalizeForgotPassword,
   normalizeGuestJob,
   normalizePhoneStatus,
+  normalizePaymentMethodList,
   normalizePaymentMethodSession,
   normalizePortal,
   normalizePresignedUrls,
@@ -1376,6 +1377,39 @@ export class ApiClient {
     this.request<unknown>('/v1/subscription/payment-method-session', { method: 'POST' }).then(
       normalizePaymentMethodSession,
     )
+  /**
+   * The account's saved cards, for the in-app card list.
+   *
+   * Deliberately **uncached**, unlike `subscriptionStatus`. A card can also be
+   * added out of band — the Payment Element's `confirmSetup` talks to Stripe
+   * directly and never passes through this client — so a remembered list would
+   * keep showing the pre-add cards for its whole TTL with nothing to invalidate
+   * it.
+   */
+  listPaymentMethods = () =>
+    this.request<unknown>('/v1/subscription/payment-methods').then(normalizePaymentMethodList)
+  /**
+   * Make one saved card the default for future charges.
+   *
+   * Answers with the **new** list, so the caller updates state from the response
+   * rather than issuing a second, racier read.
+   */
+  setDefaultPaymentMethod = (id: string) =>
+    this.request<unknown>(`/v1/subscription/payment-methods/${id}/default`, {
+      method: 'POST',
+    }).then(normalizePaymentMethodList)
+  /**
+   * Detach one saved card.
+   *
+   * Answers 409 (and this client raises `ApiError`) when the card is the
+   * customer's current default while an active subscription depends on it; the
+   * server's message tells the user to choose another default first, so the
+   * caller must show `err.message` rather than a generic failure.
+   */
+  removePaymentMethod = (id: string) =>
+    this.request<unknown>(`/v1/subscription/payment-methods/${id}`, {
+      method: 'DELETE',
+    }).then(normalizePaymentMethodList)
 
   // ---- API Keys ----
   createApiKey = (body: APIKeyCreateRequest) =>

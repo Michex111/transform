@@ -52,6 +52,7 @@ import {
   normalizeFolderList,
   normalizeForgotPassword,
   normalizeGuestJob,
+  normalizePaymentMethodList,
   normalizePaymentMethodSession,
   normalizePhoneStatus,
   normalizePortal,
@@ -1354,5 +1355,55 @@ describe("wallet split, plan change, payment method session", () => {
     expect(
       normalizePaymentMethodSession({ client_secret: null, enabled: false }),
     ).toEqual({ client_secret: null, enabled: false });
+  });
+
+  it("normalizePaymentMethodList degrades a malformed body to no cards, not undefined", () => {
+    // The card list renders `methods.length` and `methods.map`, so an absent
+    // array used to be a whole-page crash rather than an empty section.
+    expect(normalizePaymentMethodList({})).toEqual({ methods: [], enabled: false });
+    expect(normalizePaymentMethodList(null).methods).toEqual([]);
+    expect(normalizePaymentMethodList({ methods: "nope" }).methods).toEqual([]);
+    // A malformed body cannot be trusted as an enabled card list, so it reads
+    // as "no card UI" rather than an empty-but-live list.
+    expect(normalizePaymentMethodList({ enabled: "true" }).enabled).toBe(false);
+  });
+
+  it("normalizePaymentMethodList coerces each card and ignores unknown fields", () => {
+    const list = normalizePaymentMethodList({
+      enabled: true,
+      methods: [
+        {
+          id: "pm_1",
+          brand: "visa",
+          last4: "4242",
+          exp_month: 4,
+          exp_year: 2032,
+          is_default: true,
+          // A field this SPA does not know about yet must not crash the list.
+          wallet: { type: "apple_pay" },
+        },
+        // A half-populated row still renders rather than throwing.
+        { id: "pm_2", exp_month: "not-a-number" },
+      ],
+    });
+
+    expect(list.enabled).toBe(true);
+    expect(list.methods[0]).toEqual({
+      id: "pm_1",
+      brand: "visa",
+      last4: "4242",
+      exp_month: 4,
+      exp_year: 2032,
+      is_default: true,
+    });
+    expect(list.methods[1]).toEqual({
+      id: "pm_2",
+      brand: "",
+      last4: "",
+      exp_month: 0,
+      exp_year: 0,
+      // Absent `is_default` reads as "not the default", never `undefined`.
+      is_default: false,
+    });
   });
 });

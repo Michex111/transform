@@ -799,6 +799,35 @@ export interface PaymentMethodSessionResponse {
   enabled: boolean
 }
 
+/**
+ * One saved card on the account.
+ *
+ * Only what the card list renders plus the flag it acts on. `is_default` is
+ * computed by the server from the customer's invoice settings, so the client
+ * never has to guess which card a renewal will charge.
+ */
+export interface SavedPaymentMethodResponse {
+  id: string
+  brand: string
+  last4: string
+  exp_month: number
+  exp_year: number
+  is_default: boolean
+}
+
+/**
+ * The caller's saved cards.
+ *
+ * `enabled: false` is an ordinary state, not an error: Stripe is unconfigured,
+ * or the account has no customer yet (a Free user has none until checkout).
+ * Mirrors {@link PaymentMethodSessionResponse}, so the billing page can show an
+ * explanatory line rather than an empty card list.
+ */
+export interface PaymentMethodListResponse {
+  methods: SavedPaymentMethodResponse[]
+  enabled: boolean
+}
+
 // ---- API Keys ----
 export interface APIKeyCreateRequest {
   name: string

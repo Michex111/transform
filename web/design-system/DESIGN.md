@@ -95,5 +95,7 @@ Checkout renders Stripe's payment form inside `/app/checkout`, framed by the app
 
 That is a cross-language copy with no compiler behind it: **changing `--color-background` or `--color-primary` here means updating `_BRAND_BACKGROUND` / `_BRAND_PRIMARY` there too.** `tests/unit/infrastructure/test_stripe_embedded_checkout.py` reads this file's `@theme` block and fails if the two disagree. Stripe's `border_style` offers only pill/rectangular/rounded, so the form's 6px `rounded` is the closest available to the 8px used here — deliberate, not drift.
 
+The Billing page's card form is a **second** Stripe surface with the same hazard: it mounts Stripe's Payment Element (against a Customer Session) rather than an embedded Checkout page, so it is themed through Stripe's `appearance` API instead of `branding_settings`. Its palette and input rules live in `web/src/lib/stripeAppearance.ts` — literal hex again, because the Element's iframe cannot resolve `var(--token)` — and `web/src/lib/stripeAppearance.test.ts` reads the `@theme` block above and fails if any of those literals stops matching a token (or if a hex appears that is not a token at all). Change `--color-primary`, `--color-background`, `--color-on-background`, `--color-error`, `--color-surface`, `--color-outline`, `--color-muted` or `--font-body` here and update that file too.
+
 ## Copy voice
 Active voice, sentence case, plain verbs. Name things by what people control. Errors explain what happened and how to fix it. Empty states are an invitation to act.

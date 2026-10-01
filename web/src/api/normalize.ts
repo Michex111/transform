@@ -64,6 +64,7 @@ import type {
   ForgotPasswordResponse,
   GuestJobResponse,
   HistoryDeleteRange,
+  PaymentMethodListResponse,
   PaymentMethodSessionResponse,
   PhoneVerificationStatusResponse,
   PortalResponse,
@@ -799,6 +800,37 @@ export function normalizePaymentMethodSession(value: unknown): PaymentMethodSess
   const o = asObject(value)
   return {
     client_secret: asNullableString(o.client_secret),
+    enabled: asBoolean(o.enabled, false),
+  }
+}
+
+/**
+ * The account's saved cards.
+ *
+ * `methods` defaults to `[]`, never `undefined`: the section renders
+ * `methods.length`, and an absent array would throw rather than show an empty
+ * list. Each row is coerced to the fields the list renders — an unknown extra
+ * key is simply ignored, so a future server field cannot crash an older SPA.
+ *
+ * `enabled` defaults to **false** for the same reason as
+ * `normalizePaymentMethodSession`: a malformed body is not a usable card list,
+ * and claiming cards exist would be a lie. The section then shows its
+ * explanatory line instead.
+ */
+export function normalizePaymentMethodList(value: unknown): PaymentMethodListResponse {
+  const o = asObject(value)
+  return {
+    methods: asArray<unknown>(o.methods).map((row) => {
+      const r = asObject(row)
+      return {
+        id: asString(r.id),
+        brand: asString(r.brand),
+        last4: asString(r.last4),
+        exp_month: asNumber(r.exp_month),
+        exp_year: asNumber(r.exp_year),
+        is_default: asBoolean(r.is_default, false),
+      }
+    }),
     enabled: asBoolean(o.enabled, false),
   }
 }

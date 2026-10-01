@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import { Coins } from "@phosphor-icons/react";
+import { Coins, Receipt } from "@phosphor-icons/react";
 import { useAuth } from "@/auth/AuthContext";
 import { useToast } from "@/auth/ToastContext";
 import { Button, Card, Skeleton, SkeletonText } from "@/components/ui";
@@ -8,6 +8,7 @@ import { Modal } from "@/components/Modal";
 import { trustedExternalUrl } from "@/lib/download";
 import { formatDate, formatDateOrNull } from "@/lib/format";
 import { availableCredits, creditWalletRows } from "@/lib/creditWallet";
+import { tierLabel } from "@/lib/planChange";
 import { embeddedCheckoutEnabled } from "@/lib/stripeCheckout";
 import { PlanChangeCard } from "./billing/PlanChangeCard";
 import { PaymentMethodSection } from "./billing/PaymentMethodSection";
@@ -29,6 +30,7 @@ export function BillingPage() {
   const [history, setHistory] = useState<CreditTransactionResponse[]>([]);
   const [loading, setLoading] = useState(true);
   const [portalLoading, setPortalLoading] = useState(false);
+  const [invoicesLoading, setInvoicesLoading] = useState(false);
   const [cancelOpen, setCancelOpen] = useState(false);
   const [cancelling, setCancelling] = useState(false);
 
@@ -130,17 +132,23 @@ export function BillingPage() {
     }
   }
 
-  async function openPortal() {
-    setPortalLoading(true);
+  /**
+   * Open the Stripe Customer Portal, where invoices and receipts live — it is
+   * the only place they are served and it cannot be embedded.
+   *
+   * Shared by the "Manage subscription" button and the quieter "Invoices & tax"
+   * link, so both get the same URL guard and the same recovery: the portal needs
+   * an existing Stripe customer, and a Free account has none, so a 404 sends them
+   * to pick a plan rather than showing a raw error.
+   */
+  async function openCustomerPortal(setBusy: (busy: boolean) => void) {
+    setBusy(true);
     try {
       const { portal_url } = await client.createPortalSession();
       const target = trustedExternalUrl(portal_url);
       if (!target) throw new Error("The billing portal link was not valid. Please try again.");
       window.location.assign(target);
     } catch (err) {
-      // The portal requires an existing Stripe customer. A user with no paid
-      // subscription (Free tier) has no customer yet, so guide them to upgrade
-      // instead of showing a raw error.
       const message = err instanceof Error ? err.message : "";
       if (message.toLowerCase().includes("no stripe customer")) {
         navigate("/pricing");
@@ -148,9 +156,12 @@ export function BillingPage() {
         error(message || "Could not open billing portal");
       }
     } finally {
-      setPortalLoading(false);
+      setBusy(false);
     }
   }
+
+  const openPortal = () => openCustomerPortal(setPortalLoading);
+  const openInvoices = () => openCustomerPortal(setInvoicesLoading);
 
   async function cancel() {
     if (cancelling) return;
@@ -195,7 +206,9 @@ export function BillingPage() {
             <div>
               <p className="text-xs font-semibold uppercase tracking-wide text-muted">Current plan</p>
               <div className="mt-1 flex items-center gap-2">
-                <h2 className="font-display text-2xl font-semibold">{plan?.tier ?? "Free"}</h2>
+                {/* `tierLabel` turns the raw enum (`PRO_PLUS`) into "Pro Plus";
+                    the API's tier values are identifiers, not copy. */}
+                <h2 className="font-display text-2xl font-semibold">{tierLabel(plan?.tier)}</h2>
                 <span className="rounded-full bg-success/15 px-2.5 py-0.5 text-xs font-semibold text-success">
                   {plan?.status ?? "Active"}
                 </span>
@@ -204,15 +217,29 @@ export function BillingPage() {
                 <p className="mt-1 text-sm text-muted">Renews {formatDate(plan.current_period_end)}</p>
               )}
             </div>
-            <div className="flex items-center gap-2">
-              <Button variant="secondary" onClick={openPortal} disabled={portalLoading}>
-                {portalLoading ? "Opening…" : "Manage subscription"}
-              </Button>
-              {plan && plan.tier !== "FREE" && (
-                <Button variant="destructive" onClick={() => setCancelOpen(true)}>
-                  Cancel subscription
+            <div className="flex flex-col items-end gap-1.5">
+              <div className="flex items-center gap-2">
+                <Button variant="secondary" onClick={openPortal} disabled={portalLoading}>
+                  {portalLoading ? "Opening…" : "Manage subscription"}
                 </Button>
-              )}
+                {plan && plan.tier !== "FREE" && (
+                  <Button variant="destructive" onClick={() => setCancelOpen(true)}>
+                    Cancel subscription
+                  </Button>
+                )}
+              </div>
+              {/* Deliberately quieter than everything around it: changing the plan
+                  is the page's primary action, and invoices are a lookup, not a
+                  decision. Guarded by the same `trustedExternalUrl` check. */}
+              <button
+                type="button"
+                onClick={openInvoices}
+                disabled={invoicesLoading}
+                className="inline-flex items-center gap-1 text-xs font-medium text-muted transition-colors hover:text-on-background disabled:opacity-50"
+              >
+                <Receipt size={13} aria-hidden />
+                {invoicesLoading ? "Opening…" : "Invoices & tax"}
+              </button>
             </div>
         </div>
         )}
