@@ -324,14 +324,24 @@ host's build environment variable always wins over it.
 
 - Set `ENVIRONMENT=production`, a strong `SECRET_KEY` (>=32 random chars), and
   explicit `ALLOWED_ORIGINS` (no `*`) — the app refuses to boot otherwise.
-- **Add the SPA origin** (`https://transform-web.onrender.com`) to both
-  `ALLOWED_ORIGINS` and `S3_CORS_ALLOWED_ORIGINS`, otherwise every browser call
-  from the deployed UI fails the CORS preflight (and direct uploads are blocked).
+- **Add every SPA origin** (`https://transform-to.com`, the canonical custom
+  domain, plus `https://transform-web.onrender.com` which still serves the site)
+  to both `ALLOWED_ORIGINS` and `S3_CORS_ALLOWED_ORIGINS`, otherwise every
+  browser call from the deployed UI fails the CORS preflight (and direct
+  uploads are blocked).
+- **A deployed origin also has to be pinned in code**, not just in the env:
+  `ALWAYS_ALLOWED_ORIGINS` in
+  `src/infrastructure/adapters/storage/cors.py`. The bucket holds ONE rule set
+  rewritten on every boot by whichever process starts last — including a
+  developer's machine — so an env var alone loses the origin again as soon as a
+  localhost-only config boots, and the failure is invisible (a bare 403 from
+  object storage, nothing in the API logs). Verify what the bucket actually
+  allows with `python -m src.infrastructure.adapters.storage.cors --check`.
 - Point all `STRIPE_*_URL` settings at the SPA origin, e.g.
-  `https://transform-web.onrender.com/app/billing?checkout=success`.
+  `https://transform-to.com/app/billing?checkout=success`.
 - **Configure email delivery and `APP_BASE_URL`, or email verification stays
   suspended.** Set `RESEND_API_KEY` (or `SMTP_HOST` + the `SMTP_*` settings) and
-  `APP_BASE_URL=https://transform-web.onrender.com`. Until then the API logs an
+  `APP_BASE_URL=https://transform-to.com`. Until then the API logs an
   ERROR at boot and *allows* unverified sign-in, so new accounts work but are
   never actually verified. `EMAIL_FROM_ADDRESS` must be on a domain verified
   with your provider or the send is rejected. Confirm what took effect from the
@@ -431,7 +441,9 @@ applying**: the API service already exists and is adopted by name.
 Ambient URLs:
 
 - API: `https://transform-api-7b3g.onrender.com`
-- SPA: `https://transform-web.onrender.com`
+- SPA: `https://transform-to.com` (custom domain, canonical). The Render host
+  `https://transform-web.onrender.com` still serves it, and
+  `www.transform-to.com` 301-redirects to the apex.
 
 #### Environment variables
 
@@ -440,14 +452,18 @@ Ambient URLs:
 | Variable | Value for production |
 |----------|----------------------|
 | `ENVIRONMENT` | `production` |
-| `ALLOWED_ORIGINS` | `["https://transform-web.onrender.com"]` (plus any localhost origin you still need) |
-| `S3_CORS_ALLOWED_ORIGINS` | `["https://transform-web.onrender.com"]` |
-| `STRIPE_SUCCESS_URL` | `https://transform-web.onrender.com/app/billing?checkout=success` |
-| `STRIPE_CANCEL_URL` | `https://transform-web.onrender.com/app/billing?checkout=cancelled` |
-| `STRIPE_CREDIT_SUCCESS_URL` | `https://transform-web.onrender.com/app/billing?credits=success` |
-| `STRIPE_CREDIT_CANCEL_URL` | `https://transform-web.onrender.com/app/billing?credits=cancelled` |
-| `STRIPE_PORTAL_RETURN_URL` | `https://transform-web.onrender.com/app/billing` |
+| `ALLOWED_ORIGINS` | `["https://transform-to.com","https://transform-web.onrender.com"]` (plus any localhost origin you still need) |
+| `S3_CORS_ALLOWED_ORIGINS` | `["https://transform-to.com","https://transform-web.onrender.com"]` |
+| `STRIPE_SUCCESS_URL` | `https://transform-to.com/app/billing?checkout=success` |
+| `STRIPE_CANCEL_URL` | `https://transform-to.com/app/billing?checkout=cancelled` |
+| `STRIPE_CREDIT_SUCCESS_URL` | `https://transform-to.com/app/billing?credits=success` |
+| `STRIPE_CREDIT_CANCEL_URL` | `https://transform-to.com/app/billing?credits=cancelled` |
+| `STRIPE_PORTAL_RETURN_URL` | `https://transform-to.com/app/billing` |
 
+> The five `STRIPE_*` and `APP_BASE_URL` values must name the origin the user
+> actually sees, or Stripe's post-Checkout redirect and the emailed
+> verification/reset links land on the old host.
+>
 > Do **not** set `FRONTEND_DIST_DIR`; it is a deprecated no-op. Also note that
 > `Settings` uses `extra="forbid"`, so a mistyped env var crashes the boot.
 

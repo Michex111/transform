@@ -265,6 +265,11 @@ def test_apply_bucket_cors_keeps_production_origin_alongside_local_dev(
         "http://localhost:5174",
         "http://localhost:8000",
         "https://transform-web.onrender.com",
+        # The custom domain is pinned for the same reason as the onrender host,
+        # and this exact-list assertion is what fails if it is ever dropped: the
+        # bucket is rewritten by whichever process boots last, so relying on
+        # production's own env var alone loses it on the next local dev boot.
+        "https://transform-to.com",
     ]
 
 

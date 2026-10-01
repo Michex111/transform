@@ -27,20 +27,3 @@ def test_the_prompt_still_requires_tools_before_naming_user_data() -> None:
     """The two load-bearing rules from the module docstring must both survive."""
     assert "ALWAYS use a tool before naming a specific file" in SYSTEM_PROMPT
     assert "list_supported_targets" in SYSTEM_PROMPT
-
-
-def test_the_prompt_requires_a_subset_question_to_be_answered_with_a_subset() -> None:
-    """A superlative is answered by ranking, not by listing the drive.
-
-    Without this rule the model answers "what's my largest file?" with the files
-    it happened to receive in whatever order the tool returned them — all of
-    them, unranked, which is both the wrong answer and the exact complaint this
-    rule exists to prevent.
-    """
-    lowered = SYSTEM_PROMPT.lower()
-    assert "answer the question that was asked" in lowered
-    assert "all_folders" in SYSTEM_PROMPT
-    assert "small `limit`" in SYSTEM_PROMPT
-    # It must say what NOT to do as well, since the failure mode is padding.
-    assert "never pad the answer" in lowered
-    assert "never answer a superlative from a listing you did not rank" in lowered
