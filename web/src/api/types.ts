@@ -613,6 +613,33 @@ export interface CreditBalanceResponse {
   monthly_remaining: number | null
   /** See `DashboardResponse.credits_reset_at`. */
   credits_reset_at?: string | null
+
+  // ---- Wallet split (additive) ----
+  //
+  // Every field below is optional for the independent-deploy rule: an older
+  // API omits the whole block, and `balance` remains the plan bucket's
+  // remaining amount, so the page keeps working with no split to show. `null`
+  // means "the API did not say" — never render it as a fabricated `0`, and
+  // omit a bucket rather than printing "0 credits".
+  //
+  // Each is the *current* value of one population; `total_available` is the
+  // server-computed sum (plan + live carryover + purchased), so the client
+  // never has to know that an expired carryover contributes nothing.
+  /** The monthly plan bucket's remaining credits. */
+  plan_remaining?: number | null
+  /** Unspent plan credits converted to expiring carryover by an upgrade. */
+  carryover_credits?: number | null
+  /** When the carryover expires (an instant); `null` when there is none. */
+  carryover_expires_at?: string | null
+  /** Credits bought as one-off packs. */
+  purchased_credits?: number | null
+  /**
+   * Whether this account spends purchased credits before plan credits for
+   * *API* usage. `null` on an older API that does not send it.
+   */
+  purchased_credits_first?: boolean | null
+  /** The server's sum of plan + live carryover + purchased. */
+  total_available?: number | null
 }
 
 export interface CreditTransactionResponse {
@@ -716,6 +743,50 @@ export interface PortalResponse {
 export interface CancelSubscriptionResponse {
   message: string
   tier_after_cancel: string
+}
+
+/** Body of `POST /v1/subscription/change-plan`. */
+export interface ChangePlanRequest {
+  tier: string
+}
+
+/**
+ * What `POST /v1/subscription/change-plan` did, so the billing page can confirm
+ * it with the server's own numbers rather than a guess.
+ *
+ * On an **upgrade** the change is already active: `tier` is the new plan and
+ * `carryover_credits`/`carryover_expires_at` describe the unspent plan balance
+ * that was moved to the expiring carryover pool. On a **downgrade**
+ * `scheduled_effective_at` says when the new tier takes over and the account
+ * stays on `previous_tier` until then.
+ */
+export interface ChangePlanResponse {
+  /** The target tier. */
+  tier: string
+  /** The tier the account was on before the change. */
+  previous_tier: string
+  /** The new plan bucket's grant after the change. */
+  plan_credits: number
+  /** Total carryover held after the change (0 for a downgrade). */
+  carryover_credits: number
+  /** When that carryover expires, or `null`. */
+  carryover_expires_at: string | null
+  /** When a scheduled downgrade becomes effective; `null` for an upgrade. */
+  scheduled_effective_at: string | null
+  message: string
+}
+
+/**
+ * A Stripe Customer Session for managing payment methods in our own UI.
+ *
+ * `enabled: false` is an ordinary state, not an error: it means Stripe is
+ * unconfigured on this deployment or the account has no customer yet (a Free
+ * user has none until their first checkout). The billing page renders a short
+ * explanatory line rather than a broken Payment Element.
+ */
+export interface PaymentMethodSessionResponse {
+  client_secret: string | null
+  enabled: boolean
 }
 
 // ---- API Keys ----

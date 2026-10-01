@@ -3,6 +3,7 @@ import { useSearchParams } from "react-router-dom";
 import { Card, SkeletonText } from "@/components/ui";
 import { useAuth } from "@/auth/AuthContext";
 import { ApiKeysSection } from "./settings/ApiKeysSection";
+import { CreditPreferenceSection } from "./settings/CreditPreferenceSection";
 import { DangerZoneSection } from "./settings/DangerZoneSection";
 import { DriveSection } from "./settings/DriveSection";
 import { PasswordSection } from "./settings/PasswordSection";
@@ -28,15 +29,16 @@ function panelId(tab: SettingsTab) {
 function SettingsPanel({ tab }: { tab: SettingsTab }) {
   switch (tab) {
     case "profile":
-      // Three cards, all always visible: the password form and the drive default
-      // are standalone cards beside the profile rather than tabs of their own,
-      // so changing a password (or where files are saved) never hides the rest
-      // of the account. `space-y-6` is the page's own card rhythm.
+      // Four cards, all always visible: the password form, the drive default and
+      // the credit spending order are standalone cards beside the profile rather
+      // than tabs of their own, so changing one never hides the rest of the
+      // account. `space-y-6` is the page's own card rhythm.
       return (
         <div className="space-y-6">
           <ProfileSection />
           <PasswordSection />
           <DriveSection />
+          <CreditPreferenceSection />
         </div>
       );
     case "phone":

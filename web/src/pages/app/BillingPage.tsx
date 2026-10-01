@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { Coins } from "@phosphor-icons/react";
 import { useAuth } from "@/auth/AuthContext";
@@ -7,7 +7,10 @@ import { Button, Card, Skeleton, SkeletonText } from "@/components/ui";
 import { Modal } from "@/components/Modal";
 import { trustedExternalUrl } from "@/lib/download";
 import { formatDate, formatDateOrNull } from "@/lib/format";
+import { availableCredits, creditWalletRows } from "@/lib/creditWallet";
 import { embeddedCheckoutEnabled } from "@/lib/stripeCheckout";
+import { PlanChangeCard } from "./billing/PlanChangeCard";
+import { PaymentMethodSection } from "./billing/PaymentMethodSection";
 import type {
   CreditBalanceResponse,
   CreditPricingResponse,
@@ -85,6 +88,26 @@ export function BillingPage() {
     return () => window.removeEventListener("credits:updated", onCreditsUpdated);
   }, [client, error]);
 
+  // Re-read the plan and wallet after a successful in-app plan change, so the
+  // current-plan card, the credit split and the history all agree. Deliberately
+  // does NOT set `loading`: flipping the whole page back to skeletons after a
+  // one-click upgrade reads as a page reload. `changePlan` is a POST, so the
+  // client's read cache was already dropped and these are live values.
+  const refreshBilling = useCallback(async () => {
+    try {
+      const [p, c, h] = await Promise.all([
+        client.subscriptionStatus(),
+        client.creditBalance(),
+        client.creditHistory(),
+      ]);
+      setPlan(p);
+      setCredit(c);
+      setHistory(h);
+    } catch (e) {
+      error(e instanceof Error ? e.message : "Could not refresh your billing details");
+    }
+  }, [client, error]);
+
   async function buy(amount: number) {
     // The branded in-app checkout handles this when the build can render it;
     // the hosted redirect below is the fallback (see `lib/stripeCheckout`).
@@ -148,6 +171,12 @@ export function BillingPage() {
   // Absent on an older API and `null` for tiers without persistent credits —
   // both omit the line rather than showing a placeholder date.
   const resetLabel = formatDateOrNull(credit?.credits_reset_at);
+  // The wallet split: one row per bucket that actually holds credits. An older
+  // API sends no split, so this is empty and only the total is shown.
+  const walletRows = creditWalletRows(credit);
+  const creditsTotal = availableCredits(credit);
+  // A Free account has no Stripe customer, so there is no card to manage.
+  const hasSubscription = plan != null && plan.tier !== "FREE";
 
   return (
     <div className="mx-auto max-w-5xl space-y-6">
@@ -189,6 +218,18 @@ export function BillingPage() {
         )}
       </Card>
 
+      {/* Change plan — the primary action on this page. Omitted for a Free
+          account (no subscription to change) and for Enterprise, which is not
+          self-serve; `planChangeOptions` decides that. */}
+      {!loading && (
+        <PlanChangeCard
+          currentTier={plan?.tier ?? null}
+          onChanged={() => {
+            void refreshBilling();
+          }}
+        />
+      )}
+
       {/* Credits */}
       <Card hover className="p-6">
         <div className="flex items-center justify-between">
@@ -197,7 +238,7 @@ export function BillingPage() {
             {loading ? (
               <Skeleton className="mt-1 h-8 w-24" />
             ) : (
-              <p className="mt-1 font-display text-3xl font-semibold">{credit?.balance ?? 0}</p>
+              <p className="mt-1 font-display text-3xl font-semibold">{creditsTotal}</p>
             )}
           </div>
           <Coins size={28} className="text-primary" />
@@ -206,8 +247,26 @@ export function BillingPage() {
             local timezone, and omitted for tiers without persistent credits. */}
         {!loading && resetLabel && (
           <p className="mt-2 text-xs text-muted">
-            Resets <span className="font-medium text-on-background">{resetLabel}</span>
+            Plan credits reset{" "}
+            <span className="font-medium text-on-background">{resetLabel}</span>
           </p>
+        )}
+        {/* The split, so expiring carryover is visible. A bucket the API did
+            not send, or one at zero, is omitted rather than printed as 0. */}
+        {!loading && walletRows.length > 0 && (
+          <dl className="mt-4 space-y-2 border-t border-outline pt-4">
+            {walletRows.map((row) => (
+              <div key={row.bucket} className="flex items-start justify-between gap-4">
+                <dt className="text-sm text-muted">
+                  {row.label}
+                  {row.note && <span className="mt-0.5 block text-xs">{row.note}</span>}
+                </dt>
+                <dd className="font-mono text-sm font-semibold text-on-background">
+                  {row.credits}
+                </dd>
+              </div>
+            ))}
+          </dl>
         )}
         <div className="mt-6">
           <p className="mb-2 text-sm font-medium">Buy credits</p>
@@ -233,6 +292,10 @@ export function BillingPage() {
           )}
         </div>
       </Card>
+
+      {/* Payment method — deliberately quiet and near the bottom: changing the
+          plan is the primary action on this page. */}
+      {!loading && <PaymentMethodSection hasSubscription={hasSubscription} />}
 
       {/* Transaction history */}
       <Card className="overflow-hidden">

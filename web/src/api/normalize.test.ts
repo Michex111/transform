@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest";
 import {
   asArray,
   asBoolean,
+  asNullableBoolean,
   asNullableNumber,
   asNullableString,
   asNumber,
@@ -31,6 +32,7 @@ import {
   normalizeAssistantSummary,
   normalizeBatchDelete,
   normalizeCancelSubscription,
+  normalizeChangePlan,
   normalizeCheckout,
   normalizeConversionHistory,
   normalizeConversionJob,
@@ -50,6 +52,7 @@ import {
   normalizeFolderList,
   normalizeForgotPassword,
   normalizeGuestJob,
+  normalizePaymentMethodSession,
   normalizePhoneStatus,
   normalizePortal,
   normalizePresignedUrls,
@@ -1245,5 +1248,111 @@ describe("normalizeAssistantStreamEvent", () => {
         meta: { state: "pending", conversation_id: "c1" },
       },
     });
+  });
+});
+
+describe("wallet split, plan change, payment method session", () => {
+  it("asNullableBoolean keeps three states", () => {
+    // `null` is a real answer ("the API did not say"), not a false default.
+    expect(asNullableBoolean(true)).toBe(true);
+    expect(asNullableBoolean(false)).toBe(false);
+    expect(asNullableBoolean(undefined)).toBeNull();
+    expect(asNullableBoolean("true")).toBeNull();
+  });
+
+  it("normalizeCreditBalance leaves an older API's missing split as null", () => {
+    // The whole wallet block is additive: an older API sends none of it, and
+    // every field must read as "not said" rather than a fabricated 0.
+    const b = normalizeCreditBalance({ balance: 12, tier: "PRO" });
+    expect(b.balance).toBe(12);
+    expect(b.plan_remaining).toBeNull();
+    expect(b.carryover_credits).toBeNull();
+    expect(b.carryover_expires_at).toBeNull();
+    expect(b.purchased_credits).toBeNull();
+    expect(b.purchased_credits_first).toBeNull();
+    expect(b.total_available).toBeNull();
+  });
+
+  it("normalizeCreditBalance preserves a real split", () => {
+    const b = normalizeCreditBalance({
+      balance: 120,
+      tier: "PRO_PLUS",
+      plan_remaining: 120,
+      carryover_credits: 320,
+      carryover_expires_at: "2026-11-01T00:00:00Z",
+      purchased_credits: 1000,
+      purchased_credits_first: true,
+      total_available: 1440,
+    });
+    expect(b.plan_remaining).toBe(120);
+    expect(b.carryover_credits).toBe(320);
+    expect(b.carryover_expires_at).toBe("2026-11-01T00:00:00Z");
+    expect(b.purchased_credits).toBe(1000);
+    expect(b.purchased_credits_first).toBe(true);
+    expect(b.total_available).toBe(1440);
+  });
+
+  it("normalizeCreditBalance rejects a non-numeric or non-boolean split field", () => {
+    const b = normalizeCreditBalance({
+      carryover_credits: "320",
+      purchased_credits_first: "yes",
+      total_available: {},
+    });
+    expect(b.carryover_credits).toBeNull();
+    expect(b.purchased_credits_first).toBeNull();
+    expect(b.total_available).toBeNull();
+  });
+
+  it("normalizeChangePlan defaults every field of a malformed body", () => {
+    // The page confirms the change FROM this object, so a missing count must be
+    // 0 (nothing carried over) and never the string "undefined".
+    expect(normalizeChangePlan({})).toEqual({
+      tier: "",
+      previous_tier: "",
+      plan_credits: 0,
+      carryover_credits: 0,
+      carryover_expires_at: null,
+      scheduled_effective_at: null,
+      message: "",
+    });
+  });
+
+  it("normalizeChangePlan preserves a real upgrade", () => {
+    const r = normalizeChangePlan({
+      tier: "PRO_PLUS",
+      previous_tier: "PRO",
+      plan_credits: 2000,
+      carryover_credits: 320,
+      carryover_expires_at: "2026-11-01T00:00:00Z",
+      scheduled_effective_at: null,
+      message: "Upgrade applied.",
+    });
+    expect(r.tier).toBe("PRO_PLUS");
+    expect(r.previous_tier).toBe("PRO");
+    expect(r.plan_credits).toBe(2000);
+    expect(r.carryover_credits).toBe(320);
+    expect(r.carryover_expires_at).toBe("2026-11-01T00:00:00Z");
+    expect(r.scheduled_effective_at).toBeNull();
+    expect(r.message).toBe("Upgrade applied.");
+  });
+
+  it("normalizePaymentMethodSession defaults a malformed body to not enabled", () => {
+    // Defaulting to `true` (the schema's own default) would make the page try
+    // to mount the Payment Element with no secret, which renders blank.
+    expect(normalizePaymentMethodSession({})).toEqual({
+      client_secret: null,
+      enabled: false,
+    });
+    expect(normalizePaymentMethodSession({ enabled: "true" }).enabled).toBe(false);
+    expect(normalizePaymentMethodSession({ client_secret: 42 }).client_secret).toBeNull();
+  });
+
+  it("normalizePaymentMethodSession preserves a real session", () => {
+    expect(
+      normalizePaymentMethodSession({ client_secret: "cs_test_abc", enabled: true }),
+    ).toEqual({ client_secret: "cs_test_abc", enabled: true });
+    expect(
+      normalizePaymentMethodSession({ client_secret: null, enabled: false }),
+    ).toEqual({ client_secret: null, enabled: false });
   });
 });

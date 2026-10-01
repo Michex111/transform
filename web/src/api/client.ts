@@ -16,6 +16,7 @@ import {
   normalizeApiKeyList,
   normalizeBatchDelete,
   normalizeCancelSubscription,
+  normalizeChangePlan,
   normalizeCheckout,
   normalizeConversionHistory,
   normalizeConversionJob,
@@ -35,6 +36,7 @@ import {
   normalizeForgotPassword,
   normalizeGuestJob,
   normalizePhoneStatus,
+  normalizePaymentMethodSession,
   normalizePortal,
   normalizePresignedUrls,
   normalizeResendVerification,
@@ -57,6 +59,7 @@ import type {
   AssistantStreamEvent,
   BatchDeleteRequest,
   ChangePasswordRequest,
+  ChangePlanRequest,
   ConversionJobResponse,
   CreditPurchaseRequest,
   CreateConversionJobRequest,
@@ -1337,6 +1340,29 @@ export class ApiClient {
   cancelSubscription = () =>
     this.request<unknown>('/v1/subscription/cancel', { method: 'POST' }).then(
       normalizeCancelSubscription,
+    )
+  /**
+   * Move an existing paid subscription to another self-serve tier.
+   *
+   * The response is plain JSON (no redirect), so there is nothing to guard with
+   * `trustedExternalUrl`. A 409 means the account has no subscription to change
+   * (a Free user must go through checkout), and a 400 covers the same tier or a
+   * tier that is not self-serve — both are handled by the caller.
+   */
+  changePlan = (tier: string) =>
+    this.request<unknown>('/v1/subscription/change-plan', {
+      method: 'POST',
+      body: JSON.stringify({ tier } satisfies ChangePlanRequest),
+    }).then(normalizeChangePlan)
+  /**
+   * Create a Stripe Customer Session for the in-page Payment Element.
+   *
+   * `enabled: false` is a normal answer (Stripe unconfigured, or no customer
+   * yet), so the caller hides the section rather than reporting an error.
+   */
+  paymentMethodSession = () =>
+    this.request<unknown>('/v1/subscription/payment-method-session', { method: 'POST' }).then(
+      normalizePaymentMethodSession,
     )
 
   // ---- API Keys ----

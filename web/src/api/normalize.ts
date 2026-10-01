@@ -42,6 +42,7 @@ import type {
   AssistantToolEvent,
   BatchDeleteResponse,
   CancelSubscriptionResponse,
+  ChangePlanResponse,
   CheckoutResponse,
   ConversionHistoryResponse,
   ConversionJobResponse,
@@ -62,6 +63,7 @@ import type {
   ForgotPasswordResponse,
   GuestJobResponse,
   HistoryDeleteRange,
+  PaymentMethodSessionResponse,
   PhoneVerificationStatusResponse,
   PortalResponse,
   PresignedUrlResponse,
@@ -114,6 +116,18 @@ export function asNullableNumber(value: unknown): number | null {
 
 export function asBoolean(value: unknown, fallback = false): boolean {
   return typeof value === "boolean" ? value : fallback
+}
+
+/**
+ * A boolean, or `null` when the API sent nothing usable.
+ *
+ * The tri-state sibling of {@link asBoolean}: it exists for fields where "the
+ * API did not say" is a real state to render ("we don't know this account's
+ * preference") rather than something to fold into a default that would read as
+ * a real, possibly wrong, value.
+ */
+export function asNullableBoolean(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null
 }
 
 /**
@@ -558,6 +572,15 @@ export function normalizeCreditBalance(value: unknown): CreditBalanceResponse {
     monthly_allowance: asNullableNumber(o.monthly_allowance),
     monthly_remaining: asNullableNumber(o.monthly_remaining),
     credits_reset_at: asNullableString(o.credits_reset_at),
+    // Wallet split, additive. `null` keeps "the API did not say" distinct from
+    // a real `0`, which is what lets the page omit a bucket instead of
+    // printing "0 credits" for a field an older API never sent.
+    plan_remaining: asNullableNumber(o.plan_remaining),
+    carryover_credits: asNullableNumber(o.carryover_credits),
+    carryover_expires_at: asNullableString(o.carryover_expires_at),
+    purchased_credits: asNullableNumber(o.purchased_credits),
+    purchased_credits_first: asNullableBoolean(o.purchased_credits_first),
+    total_available: asNullableNumber(o.total_available),
   }
 }
 
@@ -725,6 +748,44 @@ export function normalizeCancelSubscription(value: unknown): CancelSubscriptionR
   return {
     message: asString(o.message),
     tier_after_cancel: asString(o.tier_after_cancel),
+  }
+}
+
+/**
+ * The result of a self-serve plan change.
+ *
+ * Every field is coerced because the page confirms the change *from this
+ * object*: an absent `carryover_credits` must read as `0` (nothing carried
+ * over) rather than `undefined`, which would put "undefined unspent credits"
+ * in front of the user. The dates stay `null` when absent, so the copy can
+ * omit the expiry rather than invent one.
+ */
+export function normalizeChangePlan(value: unknown): ChangePlanResponse {
+  const o = asObject(value)
+  return {
+    tier: asString(o.tier),
+    previous_tier: asString(o.previous_tier),
+    plan_credits: asNumber(o.plan_credits),
+    carryover_credits: asNumber(o.carryover_credits),
+    carryover_expires_at: asNullableString(o.carryover_expires_at),
+    scheduled_effective_at: asNullableString(o.scheduled_effective_at),
+    message: asString(o.message),
+  }
+}
+
+/**
+ * A Customer Session for the in-page Payment Element.
+ *
+ * `enabled` defaults to **false**, not the schema's `true`: if the body is
+ * malformed there is no usable secret, and mounting the Payment Element without
+ * one renders a broken element. "Not enabled" is the safe, honest reading — the
+ * page then shows its explanatory line instead.
+ */
+export function normalizePaymentMethodSession(value: unknown): PaymentMethodSessionResponse {
+  const o = asObject(value)
+  return {
+    client_secret: asNullableString(o.client_secret),
+    enabled: asBoolean(o.enabled, false),
   }
 }
 
