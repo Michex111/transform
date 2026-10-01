@@ -752,3 +752,67 @@ class StripeService:
         except Exception as e:
             logger.error("Failed to create portal session: %s", e, exc_info=True)
             return None
+
+    async def create_customer_session(self, customer_id: str) -> str | None:
+        """Create a Customer Session for managing payment methods in our own UI.
+
+        This is what replaces the Stripe Customer Portal's card-management
+        screen with one we control. Stripe's docs recommend exactly this shape:
+        manage payment methods "in an account settings or similar page that
+        shows existing subscriptions", using a Customer Session so the browser
+        can render the Payment Element against the customer's saved methods.
+
+        Only the customer is secret here. The returned ``client_secret`` is
+        scoped to this customer and is designed to be handed to the browser, so
+        it is never logged.
+
+        Args:
+            customer_id: The Stripe customer whose methods may be managed.
+
+        Returns:
+            The client secret to mount Stripe.js with, or None when Stripe is
+            not configured.
+        """
+        if not self._enabled:
+            logger.warning("Stripe not configured; cannot create customer session")
+            return None
+
+        try:
+            client = self._get_client()
+            session = await asyncio.to_thread(
+                client.v1.customer_sessions.create,
+                {
+                    "customer": customer_id,
+                    "components": {
+                        "payment_element": {
+                            "enabled": True,
+                            "features": {
+                                # Both features default to "disabled", so
+                                # without these the element would show no
+                                # saved methods and offer no way to save one —
+                                # i.e. the screen would look empty and broken.
+                                "payment_method_redisplay": "enabled",
+                                "payment_method_save": "enabled",
+                                # `payment_method_remove` is deliberately left
+                                # at its default. Removing a payment method
+                                # detaches it from the customer, which breaks
+                                # any active subscription using it — Stripe
+                                # warns about this explicitly, so removal stays
+                                # off until there is a flow that migrates the
+                                # subscription first.
+                            },
+                        }
+                    },
+                },
+            )
+            logger.info(
+                # Deliberately no session id: a CustomerSession is ephemeral
+                # and carries no `id` at all. The client secret is never logged.
+                "Created Stripe customer session",
+                extra={"customer_id": customer_id},
+            )
+            return session.client_secret
+
+        except Exception as e:
+            logger.error("Failed to create customer session: %s", e, exc_info=True)
+            return None

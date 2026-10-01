@@ -36,6 +36,7 @@ from src.presentation.schemas.subscription import (
     ChangePlanResponse,
     CheckoutRequest,
     CheckoutResponse,
+    PaymentMethodSessionResponse,
     PortalResponse,
     SubscriptionPlanResponse,
     SubscriptionStatus,
@@ -349,6 +350,43 @@ async def create_portal_session(
             detail="Stripe portal session could not be created",
         )
     return PortalResponse(portal_url=url)
+
+
+@router.post("/payment-method-session", response_model=PaymentMethodSessionResponse)
+async def create_payment_method_session(
+    current_user: CurrentUser,
+    subscription_repo: Annotated[SQLSubscriptionRepository, Depends(get_subscription_repository)],
+    stripe_service: Annotated[StripeService, Depends(get_stripe_service)],
+) -> PaymentMethodSessionResponse:
+    """Create a Customer Session so the SPA can manage payment methods itself.
+
+    This is the in-app replacement for the Customer Portal's card screen. The
+    portal cannot be branded — it is configured in the Stripe Dashboard and
+    picks up account-level Branding, with no per-session appearance controls
+    (unlike Checkout Sessions, which accept ``branding_settings``). Handing the
+    browser a Customer Session lets the Payment Element render the customer's
+    saved methods inside our own layout instead.
+
+    Returns ``enabled=False`` rather than raising when Stripe is unconfigured or
+    the user has no customer yet, so the Billing page can simply omit the
+    section: a Free user has no customer until their first checkout, and that is
+    an ordinary state, not an error.
+    """
+    if not stripe_service.enabled:
+        return PaymentMethodSessionResponse(client_secret=None, enabled=False)
+
+    row = await subscription_repo.get_subscription_row(current_user.id)
+    customer_id = row.stripe_customer_id if row else None
+    if not customer_id:
+        return PaymentMethodSessionResponse(client_secret=None, enabled=False)
+
+    client_secret = await stripe_service.create_customer_session(customer_id)
+    if client_secret is None:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Payment method session could not be created",
+        )
+    return PaymentMethodSessionResponse(client_secret=client_secret, enabled=True)
 
 
 @router.get("/status", response_model=SubscriptionStatusResponse)

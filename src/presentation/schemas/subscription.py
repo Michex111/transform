@@ -110,6 +110,18 @@ class PortalResponse(BaseModel):
     portal_url: str
 
 
+class PaymentMethodSessionResponse(BaseModel):
+    """A Stripe Customer Session for managing payment methods in our own UI.
+
+    Exactly one field is populated: a ``client_secret`` when Stripe is
+    configured, or ``enabled = False`` when it is not, so the SPA can hide the
+    card-management section instead of rendering an empty Payment Element.
+    """
+
+    client_secret: str | None = None
+    enabled: bool = True
+
+
 class SubscriptionStatusResponse(BaseModel):
     tier: SubscriptionTier
     status: SubscriptionStatus
