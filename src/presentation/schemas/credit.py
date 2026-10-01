@@ -5,6 +5,8 @@ from enum import StrEnum
 
 from pydantic import BaseModel, Field
 
+from src.presentation.schemas.subscription import CheckoutUiMode
+
 
 class TransactionType(StrEnum):
     PURCHASE = "PURCHASE"
@@ -34,6 +36,9 @@ class CreditTransactionResponse(BaseModel):
 
 class CreditPurchaseRequest(BaseModel):
     amount: int = Field(gt=0, le=10000, description="Number of credits to purchase")
+    # See ``CheckoutRequest.ui_mode``: hosted is the default so an SPA that does
+    # not know about embedded checkout keeps working unchanged.
+    ui_mode: CheckoutUiMode = CheckoutUiMode.HOSTED
 
 
 class CreditPricingResponse(BaseModel):

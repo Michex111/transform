@@ -7,6 +7,7 @@ import { Button, Card, Skeleton, SkeletonText } from "@/components/ui";
 import { Modal } from "@/components/Modal";
 import { trustedExternalUrl } from "@/lib/download";
 import { formatDate, formatDateOrNull } from "@/lib/format";
+import { embeddedCheckoutEnabled } from "@/lib/stripeCheckout";
 import type {
   CreditBalanceResponse,
   CreditPricingResponse,
@@ -85,6 +86,12 @@ export function BillingPage() {
   }, [client, error]);
 
   async function buy(amount: number) {
+    // The branded in-app checkout handles this when the build can render it;
+    // the hosted redirect below is the fallback (see `lib/stripeCheckout`).
+    if (embeddedCheckoutEnabled()) {
+      navigate(`/app/checkout?credits=${amount}`);
+      return;
+    }
     try {
       // Credit packs go through Stripe-hosted Checkout. Credits are granted by
       // the backend only after the payment confirms (checkout webhook).

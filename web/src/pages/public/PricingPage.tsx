@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { AnimatePresence, motion } from "motion/react";
 import { Check, CaretDown, Sparkle } from "@phosphor-icons/react";
 import { api } from "@/api/client";
@@ -9,6 +9,7 @@ import { Button, Card, Skeleton } from "@/components/ui";
 import { trustedExternalUrl } from "@/lib/download";
 import { Stagger, Item, Reveal } from "@/lib/motion";
 import { aiPlanFeatures } from "@/lib/planFeatures";
+import { embeddedCheckoutEnabled } from "@/lib/stripeCheckout";
 import type { SubscriptionPlanResponse } from "@/api/types";
 
 const FAQS = [
@@ -24,6 +25,7 @@ export function PricingPage() {
   const [faqOpen, setFaqOpen] = useState<number | null>(0);
   const { error } = useToast();
   const { isAuthenticated } = useAuth();
+  const navigate = useNavigate();
 
   useEffect(() => {
     let active = true;
@@ -39,6 +41,13 @@ export function PricingPage() {
   }, [error]);
 
   async function upgrade(tier: string) {
+    // When this build can mount an embedded form, checkout happens inside the
+    // app on the branded page. Otherwise fall through to the hosted flow, which
+    // is what every deployment without a publishable key still uses.
+    if (embeddedCheckoutEnabled()) {
+      navigate(`/app/checkout?tier=${encodeURIComponent(tier)}`);
+      return;
+    }
     setCheckoutLoading(tier);
     try {
       const { checkout_url } = await api.checkout(tier);

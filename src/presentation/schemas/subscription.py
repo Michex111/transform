@@ -22,6 +22,18 @@ class SubscriptionStatus(StrEnum):
     TRIAL = "TRIAL"
 
 
+class CheckoutUiMode(StrEnum):
+    """Which checkout surface the client wants the session for.
+
+    ``HOSTED`` keeps Stripe's own page (the historical behaviour and the
+    default); ``EMBEDDED`` asks for a session the SPA can mount itself. The
+    server may override either via ``STRIPE_CHECKOUT_UI_MODE``.
+    """
+
+    HOSTED = "hosted"
+    EMBEDDED = "embedded"
+
+
 def api_tier_to_domain(tier: SubscriptionTier) -> DomainTier:
     """Map the API-facing tier enum to the domain/persistence enum."""
     return {
@@ -75,10 +87,23 @@ class SubscriptionPlanResponse(BaseModel):
 
 class CheckoutRequest(BaseModel):
     tier: SubscriptionTier
+    # Defaults to hosted so an SPA that has not been updated yet keeps the exact
+    # behaviour it was built against.
+    ui_mode: CheckoutUiMode = CheckoutUiMode.HOSTED
 
 
 class CheckoutResponse(BaseModel):
-    checkout_url: str
+    """How the client should complete the session it just created.
+
+    Exactly one field is populated, chosen by the requested ``ui_mode``: a
+    hosted session yields ``checkout_url`` to navigate to, an embedded one
+    yields ``client_secret`` to mount Stripe.js with. Both are optional so the
+    API and the SPA can be deployed in either order without a window where a
+    checkout cannot be started.
+    """
+
+    checkout_url: str | None = None
+    client_secret: str | None = None
 
 
 class PortalResponse(BaseModel):

@@ -90,5 +90,10 @@ Ornamental motion belongs to the morph stream only. Status: PENDING/PROCESSING p
 ## Buttons
 Primary: filled brand #5A6BFF, 8px radius, sentence case. Secondary: 1px outline. Destructive: text rose. A control says exactly what it does.
 
+## Checkout (embedded)
+Checkout renders Stripe's payment form inside `/app/checkout`, framed by the app's own layout (logo, type, surfaces) rather than Stripe's generic page. The form itself is themed from these tokens — background #121417, button #5A6BFF, Inter, `rounded` borders — as a per-session `branding_settings` overlay in `src/infrastructure/adapters/payment/stripe_service.py`.
+
+That is a cross-language copy with no compiler behind it: **changing `--color-background` or `--color-primary` here means updating `_BRAND_BACKGROUND` / `_BRAND_PRIMARY` there too.** `tests/unit/infrastructure/test_stripe_embedded_checkout.py` reads this file's `@theme` block and fails if the two disagree. Stripe's `border_style` offers only pill/rectangular/rounded, so the form's 6px `rounded` is the closest available to the 8px used here — deliberate, not drift.
+
 ## Copy voice
 Active voice, sentence case, plain verbs. Name things by what people control. Errors explain what happened and how to fix it. Empty states are an invitation to act.

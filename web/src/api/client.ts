@@ -1302,10 +1302,20 @@ export class ApiClient {
     this.request<unknown>('/v1/credits/balance', { cacheTtlMs: 30_000 }).then(normalizeCreditBalance)
   creditHistory = () =>
     this.request<unknown>('/v1/credits/history', { cacheTtlMs: 30_000 }).then(normalizeCreditHistory)
-  purchaseCredits = (amount: number) =>
+  /**
+   * Start a credit-pack purchase.
+   *
+   * `uiMode` is only ever *sent* as `embedded`, so a build that cannot render
+   * an embedded form produces byte-identical requests to the ones this app made
+   * before embedded checkout existed.
+   */
+  purchaseCredits = (amount: number, uiMode?: 'embedded') =>
     this.request<unknown>('/v1/credits/purchase', {
       method: 'POST',
-      body: JSON.stringify({ amount } satisfies CreditPurchaseRequest),
+      body: JSON.stringify({
+        amount,
+        ...(uiMode ? { ui_mode: uiMode } : {}),
+      } satisfies CreditPurchaseRequest),
     }).then(normalizeCheckout)
   creditPricing = () =>
     this.request<unknown>('/v1/credits/pricing', { cacheTtlMs: 300_000 }).then(normalizeCreditPricing)
@@ -1319,10 +1329,10 @@ export class ApiClient {
   /** Open a Stripe Customer Portal session for self-service billing management. */
   createPortalSession = () =>
     this.request<unknown>('/v1/subscription/portal', { method: 'POST' }).then(normalizePortal)
-  checkout = (tier: string) =>
+  checkout = (tier: string, uiMode?: 'embedded') =>
     this.request<unknown>('/v1/subscription/checkout', {
       method: 'POST',
-      body: JSON.stringify({ tier }),
+      body: JSON.stringify({ tier, ...(uiMode ? { ui_mode: uiMode } : {}) }),
     }).then(normalizeCheckout)
   cancelSubscription = () =>
     this.request<unknown>('/v1/subscription/cancel', { method: 'POST' }).then(

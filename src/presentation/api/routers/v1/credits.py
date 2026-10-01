@@ -134,7 +134,7 @@ async def purchase_credits(
 
     amount_usd = _price_for_amount(payload.amount)
     settings = get_settings()
-    url = await stripe_service.create_credit_purchase_session(
+    handle = await stripe_service.create_credit_purchase_session(
         user_id=str(current_user.id),
         email=email,
         credits=payload.amount,
@@ -142,13 +142,14 @@ async def purchase_credits(
         success_url=settings.STRIPE_CREDIT_SUCCESS_URL,
         cancel_url=settings.STRIPE_CREDIT_CANCEL_URL,
         customer_id=customer_id,
+        ui_mode=payload.ui_mode.value,
     )
-    if url is None:
+    if handle is None:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Stripe checkout session could not be created",
         )
-    return CheckoutResponse(checkout_url=url)
+    return CheckoutResponse(checkout_url=handle.url, client_secret=handle.client_secret)
 
 
 @router.get("/pricing", response_model=list[CreditPricingResponse])

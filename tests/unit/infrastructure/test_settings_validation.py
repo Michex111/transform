@@ -226,6 +226,44 @@ def test_env_example_documents_the_email_transport_settings() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Checkout presentation (embedded vs Stripe-hosted)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("mode", ["auto", "embedded", "hosted"])
+def test_supported_checkout_ui_modes_validate(mode: str) -> None:
+    _settings(STRIPE_CHECKOUT_UI_MODE=mode).validate_settings()  # should not raise
+
+
+def test_an_unknown_checkout_ui_mode_is_rejected_at_boot() -> None:
+    """A typo must not leave the kill switch silently disarmed.
+
+    Falling back to ``auto`` for ``embeded`` would look exactly like a working
+    configuration — right up until the moment someone needed the switch and
+    discovered the payment flow was still embedded.
+    """
+    with pytest.raises(ValueError, match="STRIPE_CHECKOUT_UI_MODE"):
+        _settings(STRIPE_CHECKOUT_UI_MODE="embeded").validate_settings()
+
+
+def test_checkout_ui_mode_defaults_to_auto() -> None:
+    """``auto`` is the only value that is safe to deploy unannounced.
+
+    It defers to what the client asks for, so an SPA built before embedded
+    checkout existed keeps receiving the hosted page from a new API.
+    """
+    assert _settings().STRIPE_CHECKOUT_UI_MODE == "auto"
+
+
+def test_env_example_documents_the_checkout_settings() -> None:
+    """Same guard as the email settings: a mode no deployment can set is a kill
+    switch nobody can reach."""
+    text = _ENV_EXAMPLE.read_text(encoding="utf-8")
+
+    for key in ("STRIPE_CHECKOUT_UI_MODE=", "STRIPE_CHECKOUT_LOGO_URL="):
+        assert key in text, f"{key} missing from .env.example"
+
+
+# ---------------------------------------------------------------------------
 # Upload size limits / multipart configuration
 # ---------------------------------------------------------------------------
 

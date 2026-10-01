@@ -12,6 +12,10 @@ logger = logging.getLogger(__name__)
 # README). Any other value is rejected at boot so a typo like ``prod`` cannot
 # silently disable the production safety checks.
 _SUPPORTED_ENVIRONMENTS = frozenset({"development", "production"})
+# How the checkout form is presented. ``auto`` (the default) honours what the
+# client asks for, so an older SPA keeps getting Stripe's own page while a newer
+# one asks for the embedded form — the two can be deployed in either order.
+_SUPPORTED_CHECKOUT_UI_MODES = frozenset({"auto", "embedded", "hosted"})
 # The single authoritative ceiling for a single authenticated upload. Every
 # per-tier cap defaults to this (and ``validate_settings()`` refuses to start
 # if a tier is configured above it), so "what can the store actually accept" is
@@ -100,6 +104,23 @@ class Settings(BaseSettings):
     STRIPE_CREDIT_SUCCESS_URL: str = "http://localhost:5173/app/billing?credits=success"
     STRIPE_CREDIT_CANCEL_URL: str = "http://localhost:5173/app/billing?credits=cancelled"
     STRIPE_PORTAL_RETURN_URL: str = "http://localhost:5173/app/billing"
+    # Checkout presentation.
+    #
+    #   "auto"     — honour the mode the client asks for, and behave exactly
+    #                as before when it asks for nothing. This is what makes an
+    #                API-first rollout safe: an old SPA gets the hosted page
+    #                from the new API while the new SPA is still building.
+    #   "embedded" — always render the form inside our own page. Only safe once
+    #                the SPA that mounts it is deployed, because the API then
+    #                never returns a URL to redirect to.
+    #   "hosted"   — always use Stripe's own page. This is the kill switch:
+    #                flip it and restart to undo a bad embedded deploy without
+    #                shipping any code.
+    STRIPE_CHECKOUT_UI_MODE: str = "auto"
+    # Logo shown by the embedded form. Unset means "derive it from APP_BASE_URL
+    # when that is an https origin, otherwise omit it": Stripe fetches this URL
+    # server-side, so a localhost value could never resolve.
+    STRIPE_CHECKOUT_LOGO_URL: str | None = None
 
     # Rate Limiting (requests per minute)
     RATE_LIMIT_GUEST: int = 10
@@ -697,6 +718,16 @@ class Settings(BaseSettings):
             raise RuntimeError(
                 "PHONE_VERIFICATION_MAX_ATTEMPTS must be positive — a code with "
                 "no attempt ceiling is brute-forceable in seconds."
+            )
+
+        # Checkout presentation. An unknown value is rejected rather than
+        # ignored: silently falling back to ``auto`` would leave an operator
+        # who typed ``embeded`` believing the kill switch was armed.
+        checkout_ui_mode = self.STRIPE_CHECKOUT_UI_MODE.strip().lower()
+        if checkout_ui_mode not in _SUPPORTED_CHECKOUT_UI_MODES:
+            raise ValueError(
+                f"Unsupported STRIPE_CHECKOUT_UI_MODE {self.STRIPE_CHECKOUT_UI_MODE!r}; "
+                f"expected one of {sorted(_SUPPORTED_CHECKOUT_UI_MODES)}."
             )
 
         # AI assistant. Same contract as email/SMS: an explicit choice is

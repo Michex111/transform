@@ -58,6 +58,9 @@ const FilesPage = lazy(() =>
 const BillingPage = lazy(() =>
   import("@/pages/app/BillingPage").then((m) => ({ default: m.BillingPage })),
 );
+const CheckoutPage = lazy(() =>
+  import("@/pages/app/CheckoutPage").then((m) => ({ default: m.CheckoutPage })),
+);
 const SettingsPage = lazy(() =>
   import("@/pages/app/SettingsPage").then((m) => ({ default: m.SettingsPage })),
 );
@@ -120,6 +123,11 @@ export default function App() {
 
       {/* Authenticated app routes */}
       <Route element={<ProtectedRoute />}>
+        {/* Deliberately OUTSIDE `AppShell`: paying is a focused task, and a
+            sidebar next to the payment form is noise. It also keeps the
+            checkout out of the shell's animated wrapper, whose non-`none`
+            `transform` becomes the containing block for fixed descendants. */}
+        <Route path="/app/checkout" element={<CheckoutPage />} />
         <Route element={<AppShell />}>
           <Route path="/app/dashboard" element={<DashboardPage />} />
           <Route path="/app/assistant" element={<AssistantPage />} />

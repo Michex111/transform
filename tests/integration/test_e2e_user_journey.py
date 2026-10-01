@@ -41,6 +41,9 @@ from src.infrastructure.adapters.repository.sql_conversion_job_repo import SQLCo
 from src.infrastructure.converters.converter_registry import ConverterRegistry  # noqa: E402
 from src.infrastructure.database.session import Base, get_db_session  # noqa: E402
 from src.infrastructure.config.settings import get_settings  # noqa: E402
+from src.infrastructure.adapters.payment.stripe_service import (  # noqa: E402
+    CheckoutSessionHandle,
+)
 from src.presentation.api.dependencies.service_dependencies import (  # noqa: E402
     get_email_sender,
     get_encryption_service,
@@ -77,18 +80,50 @@ class MockStripeService:
         self.cancelled_subscriptions: list[str] = []
 
     async def create_checkout_session(
-        self, user_id, email, tier, success_url, cancel_url, customer_id=None
+        self,
+        user_id,
+        email,
+        tier,
+        success_url,
+        cancel_url,
+        customer_id=None,
+        ui_mode="hosted",
     ):
         del email, success_url, cancel_url, customer_id
-        self.checkout_calls.append({"user_id": user_id, "tier": tier})
-        return f"https://checkout.stripe.com/c/pay/{tier}_{user_id}"
+        self.checkout_calls.append({"user_id": user_id, "tier": tier, "ui_mode": ui_mode})
+        if ui_mode == "embedded":
+            return CheckoutSessionHandle(
+                client_secret=f"cs_embedded_{tier}_{user_id}_secret"
+            )
+        return CheckoutSessionHandle(url=f"https://checkout.stripe.com/c/pay/{tier}_{user_id}")
 
     async def create_credit_purchase_session(
-        self, user_id, email, credits, amount_usd, success_url, cancel_url, customer_id=None
+        self,
+        user_id,
+        email,
+        credits,
+        amount_usd,
+        success_url,
+        cancel_url,
+        customer_id=None,
+        ui_mode="hosted",
     ):
         del email, success_url, cancel_url, customer_id
-        self.credit_checkout_calls.append({"user_id": user_id, "credits": credits, "amount_usd": amount_usd})
-        return f"https://checkout.stripe.com/c/credits/{user_id}_{credits}"
+        self.credit_checkout_calls.append(
+            {
+                "user_id": user_id,
+                "credits": credits,
+                "amount_usd": amount_usd,
+                "ui_mode": ui_mode,
+            }
+        )
+        if ui_mode == "embedded":
+            return CheckoutSessionHandle(
+                client_secret=f"cs_embedded_credits_{user_id}_{credits}_secret"
+            )
+        return CheckoutSessionHandle(
+            url=f"https://checkout.stripe.com/c/credits/{user_id}_{credits}"
+        )
 
     async def create_portal_session(self, customer_id, return_url):
         del customer_id, return_url
@@ -485,7 +520,10 @@ def test_full_user_journey_e2e(tmp_path, monkeypatch) -> None:
         )
         assert checkout.status_code == 200, checkout.text
         assert "checkout.stripe.com" in checkout.json()["checkout_url"]
-        assert stripe_mock.checkout_calls == [{"user_id": str(user_id), "tier": "pro"}]
+        assert checkout.json()["client_secret"] is None
+        assert stripe_mock.checkout_calls == [
+            {"user_id": str(user_id), "tier": "pro", "ui_mode": "hosted"}
+        ]
 
         status = client.get("/api/v1/subscription/status", headers=headers)
         assert status.status_code == 200
@@ -503,6 +541,33 @@ def test_full_user_journey_e2e(tmp_path, monkeypatch) -> None:
         assert purchase.status_code == 200, purchase.text
         assert "checkout.stripe.com" in purchase.json()["checkout_url"]
         assert len(stripe_mock.credit_checkout_calls) == 1
+
+        # -- 5b. Branded (embedded) checkout: the client asks for a session it
+        # can mount itself and receives a client secret instead of a URL. This
+        # is the contract the in-app /app/checkout page depends on, so it is
+        # pinned here at the HTTP layer rather than only in the unit tests.
+        embedded = client.post(
+            "/api/v1/subscription/checkout",
+            json={"tier": "PRO", "ui_mode": "embedded"},
+            headers=headers,
+        )
+        assert embedded.status_code == 200, embedded.text
+        assert embedded.json()["client_secret"].startswith("cs_embedded_")
+        assert embedded.json()["checkout_url"] is None
+        assert stripe_mock.checkout_calls[-1] == {
+            "user_id": str(user_id),
+            "tier": "pro",
+            "ui_mode": "embedded",
+        }
+
+        embedded_credits = client.post(
+            "/api/v1/credits/purchase",
+            json={"amount": 100, "ui_mode": "embedded"},
+            headers=headers,
+        )
+        assert embedded_credits.status_code == 200, embedded_credits.text
+        assert embedded_credits.json()["client_secret"].startswith("cs_embedded_credits_")
+        assert embedded_credits.json()["checkout_url"] is None
 
         # Credits are granted only after Stripe confirms payment via the
         # checkout.session.completed webhook; the balance stays unchanged until

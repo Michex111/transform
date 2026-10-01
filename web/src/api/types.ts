@@ -626,6 +626,8 @@ export interface CreditTransactionResponse {
 
 export interface CreditPurchaseRequest {
   amount: number
+  /** See `CheckoutResponse.client_secret`. Omitted entirely when hosted. */
+  ui_mode?: 'embedded'
 }
 
 export interface CreditPricingResponse {
@@ -684,7 +686,26 @@ export interface SubscriptionStatusResponse {
 }
 
 export interface CheckoutResponse {
+  /**
+   * Where to send the browser for a **hosted** session; `""` for an embedded
+   * one.
+   *
+   * `""` — never `undefined` — because `window.location.assign(undefined)`
+   * navigates to the literal string `"undefined"`, which is why
+   * `normalizeCheckout` coerces it.
+   */
   checkout_url: string
+  /**
+   * The secret that mounts Stripe.js for an **embedded** session; `""` for a
+   * hosted one.
+   *
+   * Exactly one of the two fields is populated, and both are always present on
+   * the wire so the API and the SPA can be deployed in either order — an older
+   * API simply omits this field. The pair is deliberately symmetric: a single
+   * falsy check (`if (!client_secret)`) is then the whole "is this embedded?"
+   * test, exactly as `trustedExternalUrl(checkout_url)` guards the hosted one.
+   */
+  client_secret: string
 }
 
 /** Stripe Customer Portal session for self-service subscription management. */

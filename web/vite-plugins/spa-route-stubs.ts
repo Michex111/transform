@@ -57,6 +57,10 @@ export const SPA_ROUTES = [
   "/app/history",
   "/app/files",
   "/app/billing",
+  // Reached by a redirect from Stripe after an embedded checkout completes
+  // (`return_url`) as well as by an in-app link, so it must survive a hard
+  // load just like `/app/billing` does.
+  "/app/checkout",
   "/app/settings",
   "/app/support",
 ] as const;

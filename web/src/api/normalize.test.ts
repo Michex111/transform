@@ -381,6 +381,26 @@ describe("redirect + auth payloads", () => {
     );
   });
 
+  it("carries an embedded session's client secret", () => {
+    // The two shapes coexist while the API and the SPA deploy independently:
+    // a hosted session answers with a URL and no secret, an embedded one the
+    // other way round. Neither may be mistaken for a malformed payload.
+    const embedded = normalizeCheckout({ client_secret: "cs_test_abc_secret" });
+    expect(embedded.client_secret).toBe("cs_test_abc_secret");
+    expect(embedded.checkout_url).toBe("");
+
+    const hosted = normalizeCheckout({ checkout_url: "https://pay.example/x" });
+    expect(hosted.client_secret).toBe("");
+
+    // An API predating embedded checkout omits the field entirely.
+    expect(normalizeCheckout({}).client_secret).toBe("");
+
+    // A non-string secret must never reach Stripe.js as a truthy value, or the
+    // page would try to mount a checkout with a secret it cannot use.
+    expect(normalizeCheckout({ client_secret: 42 }).client_secret).toBe("");
+    expect(normalizeCheckout({ client_secret: {} }).client_secret).toBe("");
+  });
+
   it("never stores an undefined access token", () => {
     const t = normalizeTokenResponse({});
     expect(t.access_token).toBe("");

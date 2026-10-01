@@ -128,20 +128,21 @@ async def create_checkout_session(
     customer_id = row.stripe_customer_id if row else None
 
     settings = get_settings()
-    url = await stripe_service.create_checkout_session(
+    handle = await stripe_service.create_checkout_session(
         user_id=str(current_user.id),
         email=current_user.email,
         tier=payload.tier.value.lower(),
         success_url=settings.STRIPE_SUCCESS_URL,
         cancel_url=settings.STRIPE_CANCEL_URL,
         customer_id=customer_id,
+        ui_mode=payload.ui_mode.value,
     )
-    if url is None:
+    if handle is None:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Stripe checkout session could not be created",
         )
-    return CheckoutResponse(checkout_url=url)
+    return CheckoutResponse(checkout_url=handle.url, client_secret=handle.client_secret)
 
 
 @router.post("/portal", response_model=PortalResponse)

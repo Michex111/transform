@@ -704,9 +704,16 @@ export function normalizeTokenResponse(value: unknown): TokenResponse {
 /**
  * These carry a URL the client navigates to. Without normalisation a missing
  * field navigates the browser to the literal string "undefined".
+ *
+ * `client_secret` is the embedded counterpart: when it is present the client
+ * mounts Stripe.js instead of navigating anywhere.
  */
 export function normalizeCheckout(value: unknown): CheckoutResponse {
-  return { checkout_url: asString(asObject(value).checkout_url) }
+  const o = asObject(value)
+  return {
+    checkout_url: asString(o.checkout_url),
+    client_secret: asString(o.client_secret),
+  }
 }
 
 export function normalizePortal(value: unknown): PortalResponse {
