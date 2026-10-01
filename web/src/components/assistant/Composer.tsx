@@ -77,11 +77,7 @@ export function Composer({
 
   return (
     <form
-      // The bottom padding folds in the home-indicator inset: on an iPhone in
-      // landscape (or a device with a home indicator in portrait) the Send
-      // button would otherwise sit inside the gesture area. `max()` keeps the
-      // existing 0.75rem on every device where the inset is 0.
-      className="shrink-0 p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]"
+      className="shrink-0 p-3"
       onSubmit={(e) => {
         e.preventDefault();
         if (canSend) onSend();

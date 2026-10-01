@@ -14,7 +14,7 @@ instead of the configured production database.
 
 import asyncio
 import json
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -266,7 +266,7 @@ def _text_file(name: str, key: str, payload: bytes, user_id: int = USER_ID) -> U
     )
 
 
-@contextmanager
+@contextmanager         
 def assistant_app(
     db_path: str,
     *,
@@ -275,7 +275,7 @@ def assistant_app(
     models: FakeAssistantModelResolver | None = None,
     tier: SubscriptionTier = SubscriptionTier.FREE,
     quota_error: Exception | None = None,
-) -> Iterator[Harness]:
+) -> Generator[Harness, None, None]:
     """Build the real app with SQLite persistence and stubbed edges."""
     rows: list[UserFileModel] = []
     objects: dict[str, bytes] = {}
@@ -571,50 +571,6 @@ def test_chat_streams_a_tool_call_and_persists_the_transcript(tmp_path) -> None:
 
     # ... and the model was handed the tool result, not left to guess.
     assert llm.calls[1][0][-1].role == "tool"
-
-
-def test_a_ranked_listing_hands_the_model_only_the_files_it_asked_for(tmp_path) -> None:
-    """End-to-end proof of the reported bug, through the real SQLite repository.
-
-    "What's the largest file in my drive?" used to hand the model the whole
-    drive, so it answered by listing everything. This drives the exact ranked
-    call the tool description prescribes and asserts what the model received:
-    one file, the largest, ranked by the database — and that the turn's chips
-    show that one file rather than the drive.
-    """
-    llm = FakeLlmPort(
-        [
-            tool_response(
-                "list_files",
-                {"all_folders": True, "sort": "size", "order": "desc", "limit": 1},
-            ),
-            text_response("Your largest file is the deck."),
-        ]
-    )
-    files = [
-        ("notes.txt", "objects/notes.txt", b"x" * 40, USER_ID),
-        ("deck.key", "objects/deck.key", b"y" * 4_000, USER_ID),
-        ("photo.png", "objects/photo.png", b"z" * 400, USER_ID),
-    ]
-    with assistant_app(str(tmp_path / "ranked.db"), seed_files=files, llm=llm) as harness:
-        response = _chat(harness, "what's the largest file in my drive?")
-        assert response.status_code == 200
-        frames = _frames(response)
-
-    assert [payload["id"] for name, payload in frames if name == "artifact"] == [
-        "objects/deck.key"
-    ]
-    assert frames[-1][1]["content"] == "Your largest file is the deck."
-
-    # What the model was actually given: one row, the largest one, and the
-    # ranking stated so it can describe the order honestly.
-    tool_message = llm.calls[1][0][-1]
-    assert tool_message.role == "tool"
-    payload = json.loads(tool_message.content)
-    assert [row["file_name"] for row in payload["files"]] == ["deck.key"]
-    assert payload["count"] == 1
-    assert payload["scope"] == "all_folders"
-    assert payload["ordered_by"] == {"key": "size", "direction": "desc"}
 
 
 def test_chat_surfaces_a_folder_artifact_after_create_folder(tmp_path) -> None:

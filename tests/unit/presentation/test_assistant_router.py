@@ -7,7 +7,7 @@ quota is a 429, and a foreign conversation is the same 404 as a missing one.
 """
 
 import json
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from typing import Any
 
@@ -239,7 +239,7 @@ def _client(
     *,
     resolver: FakeAssistantModelResolver | None = None,
     quota: StubQuota | None = None,
-) -> Iterator[TestClient]:
+) -> Generator[TestClient, None, None]:
     """A client with auth and every assistant dependency stubbed out.
 
     Overrides are registered on ``api_main.app`` (not on the client) because
