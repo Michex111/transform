@@ -1,5 +1,6 @@
 """Subscription management API endpoints."""
 
+import uuid
 from datetime import UTC, datetime
 from typing import Annotated
 
@@ -13,18 +14,26 @@ from src.domain.assistant.policies.assistant_policy import (
     model_label_for_tier,
     model_level_for_tier,
 )
+from src.domain.subscriptions.entities.credit import Credit
+from src.domain.subscriptions.policies.tier_policy import TierPolicy
+from src.domain.subscriptions.value_object.credit_period import current_period_key
 from src.domain.subscriptions.value_object.tier import SubscriptionTier as DomainTier
 from src.infrastructure.adapters.payment.stripe_service import StripeService
+from src.infrastructure.adapters.repository.sql_credit_repo import SQLCreditRepository
 from src.infrastructure.adapters.repository.sql_subscription_repo import SQLSubscriptionRepository
 from src.infrastructure.config.settings import get_settings
 from src.presentation.api.dependencies.auth_dependencies import CurrentUser
 from src.presentation.api.dependencies.service_dependencies import (
+    get_credit_repository,
     get_stripe_service,
     get_subscription_repository,
 )
+from src.presentation.schemas.credit import TransactionType
 from src.presentation.schemas.subscription import (
     AiEntitlementResponse,
     CancelSubscriptionResponse,
+    ChangePlanRequest,
+    ChangePlanResponse,
     CheckoutRequest,
     CheckoutResponse,
     PortalResponse,
@@ -32,10 +41,23 @@ from src.presentation.schemas.subscription import (
     SubscriptionStatus,
     SubscriptionStatusResponse,
     SubscriptionTier,
+    api_tier_to_domain,
     domain_tier_to_api,
 )
 
 router = APIRouter(prefix="/api/v1/subscription", tags=["subscription"])
+
+#: Ordering used to decide whether a plan switch is an upgrade (immediate, with
+#: proration and carryover) or a downgrade (scheduled at the period end).
+#: ``PREMIUM`` is the legacy alias of ``PRO`` and deliberately ranks with it.
+_TIER_RANK: dict[DomainTier, int] = {
+    DomainTier.GUEST: 0,
+    DomainTier.FREE: 0,
+    DomainTier.PREMIUM: 1,
+    DomainTier.PRO: 1,
+    DomainTier.PRO_PLUS: 2,
+    DomainTier.ENTERPRISE: 3,
+}
 
 
 def _ai_entitlement(tier: DomainTier) -> AiEntitlementResponse:
@@ -143,6 +165,156 @@ async def create_checkout_session(
             detail="Stripe checkout session could not be created",
         )
     return CheckoutResponse(checkout_url=handle.url, client_secret=handle.client_secret)
+
+
+@router.post("/change-plan", response_model=ChangePlanResponse)
+async def change_plan(
+    payload: ChangePlanRequest,
+    current_user: CurrentUser,
+    subscription_repo: Annotated[SQLSubscriptionRepository, Depends(get_subscription_repository)],
+    credit_repo: Annotated[SQLCreditRepository, Depends(get_credit_repository)],
+    stripe_service: Annotated[StripeService, Depends(get_stripe_service)],
+) -> ChangePlanResponse:
+    """Switch an existing paid subscription to another paid tier.
+
+    An upgrade applies immediately with proration: the unspent plan balance is
+    moved to expiring carryover and the plan bucket is reset to the new tier's
+    grant. A downgrade is scheduled for the end of the current period so the
+    customer keeps what they already paid for.
+
+    Deliberately never creates a Checkout Session — that would create a second
+    concurrent subscription and bill the customer twice.
+    """
+    if not stripe_service.enabled:
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="Stripe integration is not configured. Set STRIPE_SECRET_KEY to enable plan changes.",
+        )
+
+    requested = api_tier_to_domain(payload.tier)
+    if requested == DomainTier.ENTERPRISE:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Enterprise is not self-serve; contact sales to change plans.",
+        )
+    if requested == DomainTier.FREE:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Use the cancel endpoint to move to the FREE tier.",
+        )
+
+    row = await subscription_repo.get_subscription_row(current_user.id)
+    if row is None or not row.stripe_subscription_id:
+        # A FREE user has no subscription to modify; they must start one via
+        # checkout. This is the exact case where using checkout is correct.
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="No active paid subscription to change. Use checkout to start one.",
+        )
+    if row.tier == requested:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Already subscribed to this plan",
+        )
+
+    new_price_id = stripe_service.resolve_price_id(requested.value.lower())
+    if not new_price_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No self-serve price is configured for this plan",
+        )
+
+    is_upgrade = _TIER_RANK.get(requested, 0) > _TIER_RANK.get(row.tier, 0)
+
+    # Capture the OLD plan balance BEFORE changing anything: on an upgrade it
+    # becomes carryover, and after the reset below it would be gone.
+    period_key = current_period_key()
+    old_policy = TierPolicy.for_tier(row.tier)
+    old_grant = old_policy.monthly_conversion_credits or 0
+    credit = await credit_repo.get_credit(str(current_user.id), period_key)
+    old_plan_remaining = credit.remaining if credit is not None else old_grant
+
+    result = await stripe_service.change_subscription_plan(
+        row.stripe_subscription_id,
+        new_price_id=new_price_id,
+        user_id=str(current_user.id),
+        tier=requested.value.lower(),
+        is_upgrade=is_upgrade,
+    )
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Stripe subscription could not be changed",
+        )
+
+    previous_api_tier = domain_tier_to_api(row.tier)
+
+    if not is_upgrade:
+        # Scheduled at period end. The tier (and any carryover) changes when the
+        # webhook for the new phase fires, so touch nothing now.
+        return ChangePlanResponse(
+            tier=domain_tier_to_api(requested),
+            previous_tier=previous_api_tier,
+            scheduled_effective_at=result.scheduled_effective_at,
+            message=(
+                "Downgrade scheduled. It takes effect at the end of the current "
+                "billing period; you keep your current plan until then."
+            ),
+        )
+
+    # --- Upgrade: now, on this request ------------------------------------
+    # 1. Carry the unspent plan balance into the expiring carryover pool, and
+    #    optimistically record the new tier. Setting the tier here is what stops
+    #    a double-clicked upgrade from computing carryover twice before the
+    #    webhook lands: the second request then sees the target tier and 400s.
+    new_carryover = row.carryover_credits + old_plan_remaining
+    row.tier = requested
+    await subscription_repo.set_wallet(
+        current_user.id,
+        carryover_credits=new_carryover,
+        carryover_expires_at=result.previous_period_end,
+        purchased_credits=row.purchased_credits,
+        purchased_credits_first=row.purchased_credits_first,
+    )
+
+    # 2. Reset the plan bucket to the NEW tier's grant. Reset, not top-up:
+    #    whatever was left has just become carryover, so adding it here again
+    #    would double-count it (Pro 320 left -> Pro Plus must be 2000 + 320).
+    new_grant = TierPolicy.for_tier(requested).monthly_conversion_credits or 0
+    await credit_repo.save_credit(
+        Credit(
+            owner_id=str(current_user.id),
+            period_key=period_key,
+            allowance=new_grant,
+            remaining=new_grant,
+        )
+    )
+
+    # 3. Ledger row for auditability. No reference_id: a plan change has no
+    #    external id to be idempotent against (and repeated upgrades are
+    #    already prevented by the tier guard above).
+    await credit_repo.record_transaction(
+        transaction_id=str(uuid.uuid4()),
+        user_id=current_user.id,
+        amount=old_plan_remaining,
+        transaction_type=TransactionType.CARRYOVER.value,
+        description=(
+            f"Carried {old_plan_remaining} unspent plan credits over from "
+            f"{previous_api_tier.value} to {requested.value}"
+        ),
+    )
+
+    return ChangePlanResponse(
+        tier=domain_tier_to_api(requested),
+        previous_tier=previous_api_tier,
+        plan_credits=new_grant,
+        carryover_credits=new_carryover,
+        carryover_expires_at=result.previous_period_end,
+        message=(
+            "Upgrade applied. Your unspent plan credits were carried over and "
+            "expire at the end of your previous billing period."
+        ),
+    )
 
 
 @router.post("/portal", response_model=PortalResponse)

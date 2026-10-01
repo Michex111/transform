@@ -121,3 +121,34 @@ class SubscriptionStatusResponse(BaseModel):
 class CancelSubscriptionResponse(BaseModel):
     message: str
     tier_after_cancel: str = "FREE"
+
+
+class ChangePlanRequest(BaseModel):
+    """Move an EXISTING paid subscription to another paid tier.
+
+    Distinct from ``CheckoutRequest``: checkout creates a *new* subscription, so
+    using it for an upgrade would double-bill a customer who already has one.
+    """
+
+    tier: SubscriptionTier
+
+
+class ChangePlanResponse(BaseModel):
+    """What a plan change did, for the UI to confirm.
+
+    ``tier`` is the target tier. For an immediate upgrade it is already active;
+    for a scheduled downgrade ``scheduled_effective_at`` says when it takes
+    over and the account stays on ``previous_tier`` until then.
+    """
+
+    tier: SubscriptionTier
+    previous_tier: SubscriptionTier
+    #: The new plan bucket's grant after the change.
+    plan_credits: int = 0
+    #: Total carryover held after the change (the unspent plan balance moved
+    #: there on an upgrade; unchanged on a downgrade).
+    carryover_credits: int = 0
+    carryover_expires_at: datetime | None = None
+    #: When a scheduled downgrade becomes effective; None for an upgrade.
+    scheduled_effective_at: datetime | None = None
+    message: str

@@ -103,3 +103,63 @@ class SQLSubscriptionRepository:
             select(UserSubscriptionModel).where(UserSubscriptionModel.user_id == user_id)
         )
         return result.scalar_one_or_none()
+
+    # --- Credit wallet -----------------------------------------------------
+    # ``user_subscriptions`` owns two of the three credit populations
+    # (``carryover_credits`` and ``purchased_credits``); the plan population
+    # lives in ``monthly_credits`` and is read/written through
+    # ``SQLCreditRepository``. These helpers keep wallet access on the
+    # repository that owns the columns rather than having callers poke ORM
+    # attributes directly.
+
+    async def get_wallet(self, user_id: int) -> UserSubscriptionModel | None:
+        """Return the row carrying the wallet pools, or None for a user with no
+        subscription row (their wallet is empty, not an error)."""
+        return await self.get_subscription_row(user_id)
+
+    def apply_wallet_balances(
+        self,
+        row: UserSubscriptionModel,
+        *,
+        carryover_credits: int,
+        purchased_credits: int,
+    ) -> None:
+        """Write consumed wallet balances onto a *loaded* row, without committing.
+
+        Deliberately does not commit: the worker calls this in the same session
+        that then writes the plan bucket (``monthly_credits``) via
+        ``SQLCreditRepository.save_credit``, whose commit flushes both rows as a
+        single transaction. Committing here instead would split the wallet in
+        two, so a failed plan write could leave carryover spent but plan intact.
+        """
+        row.carryover_credits = carryover_credits
+        row.purchased_credits = purchased_credits
+        row.updated_at = datetime.now(UTC)
+
+    async def set_wallet(
+        self,
+        user_id: int,
+        *,
+        carryover_credits: int,
+        carryover_expires_at: datetime | None,
+        purchased_credits: int,
+        purchased_credits_first: bool,
+    ) -> UserSubscriptionModel | None:
+        """Persist the full wallet state for a user and commit.
+
+        Takes every field explicitly rather than defaulting some to "leave
+        unchanged": the upgrade path must be able to *clear* an expiry as well
+        as set one, and a sentinel/None-means-unchanged convention would make
+        ``carryover_expires_at=None`` (a legitimate value) unexpressible.
+        Returns the updated row, or ``None`` when the user has no row to update.
+        """
+        row = await self.get_subscription_row(user_id)
+        if row is None:
+            return None
+        row.carryover_credits = carryover_credits
+        row.carryover_expires_at = carryover_expires_at
+        row.purchased_credits = purchased_credits
+        row.purchased_credits_first = purchased_credits_first
+        row.updated_at = datetime.now(UTC)
+        await self._session.commit()
+        return row

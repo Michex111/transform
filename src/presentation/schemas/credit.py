@@ -13,6 +13,9 @@ class TransactionType(StrEnum):
     CONSUMPTION = "CONSUMPTION"
     REFUND = "REFUND"
     BONUS = "BONUS"
+    #: An upgrade that converted the unspent plan balance into expiring
+    #: carryover credits. Ledger-only: it records the conversion, not a grant.
+    CARRYOVER = "CARRYOVER"
 
 
 class CreditBalanceResponse(BaseModel):
@@ -23,6 +26,21 @@ class CreditBalanceResponse(BaseModel):
     # First instant of the next UTC calendar month, or None when the tier has
     # no persistent monthly credits (nothing resets for those users).
     credits_reset_at: datetime | None
+
+    # --- Wallet split -----------------------------------------------------
+    # Additive and defaulted on purpose: the API and the SPA deploy
+    # independently, so an older client must keep parsing this response. Each
+    # field is the *current* value of one population; ``total_available`` is the
+    # server-computed sum (plan + live carryover + purchased) so the client does
+    # not have to know that an expired carryover contributes zero.
+    plan_remaining: int | None = None
+    carryover_credits: int | None = None
+    carryover_expires_at: datetime | None = None
+    purchased_credits: int | None = None
+    #: Whether this account spends purchased credits before plan credits for
+    #: *API* usage. Browser jobs always spend plan first.
+    purchased_credits_first: bool | None = None
+    total_available: int | None = None
 
 
 class CreditTransactionResponse(BaseModel):

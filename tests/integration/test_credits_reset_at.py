@@ -50,6 +50,15 @@ BALANCE_KEYS = {
     "monthly_allowance",
     "monthly_remaining",
     "credits_reset_at",
+    # Wallet split, added additively for the three credit populations. All are
+    # defaulted in the schema so an older client is unaffected, but the response
+    # always carries them.
+    "plan_remaining",
+    "carryover_credits",
+    "carryover_expires_at",
+    "purchased_credits",
+    "purchased_credits_first",
+    "total_available",
 }
 
 
@@ -304,6 +313,15 @@ def test_credit_balance_pre_existing_fields_are_unchanged(tmp_path) -> None:
     assert with_credit["monthly_remaining"] == 42
     assert with_credit["monthly_allowance"] == 50
     assert with_credit["tier"] == "FREE"
+
+    # The wallet split is additive: with no purchases or carryover the plan
+    # bucket is the whole balance, and the computed total agrees.
+    assert with_credit["plan_remaining"] == 42
+    assert with_credit["purchased_credits"] == 0
+    assert with_credit["carryover_credits"] == 0
+    assert with_credit["carryover_expires_at"] is None
+    assert with_credit["purchased_credits_first"] is False
+    assert with_credit["total_available"] == 42
 
     # No bucket yet for this month -> the tier allowance is the fallback.
     assert fresh_bucket["balance"] == 50

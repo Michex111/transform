@@ -5,9 +5,14 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
+from src.domain.subscriptions.policies.credit_wallet import (
+    WalletBalances,
+    available_total,
+)
 from src.domain.subscriptions.policies.tier_policy import TierPolicy
 from src.domain.subscriptions.value_object.credit_period import (
     current_period_key,
+    ensure_utc,
     next_period_start,
 )
 from src.domain.subscriptions.value_object.tier import SubscriptionTier
@@ -85,12 +90,40 @@ async def get_credit_balance(
 
     remaining = credit.remaining if credit is not None else allowance
 
+    # The other two populations live on the subscription row. An expired
+    # carryover is reported for auditability but contributes zero to
+    # ``total_available`` — read-time expiry lives in the domain policy, so the
+    # API cannot get it wrong by re-deriving it here.
+    wallet = await subscription_repo.get_wallet(current_user.id)
+    carryover = wallet.carryover_credits if wallet is not None else 0
+    carryover_expires_at = ensure_utc(
+        wallet.carryover_expires_at if wallet is not None else None
+    )
+    purchased = wallet.purchased_credits if wallet is not None else 0
+    purchased_first = wallet.purchased_credits_first if wallet is not None else False
+
+    total = available_total(
+        WalletBalances(
+            plan_remaining=remaining,
+            carryover_credits=carryover,
+            purchased_credits=purchased,
+        ),
+        carryover_expires_at=carryover_expires_at,
+        now=now,
+    )
+
     return CreditBalanceResponse(
         balance=remaining,
         tier=domain_tier_to_api(tier).value,
         monthly_allowance=allowance,
         monthly_remaining=remaining,
         credits_reset_at=next_period_start(now) if monthly_credits is not None else None,
+        plan_remaining=remaining,
+        carryover_credits=carryover,
+        carryover_expires_at=carryover_expires_at,
+        purchased_credits=purchased,
+        purchased_credits_first=purchased_first,
+        total_available=total,
     )
 
 

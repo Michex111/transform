@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import uuid
+from datetime import UTC, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -72,28 +73,29 @@ async def _activate_subscription(
         credit_repo = SQLCreditRepository(db)
         existing = await credit_repo.get_credit(user_id, period_key)
         if existing is not None:
-            # Raise the bucket to this tier's monthly grant, carrying the
-            # unspent balance forward. Purchased credits share this bucket (the
-            # purchase path adds to ``allowance``), so a stored allowance
-            # LARGER than the tier grant is normal — it means the user bought
-            # extra credits on top of their plan.
+            # This row is the PLAN bucket only. Purchased credits and carryover
+            # live on ``user_subscriptions`` (``purchased_credits`` /
+            # ``carryover_credits``) and this handler must never touch them —
+            # see the comment below for why that is non-negotiable.
             #
-            # Never reduce ``allowance``/``remaining`` here. The previous code
-            # clamped both down to the tier grant whenever the stored value was
-            # larger, which silently DESTROYED purchased credits: 500 plan
-            # credits + 1000 bought = 1500, and re-applying the PRO plan dropped
-            # it to 500. That is not a rare path — Stripe retries deliveries,
-            # and ``invoice.payment_succeeded`` re-applies the tier on every
-            # monthly renewal, so the credits would vanish once a month.
+            # Raise the plan bucket to this tier's monthly grant and add the
+            # difference to the unspent balance; never lower either field. This
+            # is what keeps the handler idempotent: Stripe retries deliveries,
+            # and ``invoice.payment_succeeded`` re-applies the tier on EVERY
+            # monthly renewal, so re-applying the same tier (delta == 0) must be
+            # a no-op rather than a top-up.
             #
-            # Because re-applying a tier the user already has is now a no-op,
-            # this handler is idempotent for subscription events.
+            # An explicit upgrade is NOT handled here. It is performed by
+            # ``POST /subscription/change-plan``, which converts the unspent
+            # plan balance into expiring carryover and resets the plan bucket to
+            # the new grant. By the time this handler sees the new tier the
+            # bucket already holds that grant, so ``delta`` is 0 and nothing is
+            # added. Compute the upgrade here instead (2000 + 320 style carry)
+            # and the carryover would be double-counted.
             #
-            # The principled long-term fix is to track the plan grant and the
-            # purchased total separately (the ``credit_transactions`` ledger
-            # already records every purchase) so a genuine DOWNGRADE can reclaim
-            # the unused plan portion without touching credits the user paid
-            # for. Until then, deliberately erring towards keeping credits:
+            # A legacy row created before the wallet split can still carry
+            # purchased credits merged into ``allowance``; that makes ``delta``
+            # non-positive and the branch a no-op, which is the safe direction:
             # destroying something a user paid for is far worse than leaving a
             # downgraded account holding a few extra.
             delta = allowance - existing.allowance
@@ -128,13 +130,17 @@ async def _grant_purchased_credits(
     """Grant purchased credits idempotently after payment confirms.
 
     Uses the Stripe session id as the transaction reference so repeated
-    deliveries of the same webhook don't double-credit the user. For a FREE
-    user the purchased credits are added on top of the existing allowance.
+    deliveries of the same webhook don't double-credit the user. Purchased
+    credits are stored on the subscription row's wallet (``purchased_credits``),
+    never in the plan bucket: they do not expire, whereas the plan grant is
+    re-applied every renewal.
 
     Idempotency is enforced by a UNIQUE constraint on ``credit_transactions.
     reference_id``: a duplicate delivery attempts to insert a transaction with
     the same reference, which raises ``IntegrityError`` and is treated as an
-    already-granted credit (race-safe — no TOCTOU window).
+    already-granted credit (race-safe — no TOCTOU window). The wallet bump and
+    the ledger insert share one transaction, so the losing delivery rolls back
+    cleanly.
     """
     if not reference_id:
         logger.warning("Credit purchase webhook missing reference_id; ignoring")
@@ -145,7 +151,7 @@ async def _grant_purchased_credits(
         return
 
     credit_repo = SQLCreditRepository(db)
-    period_key = current_period_key()
+    sub_repo = SQLSubscriptionRepository(db)
 
     # Quick pre-check (non-authoritative) to avoid the write path for the common
     # duplicate case. The unique constraint is the authoritative guard.
@@ -158,18 +164,35 @@ async def _grant_purchased_credits(
         logger.info("Duplicate credit purchase webhook ignored: ref=%s", reference_id)
         return
 
-    credit = await credit_repo.get_credit(user_id, period_key)
-    if credit is None:
-        credit = Credit.from_tier(
-            owner_id=user_id,
-            period_key=period_key,
+    # Purchased credits live on the subscription row's wallet, NOT in the plan
+    # bucket: they never expire, while the plan bucket is re-granted on every
+    # renewal. Merging them (the old behaviour) is what forced the webhook to
+    # guess whether a large allowance meant "the user bought credits".
+    row = await sub_repo.get_subscription_row(int(user_id))
+    if row is None:
+        # A FREE account that has never needed a subscription row: create one
+        # so the wallet columns have somewhere to live. Only when absent —
+        # ``upsert_subscription`` sets the tier unconditionally, so calling it
+        # on an existing row would downgrade a paying user to FREE.
+        await sub_repo.upsert_subscription(
+            actor_key=f"user:{user_id}",
+            user_id=int(user_id),
             tier=SubscriptionTier.FREE,
         )
-    credit.allowance += credits
-    credit.remaining += credits
-    await credit_repo.save_credit(credit)
+        row = await sub_repo.get_subscription_row(int(user_id))
+    if row is None:  # pragma: no cover - defensive
+        logger.error("Could not create a wallet row for user=%s; purchase ignored", user_id)
+        return
+
+    row.purchased_credits += credits
+    row.updated_at = datetime.now(UTC)
 
     try:
+        # One transaction: this commit flushes the wallet bump AND inserts the
+        # ledger row. That fixes the latent bug where ``save_credit`` committed
+        # the bump before the unique-constraint check, so the ``rollback`` on a
+        # duplicate could not undo it. Now a duplicate rolls back the bump with
+        # the rejected insert.
         await credit_repo.record_transaction(
             transaction_id=str(uuid.uuid4()),
             user_id=int(user_id),
@@ -180,13 +203,13 @@ async def _grant_purchased_credits(
         )
     except IntegrityError:
         # A concurrent/duplicate delivery already recorded this reference. The
-        # unique constraint fired, so we must not have double-credited. Because
-        # we already bumped the bucket above, roll back to undo it.
+        # unique constraint fired; roll back so the wallet bump above is undone
+        # in the same transaction.
         await db.rollback()
         logger.info("Duplicate credit purchase ignored (unique ref): %s", reference_id)
         return
 
-    logger.info("Granted %s credits to user=%s ref=%s", credits, user_id, reference_id)
+    logger.info("Granted %s purchased credits to user=%s ref=%s", credits, user_id, reference_id)
 
 
 async def _downgrade_to_free(db: AsyncSession, user_id: str) -> None:

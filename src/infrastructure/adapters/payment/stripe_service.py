@@ -12,6 +12,7 @@ configuration stay on a single client.
 import asyncio
 import logging
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
@@ -22,12 +23,60 @@ if TYPE_CHECKING:
     # below so that merely constructing this service does not pull in the SDK.
     # A local-variable annotation is never evaluated at runtime, so this stays
     # free.
+    from stripe.params import (
+        SubscriptionScheduleCreateParams,
+        SubscriptionScheduleUpdateParams,
+        SubscriptionUpdateParams,
+    )
     from stripe.params.checkout import (
         SessionCreateParams,
         SessionCreateParamsBrandingSettings,
     )
 
 logger = logging.getLogger(__name__)
+
+
+def _stripe_get(obj: Any, key: str, default: Any = None) -> Any:
+    """Read ``key`` from a Stripe object, dict, or plain mock alike.
+
+    The SDK's ``StripeObject`` supports both ``obj[key]`` and attribute access;
+    a test double is usually a ``SimpleNamespace`` (attributes only). Reading
+    through one helper keeps that difference out of the billing logic.
+    """
+    if obj is None:
+        return default
+    try:
+        value = obj[key]
+    except (KeyError, TypeError, AttributeError):
+        return getattr(obj, key, default)
+    return default if value is None else value
+
+
+def _unix_to_datetime(value: Any) -> datetime | None:
+    """Convert a Stripe unix timestamp to an aware UTC datetime, or None."""
+    if value is None:
+        return None
+    try:
+        return datetime.fromtimestamp(int(value), tz=UTC)
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+
+
+@dataclass(frozen=True, slots=True)
+class PlanChangeResult:
+    """Outcome of an in-place plan change on an existing subscription.
+
+    ``previous_period_end`` is the subscription's period end captured *before*
+    the update. Stripe re-anchors the billing period on an immediate upgrade, so
+    reading it afterwards would give the new end and the carryover would outlive
+    the period it actually belongs to.
+    """
+
+    subscription_id: str
+    is_upgrade: bool
+    previous_period_end: datetime | None
+    #: For a scheduled downgrade, when the new price takes over.
+    scheduled_effective_at: datetime | None = None
 
 
 class CheckoutUiMode(StrEnum):
@@ -135,6 +184,14 @@ class StripeService:
             "enterprise": settings.STRIPE_PRICE_ENTERPRISE,
         }
         return price_ids.get(tier.lower())
+
+    def resolve_price_id(self, tier: str) -> str | None:
+        """Public form of :meth:`_resolve_price_id` for the plan-change route.
+
+        ``None`` means the tier is not sold self-serve (Enterprise), so a caller
+        must not attempt a price switch for it.
+        """
+        return self._resolve_price_id(tier)
 
     def _resolve_ui_mode(self, requested: str) -> CheckoutUiMode:
         """Decide how a checkout session is presented.
@@ -431,6 +488,188 @@ class StripeService:
         except Exception as e:
             logger.error("Failed to cancel subscription: %s", e, exc_info=True)
             return False
+
+    async def change_subscription_plan(
+        self,
+        subscription_id: str,
+        *,
+        new_price_id: str,
+        user_id: str,
+        tier: str,
+        is_upgrade: bool,
+    ) -> PlanChangeResult | None:
+        """Switch an EXISTING subscription to a different price.
+
+        This must never go through ``create_checkout_session``: that always
+        creates a NEW subscription, so using it for an upgrade would bill the
+        customer for a second concurrent subscription on top of the one they
+        already have. The subscription id therefore has to come from the caller
+        (it is persisted on the user's row).
+
+        Args:
+            subscription_id: The Stripe subscription to modify.
+            new_price_id: The target tier's Stripe price id.
+            user_id: Internal user id, written into the subscription metadata so
+                the webhook can resolve the owner.
+            tier: Target tier name, written into the metadata so the webhook can
+                resolve the tier (``_activate_subscription`` is reachable only
+                from webhooks; without this an upgrade would never activate).
+            is_upgrade: Immediate proration when True; scheduled at period end
+                when False.
+
+        Returns:
+            A :class:`PlanChangeResult`, or None when Stripe is not configured.
+        """
+        if not self._enabled:
+            logger.warning("Stripe not configured; cannot change subscription plan")
+            return None
+
+        client = self._get_client()
+        metadata = {"user_id": user_id, "tier": tier, "kind": "subscription"}
+
+        try:
+            # Capture the OLD period end FIRST. An immediate upgrade re-anchors
+            # the billing period, so reading it after the update would give the
+            # NEW end and the carryover would outlive the period it belongs to.
+            subscription = await asyncio.to_thread(
+                client.v1.subscriptions.retrieve, subscription_id
+            )
+            previous_period_end = _unix_to_datetime(
+                _stripe_get(subscription, "current_period_end")
+            )
+
+            if is_upgrade:
+                item_id = self._first_subscription_item_id(subscription)
+                params: SubscriptionUpdateParams = {
+                    "items": [{"id": item_id, "price": new_price_id}],
+                    # Change immediately AND invoice the proration now rather
+                    # than folding it into the next renewal, so the customer
+                    # sees exactly what the mid-cycle upgrade costs.
+                    "proration_behavior": "always_invoice",
+                    "metadata": metadata,
+                }
+                await asyncio.to_thread(
+                    client.v1.subscriptions.update, subscription_id, params
+                )
+                logger.info(
+                    "Upgraded Stripe subscription in place",
+                    extra={"subscription_id": subscription_id, "tier": tier},
+                )
+                return PlanChangeResult(
+                    subscription_id=subscription_id,
+                    is_upgrade=True,
+                    previous_period_end=previous_period_end,
+                )
+
+            scheduled_effective_at = await self._schedule_price_at_period_end(
+                client,
+                subscription,
+                subscription_id=subscription_id,
+                new_price_id=new_price_id,
+                metadata=metadata,
+            )
+            logger.info(
+                "Scheduled Stripe subscription downgrade at period end",
+                extra={"subscription_id": subscription_id, "tier": tier},
+            )
+            return PlanChangeResult(
+                subscription_id=subscription_id,
+                is_upgrade=False,
+                previous_period_end=previous_period_end,
+                scheduled_effective_at=scheduled_effective_at,
+            )
+
+        except Exception as e:
+            logger.error("Failed to change Stripe subscription plan: %s", e, exc_info=True)
+            raise
+
+    @staticmethod
+    def _first_subscription_item_id(subscription: Any) -> str:
+        """The id of a subscription's (single) item, which the update targets."""
+        items_obj = _stripe_get(subscription, "items")
+        items = _stripe_get(items_obj, "data", []) or []
+        if not items:
+            raise ValueError("Stripe subscription has no items to update")
+        item_id = _stripe_get(items[0], "id")
+        if not item_id:
+            raise ValueError("Stripe subscription item has no id")
+        return str(item_id)
+
+    async def _schedule_price_at_period_end(
+        self,
+        client: Any,
+        subscription: Any,
+        *,
+        subscription_id: str,
+        new_price_id: str,
+        metadata: dict[str, str],
+    ) -> datetime | None:
+        """Schedule ``new_price_id`` to take over when the current period ends.
+
+        A subscription price change is otherwise immediate, so deferring one
+        requires a **subscription schedule**: the current phase is re-declared
+        unchanged and a second phase with the new price is appended to start at
+        its end.
+
+        ``proration_behavior="none"`` is the entire point — the current period
+        was already paid for at the higher price and must not be re-charged or
+        credited. ``end_behavior="release"`` detaches the schedule once the new
+        phase begins, leaving an ordinary subscription behind rather than one
+        permanently governed by a schedule.
+
+        The new phase carries ``metadata`` because the webhook that fires when
+        the phase starts reads ``subscription.metadata.tier`` — without it the
+        downgraded tier would never activate.
+        """
+        schedule_id = _stripe_get(subscription, "schedule")
+        if schedule_id:
+            schedule = await asyncio.to_thread(
+                client.v1.subscription_schedules.retrieve, schedule_id
+            )
+        else:
+            create_params: SubscriptionScheduleCreateParams = {
+                "from_subscription": subscription_id,
+            }
+            schedule = await asyncio.to_thread(
+                client.v1.subscription_schedules.create, create_params
+            )
+
+        phases_obj = _stripe_get(schedule, "phases")
+        phases = _stripe_get(phases_obj, "data", []) or []
+        if not phases:
+            raise ValueError("Stripe subscription schedule has no phases")
+        current_phase = phases[0]
+
+        current_items_obj = _stripe_get(current_phase, "items")
+        current_items = _stripe_get(current_items_obj, "data", []) or []
+        phase_items: list[Any] = [
+            {"price": _stripe_get(item, "price"), "quantity": _stripe_get(item, "quantity", 1)}
+            for item in current_items
+        ]
+        current_start = _stripe_get(current_phase, "start_date")
+        current_end = _stripe_get(current_phase, "end_date")
+
+        update_params: SubscriptionScheduleUpdateParams = {
+            "end_behavior": "release",
+            "proration_behavior": "none",
+            "metadata": metadata,
+            "phases": [
+                {
+                    "items": phase_items,
+                    "start_date": current_start,
+                    "end_date": current_end,
+                },
+                {
+                    "items": [{"price": new_price_id, "quantity": 1}],
+                    "metadata": metadata,
+                },
+            ],
+        }
+        schedule_id_value = _stripe_get(schedule, "id") or schedule_id
+        await asyncio.to_thread(
+            client.v1.subscription_schedules.update, schedule_id_value, update_params
+        )
+        return _unix_to_datetime(current_end)
 
     async def get_subscription(self, subscription_id: str) -> dict[str, Any] | None:
         """

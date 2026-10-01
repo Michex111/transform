@@ -40,6 +40,21 @@ def _resolve(now: datetime | None) -> datetime:
     return datetime.now(UTC) if now is None else _to_utc(now)
 
 
+def ensure_utc(value: datetime | None) -> datetime | None:
+    """Return ``value`` as an aware UTC datetime, or ``None``.
+
+    A timestamp read back from a database may be naive: SQLite (which the test
+    suite uses) does not persist the offset, whereas PostgreSQL with
+    ``DateTime(timezone=True)`` does. The credit-wallet policy compares an
+    expiry against an aware ``now``, so a naive value would raise a TypeError
+    instead of expiring. Normalising at the boundary keeps that backend quirk
+    out of the pure policy and out of the API response.
+    """
+    if value is None or value.tzinfo is not None:
+        return value
+    return value.replace(tzinfo=UTC)
+
+
 def current_period_key(now: datetime | None = None) -> str:
     """The "%Y-%m" accounting key for the period containing `now`.
 

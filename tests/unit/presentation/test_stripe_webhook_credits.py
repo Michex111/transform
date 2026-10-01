@@ -14,11 +14,9 @@ from src.infrastructure.database.session import Base
 from src.presentation.api.routers.v1 import webhooks
 from src.presentation.schemas.credit import TransactionType
 
-# A FREE-tier user starts with a 50-credit monthly allowance; purchased credits
-# are added on top of that.
-BASE_FREE_ALLOWANCE = 50
+# Purchased credits live in their own wallet column; they are never merged into
+# the plan bucket, so a purchase must not create one.
 PURCHASED = 100
-EXPECTED_BALANCE = BASE_FREE_ALLOWANCE + PURCHASED
 
 
 def _period_key() -> str:
@@ -41,7 +39,8 @@ def sqlite_session_factory():
         asyncio.run(engine.dispose())
 
 
-def test_grant_purchased_credits_adds_allowance_and_remaining() -> None:
+def test_grant_purchased_credits_goes_to_the_purchased_wallet() -> None:
+    """Purchased credits belong to the wallet column, not the plan bucket."""
     with sqlite_session_factory() as factory:
 
         async def _run() -> None:
@@ -54,13 +53,19 @@ def test_grant_purchased_credits_adds_allowance_and_remaining() -> None:
                 )
 
                 from src.infrastructure.adapters.repository.sql_credit_repo import SQLCreditRepository
-                repo = SQLCreditRepository(session)
-                credit = await repo.get_credit("42", _period_key())
-                assert credit is not None
-                assert credit.allowance == EXPECTED_BALANCE
-                assert credit.remaining == EXPECTED_BALANCE
+                from src.infrastructure.adapters.repository.sql_subscription_repo import (
+                    SQLSubscriptionRepository,
+                )
 
-                txns = await repo.list_transactions(42, offset=0, limit=10)
+                # The plan bucket is untouched: a purchase is not a plan grant.
+                credit = await SQLCreditRepository(session).get_credit("42", _period_key())
+                assert credit is None
+
+                row = await SQLSubscriptionRepository(session).get_wallet(42)
+                assert row is not None
+                assert row.purchased_credits == PURCHASED
+
+                txns = await SQLCreditRepository(session).list_transactions(42, offset=0, limit=10)
                 assert len(txns) == 1
                 assert txns[0].transaction_type == TransactionType.PURCHASE.value
                 assert txns[0].reference_id == "cs_mock_1"
@@ -82,16 +87,64 @@ def test_grant_purchased_credits_is_idempotent_by_reference() -> None:
                     )
 
                 from src.infrastructure.adapters.repository.sql_credit_repo import SQLCreditRepository
-                repo = SQLCreditRepository(session)
-                credit = await repo.get_credit("42", _period_key())
-                assert credit is not None
-                # Credited once, not twice.
-                assert credit.allowance == EXPECTED_BALANCE
-                assert credit.remaining == EXPECTED_BALANCE
+                from src.infrastructure.adapters.repository.sql_subscription_repo import (
+                    SQLSubscriptionRepository,
+                )
 
-                txns = await repo.list_transactions(42, offset=0, limit=10)
+                row = await SQLSubscriptionRepository(session).get_wallet(42)
+                assert row is not None
+                # Credited once, not twice.
+                assert row.purchased_credits == PURCHASED
+
+                txns = await SQLCreditRepository(session).list_transactions(42, offset=0, limit=10)
                 assert len(txns) == 1
 
+        asyncio.run(_run())
+
+
+def test_grant_purchased_credits_rolls_back_the_wallet_on_a_unique_race(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The duplicate path must undo the wallet bump, not just skip the ledger.
+
+    ``save_credit`` used to commit the bump before the unique-constraint check,
+    so the ``rollback`` on a duplicate could not undo it and a concurrent
+    delivery would double-credit the user. The bump and the ledger insert now
+    share one transaction. The pre-check is stubbed out to force the
+    constraint (rather than the pre-check) to be the guard under test.
+    """
+    from src.infrastructure.adapters.repository.sql_credit_repo import SQLCreditRepository
+
+    async def _no_transactions(*args, **kwargs):
+        return []
+
+    monkeypatch.setattr(SQLCreditRepository, "list_transactions", _no_transactions)
+
+    with sqlite_session_factory() as factory:
+
+        async def _run() -> None:
+            async with factory() as session:
+                await webhooks._grant_purchased_credits(
+                    session, user_id="42", credits=PURCHASED, reference_id="cs_race"
+                )
+                # The pre-check is blind, so this second call reaches the insert
+                # and is rejected by the unique constraint instead.
+                await webhooks._grant_purchased_credits(
+                    session, user_id="42", credits=PURCHASED, reference_id="cs_race"
+                )
+
+                from src.infrastructure.adapters.repository.sql_subscription_repo import (
+                    SQLSubscriptionRepository,
+                )
+
+                row = await SQLSubscriptionRepository(session).get_wallet(42)
+                assert row is not None
+                assert row.purchased_credits == PURCHASED  # not doubled
+
+                # ``list_transactions`` is blind in this test, so count via a
+                # direct query through a session bound to the real repository
+                # method would hit the stub; assert on the wallet instead and
+                # rely on the unique constraint for the ledger.
         asyncio.run(_run())
 
 
@@ -124,11 +177,13 @@ def test_checkout_completed_grant_credit_purchase() -> None:
             async with factory() as session:
                 await webhooks._handle_checkout_completed(session, event)
 
-                from src.infrastructure.adapters.repository.sql_credit_repo import SQLCreditRepository
-                repo = SQLCreditRepository(session)
-                credit = await repo.get_credit("42", _period_key())
-                assert credit is not None
-                assert credit.remaining == EXPECTED_BALANCE
+                from src.infrastructure.adapters.repository.sql_subscription_repo import (
+                    SQLSubscriptionRepository,
+                )
+
+                row = await SQLSubscriptionRepository(session).get_wallet(42)
+                assert row is not None
+                assert row.purchased_credits == 100
 
         asyncio.run(_run())
 
@@ -151,7 +206,12 @@ PURCHASED_CREDITS = 1000
 
 
 def test_purchased_credits_survive_subscription_reactivation() -> None:
-    """The exact production failure: 500 plan + 1000 bought must stay 1500."""
+    """The exact production failure: bought credits must survive a re-apply.
+
+    A purchase now lands in its own column, so the only thing re-applying a tier
+    can touch is the plan bucket. Both the plan grant and the purchased total
+    must be unchanged after a Stripe retry / monthly renewal.
+    """
     with sqlite_session_factory() as factory:
 
         async def _run() -> None:
@@ -169,10 +229,18 @@ def test_purchased_credits_survive_subscription_reactivation() -> None:
                 )
 
                 from src.infrastructure.adapters.repository.sql_credit_repo import SQLCreditRepository
+                from src.infrastructure.adapters.repository.sql_subscription_repo import (
+                    SQLSubscriptionRepository,
+                )
+
                 repo = SQLCreditRepository(session)
-                before = await repo.get_credit("42", _period_key())
-                assert before is not None
-                assert before.allowance == PLAN_PRO + PURCHASED_CREDITS
+                sub_repo = SQLSubscriptionRepository(session)
+                before_plan = await repo.get_credit("42", _period_key())
+                before_wallet = await sub_repo.get_wallet(42)
+                assert before_plan is not None
+                assert before_plan.allowance == PLAN_PRO
+                assert before_wallet is not None
+                assert before_wallet.purchased_credits == PURCHASED_CREDITS
 
                 # Act: re-apply the SAME plan — a Stripe retry, or the
                 # invoice.payment_succeeded sent on the monthly renewal.
@@ -184,11 +252,14 @@ def test_purchased_credits_survive_subscription_reactivation() -> None:
                     stripe_subscription_id="sub_mock",
                 )
 
-                # Assert: the purchased credits are intact.
-                after = await repo.get_credit("42", _period_key())
-                assert after is not None
-                assert after.allowance == PLAN_PRO + PURCHASED_CREDITS
-                assert after.remaining == before.remaining
+                # Assert: the purchased credits and the plan bucket are intact.
+                after_plan = await repo.get_credit("42", _period_key())
+                after_wallet = await sub_repo.get_wallet(42)
+                assert after_plan is not None
+                assert after_plan.allowance == PLAN_PRO
+                assert after_plan.remaining == before_plan.remaining
+                assert after_wallet is not None
+                assert after_wallet.purchased_credits == PURCHASED_CREDITS
 
         asyncio.run(_run())
 
@@ -220,12 +291,20 @@ def test_reactivating_a_plan_is_idempotent() -> None:
 
 
 def test_applying_a_smaller_plan_does_not_claw_back_purchased_credits() -> None:
-    """A downgrade must not confiscate credits the user paid for."""
+    """A downgrade must not confiscate credits the user paid for.
+
+    Purchased credits are a separate column now, so re-applying a smaller tier
+    has no code path that could reach them; this pins that the wallet column is
+    untouched and the plan bucket is not reduced by the webhook.
+    """
     with sqlite_session_factory() as factory:
 
         async def _run() -> None:
             async with factory() as session:
                 from src.infrastructure.adapters.repository.sql_credit_repo import SQLCreditRepository
+                from src.infrastructure.adapters.repository.sql_subscription_repo import (
+                    SQLSubscriptionRepository,
+                )
 
                 await webhooks._activate_subscription(
                     session,
@@ -238,6 +317,7 @@ def test_applying_a_smaller_plan_does_not_claw_back_purchased_credits() -> None:
                     session, user_id="9", credits=PURCHASED_CREDITS, reference_id="cs_buy_2"
                 )
                 repo = SQLCreditRepository(session)
+                sub_repo = SQLSubscriptionRepository(session)
                 before = await repo.get_credit("9", _period_key())
                 assert before is not None
 
@@ -251,11 +331,14 @@ def test_applying_a_smaller_plan_does_not_claw_back_purchased_credits() -> None:
                 )
 
                 after = await repo.get_credit("9", _period_key())
+                after_wallet = await sub_repo.get_wallet(9)
                 assert after is not None
-                # Never below what the user bought plus the new plan grant.
-                assert after.allowance >= PURCHASED_CREDITS
+                # The plan bucket is never reduced by the webhook, and the paid
+                # credits are untouched in their own column.
                 assert after.remaining == before.remaining
                 assert after.remaining <= after.allowance
+                assert after_wallet is not None
+                assert after_wallet.purchased_credits == PURCHASED_CREDITS
 
         asyncio.run(_run())
 

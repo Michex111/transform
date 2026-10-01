@@ -16,6 +16,7 @@ from src.domain.conversions.entities.conversion_job import ConversionJob, JobSta
 from src.domain.conversions.exceptions import InvalidStateTransition
 from src.domain.conversions.value_object.conversion_type import ConversionType
 from src.domain.conversions.policies.credit_calculator import calculate_credits
+from src.domain.conversions.value_object.job_origin import JobOrigin
 from src.domain.subscriptions.value_object.credit_period import current_period_key
 from src.domain.subscriptions.value_object.tier import SubscriptionTier
 from src.infrastructure.config.settings import get_settings
@@ -28,9 +29,18 @@ except ImportError:  # pragma: no cover - added by the backend agent in parallel
 
         async def get_remaining(self, user_id: int, period_key: str) -> int | None: ...
 
+        async def get_available_total(self, user_id: int, period_key: str) -> int | None: ...
+
         async def get_tier(self, user_id: int) -> SubscriptionTier: ...
 
-        async def consume(self, user_id: int, period_key: str, units: int) -> int: ...
+        async def consume(
+            self,
+            user_id: int,
+            period_key: str,
+            units: int,
+            *,
+            origin: JobOrigin = JobOrigin.WEB,
+        ) -> int: ...
 
 type JobProcess = Callable[[WorkerContext, ConversionJob], Coroutine[None, None, None]] 
 
@@ -332,12 +342,19 @@ async def process_job(context: WorkerContext, job: ConversionJob) -> None:
 
         # --- Credit pre-check: gate heavy work behind the remaining balance. ---
         # A transient credit-DB outage is non-fatal: we log a warning and proceed
-        # best-effort. Only an explicit "remaining <= 0" is a hard stop.
+        # best-effort. Only an explicit "nothing spendable" is a hard stop.
+        #
+        # The gate must look at the WHOLE wallet, not just the plan bucket:
+        # purchased credits are a separate pool that never expires, so an API
+        # user who has spent all their plan credits but still holds paid ones
+        # would be refused before converting if this read ``get_remaining``
+        # (plan only). Only the *spend order* depends on the job's origin, not
+        # the total, so this check is deliberately origin-independent.
         if credits_enabled and credit_port is not None and actor_user_id is not None:
             try:
-                remaining = await credit_port.get_remaining(actor_user_id, period_key)
+                available = await credit_port.get_available_total(actor_user_id, period_key)
                 tier = await credit_port.get_tier(actor_user_id)
-                if remaining is not None and remaining <= 0:
+                if available is not None and available <= 0:
                     error_message = (
                         "Conversion credits exhausted. Upgrade your plan or purchase more credits."
                     )
@@ -428,7 +445,7 @@ async def process_job(context: WorkerContext, job: ConversionJob) -> None:
             if credits_enabled and credit_port is not None and actor_user_id is not None:
                 try:
                     credits_remaining = await credit_port.consume(
-                        actor_user_id, period_key, credits_used
+                        actor_user_id, period_key, credits_used, origin=job.origin
                     )
                 except Exception as e:
                     worker_logger.warning(

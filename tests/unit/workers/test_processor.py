@@ -7,6 +7,7 @@ import pytest
 import workers.converter_workers.processor as processor_module
 from src.domain.conversions.entities.conversion_job import ConversionJob
 from src.domain.conversions.value_object.conversion_type import ConversionType
+from src.domain.conversions.value_object.job_origin import JobOrigin
 from src.domain.conversions.value_object.job_status import JobStatus
 from src.domain.subscriptions.value_object.tier import SubscriptionTier
 from tests.fakes.fake_credit_port import FakeCreditPort
@@ -861,6 +862,43 @@ def test_process_job_exhausted_credits_fails_without_converting(
     assert terminal["progress"] == 100
     assert "credits exhausted" in terminal["message"]
     assert terminal["credits_remaining"] == 0
+
+
+def test_process_job_purchased_credits_allow_a_zero_plan_balance(
+    conversion_job,
+    fake_storage_port,
+    fake_queue_port,
+    fake_event_publisher,
+    fake_converter_registry,
+) -> None:
+    """An API user with 0 plan credits but purchased credits must convert.
+
+    The pre-check used to read the plan bucket alone (``get_remaining``), so
+    once purchased credits were split out an API user who had spent their plan
+    but still held paid credits was refused before any work happened. The gate
+    now uses the wallet-wide total, which is origin-independent.
+    """
+    credit_port = FakeCreditPort(remaining=0, available_total=5)
+    _register_uppercase_converter(conversion_job, fake_converter_registry)
+    conversion_job.user_id = 42
+    conversion_job.origin = JobOrigin.API
+    conversion_job.pending_processing()
+
+    context = _build_context(
+        fake_storage_port,
+        fake_queue_port,
+        fake_event_publisher,
+        fake_converter_registry,
+        credit_port=credit_port,
+    )
+
+    asyncio.run(process_job(context, conversion_job))
+
+    assert conversion_job.status == JobStatus.COMPLETED
+    assert len(credit_port.consume_calls) == 1
+    # The worker forwards the job's origin so the wallet can honour the
+    # purchased-first setting for API callers.
+    assert credit_port.consume_origins == [JobOrigin.API]
 
 
 def test_process_job_sufficient_credits_consumes_and_completes(
