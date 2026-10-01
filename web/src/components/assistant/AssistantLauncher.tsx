@@ -9,10 +9,8 @@ import { useToast } from "@/auth/ToastContext";
 import { assistantErrorCopy } from "@/lib/assistantChat";
 import { MAX_ASSISTANT_ATTACHMENTS, attachAssistantFile, removeAssistantAttachment } from "@/lib/assistantAttachments";
 import { shouldShowLauncher } from "@/lib/launcherVisibility";
-import { availableChatHeight } from "@/lib/chatViewport";
 import { miniAssistantStore } from "@/lib/miniAssistantStore";
 import { useAssistantChat } from "@/lib/useAssistantChat";
-import { useVisualViewportHeight } from "@/lib/useChatViewport";
 import { useNarrowViewport } from "@/lib/useMediaQuery";
 
 /**
@@ -40,12 +38,6 @@ function PanelFallback() {
     />
   );
 }
-
-/**
- * Space the panel leaves below itself for its anchor: `4.5rem` (it sits above
- * the 44px launcher) plus a small gap at the top of the viewport.
- */
-const MINI_PANEL_RESERVED_PX = 96;
 
 /**
  * The floating Transform AI launcher and its mini chat.
@@ -82,17 +74,6 @@ export function AssistantLauncher() {
   const [attachments, setAttachments] = useState<AssistantAttachment[]>([]);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
-
-  // The panel is `position: fixed`, so there is no in-flow column to measure —
-  // but its height is still capped from the *visible* viewport rather than from
-  // `dvh`, so the two chat surfaces cannot disagree about how much room the
-  // keyboard has left. (The panel is `md:flex` only, but a tablet with a
-  // hardware keyboard can still be resized this way.)
-  const viewportHeight = useVisualViewportHeight();
-  const panelMaxHeight =
-    viewportHeight == null
-      ? undefined
-      : availableChatHeight({ viewportHeight, reservedPx: MINI_PANEL_RESERVED_PX });
 
   const { chat, send, stop, regenerate, retryLastTurn, editMessage, newChat } = useAssistantChat({
     store: miniAssistantStore,
@@ -256,16 +237,12 @@ export function AssistantLauncher() {
           animate={reduce ? { opacity: 1 } : { opacity: 1, scale: 1, y: 0 }}
           exit={reduce ? { opacity: 0 } : { opacity: 0, scale: 0.94, y: 12 }}
           transition={{ type: "spring", stiffness: 420, damping: 32 }}
-          style={{ transformOrigin: "bottom right", maxHeight: panelMaxHeight }}
+          style={{ transformOrigin: "bottom right" }}
           // Anchored above the launcher. With the button now 44px (`h-11`) top
           // at 1rem + 2.75rem, this `4.5rem` offset leaves a clean 0.75rem gap.
           // `hidden md:flex` agrees with the launcher's `useNarrowViewport`
           // gate, so the two cannot disagree about the panel.
-          //
-          // The height cap is the hook's measurement, not `calc(100dvh-6rem)`:
-          // on iOS the keyboard does not shrink `dvh`, so the panel would stay
-          // its full height and its own composer would slide under the keyboard.
-          className="fixed right-4 bottom-[calc(4.5rem_+_env(safe-area-inset-bottom))] z-50 hidden h-[30rem] w-[24rem] max-w-[calc(100vw-2rem)] md:flex"
+          className="fixed right-4 bottom-[calc(4.5rem_+_env(safe-area-inset-bottom))] z-50 hidden h-[30rem] max-h-[calc(100dvh-6rem)] w-[24rem] max-w-[calc(100vw-2rem)] md:flex"
         >
           <Suspense fallback={<PanelFallback />}>
             <MiniAssistant

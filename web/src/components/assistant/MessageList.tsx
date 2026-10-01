@@ -87,10 +87,7 @@ export function MessageList({
 
   return (
     <div
-      // `overscroll-contain` stops a flick at the end of the transcript from
-      // scrolling the page behind the panel, which on iOS otherwise drags the
-      // whole shell (and the composer) with it.
-      className={`min-h-0 flex-1 overflow-y-auto overscroll-contain ${dense ? "space-y-3 p-3" : "space-y-4 p-4"}`}
+      className={`min-h-0 flex-1 overflow-y-auto ${dense ? "space-y-3 p-3" : "space-y-4 p-4"}`}
       role="log"
       aria-live="polite"
       aria-relevant="additions text"

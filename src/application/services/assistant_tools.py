@@ -36,14 +36,6 @@ from src.application.ports.document_text_port import (
 )
 from src.application.ports.llm_port import LlmMessage, LlmToolSpec
 from src.application.services.assistant_prompts import SUMMARY_PROMPT
-from src.application.services.file_listing import (
-    DEFAULT_FILE_SORT,
-    DEFAULT_FILE_SORT_ORDER,
-    FileSortKey,
-    FileSortOrder,
-    parse_file_sort,
-    parse_file_sort_order,
-)
 from src.domain.assistant.exceptions.assistant_exceptions import (
     AssistantAttachmentNotFound,
 )
@@ -298,24 +290,12 @@ class AssistantFileServicePort(Protocol):
         ...
 
     async def list_files(
-        self, user_id: int, folder_id: str | None = None, *, offset: int = 0, limit: int = 20,
-        sort: FileSortKey = DEFAULT_FILE_SORT,
-        order: FileSortOrder = DEFAULT_FILE_SORT_ORDER,
+        self, user_id: int, folder_id: str | None = None, *, offset: int = 0, limit: int = 20
     ) -> tuple[list[UserFileModel], int]:
-        ...
-
-    async def list_all_files(
-        self, user_id: int, *, offset: int = 0, limit: int = 20,
-        sort: FileSortKey = DEFAULT_FILE_SORT,
-        order: FileSortOrder = DEFAULT_FILE_SORT_ORDER,
-    ) -> tuple[list[UserFileModel], int]:
-        """Every file the user owns, in any folder, ordered by the database."""
         ...
 
     async def search_files(
-        self, user_id: int, query: str, *, offset: int = 0, limit: int = 50,
-        sort: FileSortKey = DEFAULT_FILE_SORT,
-        order: FileSortOrder = DEFAULT_FILE_SORT_ORDER,
+        self, user_id: int, query: str, *, offset: int = 0, limit: int = 50
     ) -> tuple[list[UserFileModel], int]:
         ...
 
@@ -548,13 +528,7 @@ class AssistantToolBox:
                     "WHOLE drive (every folder) for a case-insensitive file-name "
                     "substring, so use it for 'find my invoice'. Passing `folder` "
                     "narrows the listing — and any `query` — to that one folder. "
-                    "`all_folders: true` lists the whole drive with no name "
-                    "filter, which is what a question about the drive as a whole "
-                    "needs. `sort` + `order` + a small `limit` answer superlatives "
-                    "in one call — for 'what is my largest file?' use "
-                    "{all_folders: true, sort: 'size', order: 'desc', limit: 1} "
-                    "and report ONLY the file that comes back. Use this to "
-                    "resolve a file the user referred to by name."
+                    "Use this to resolve a file the user referred to by name."
                 ),
                 parameters=_tool_schema(
                     {
@@ -573,41 +547,11 @@ class AssistantToolBox:
                                 "across all folders when no folder is given."
                             ),
                         },
-                        "all_folders": {
-                            "type": ["boolean"],
-                            "description": (
-                                "List every folder, not just the root. Use for "
-                                "questions about the drive as a whole ('my largest "
-                                "file'). Without it, a listing with no folder and "
-                                "no query returns root-level files only."
-                            ),
-                        },
-                        "sort": {
-                            "type": ["string", "null"],
-                            "enum": [key.value for key in FileSortKey],
-                            "description": (
-                                "Order the results by 'name', 'size' or 'date' "
-                                "(the default). Applied by the server before "
-                                "`limit`, so 'size' really does return the "
-                                "largest/smallest files."
-                            ),
-                        },
-                        "order": {
-                            "type": ["string", "null"],
-                            "enum": [value.value for value in FileSortOrder],
-                            "description": (
-                                "'desc' (the default: largest, newest, Z-first) "
-                                "or 'asc' (smallest, oldest, A-first)."
-                            ),
-                        },
                         "limit": {
                             "type": "integer",
                             "minimum": 1,
                             "maximum": _MAX_LIST_LIMIT,
-                            "description": (
-                                "Maximum files to return (default 20). Use a small "
-                                "value for a superlative — 1 for 'the largest'."
-                            ),
+                            "description": "Maximum files to return (default 20).",
                         },
                     }
                 ),
@@ -1102,34 +1046,22 @@ class AssistantToolBox:
         limit = self._as_limit(arguments, "limit", 20)
         query = self._as_str(arguments, "query")
         folder_ref = self._as_str(arguments, "folder")
-        sort = parse_file_sort(arguments.get("sort"))
-        order = parse_file_sort_order(arguments.get("order"))
-        all_folders = arguments.get("all_folders") is True
 
-        # The four shapes of this call are deliberately distinct, because they
+        # The three shapes of this call are deliberately distinct, because they
         # search genuinely different places:
-        #   folder given              -> that one folder (a `query`, if any, narrows it);
-        #   no folder, `query`        -> the WHOLE drive, by name;
-        #   no folder, `all_folders`  -> the WHOLE drive, no name filter;
-        #   none of the above         -> the root listing.
+        #   folder given          -> that one folder (a `query`, if any, narrows it);
+        #   no folder, `query`    -> the WHOLE drive;
+        #   no folder, no `query` -> the root listing.
         # Collapsing the middle case into the root listing was the bug: "find my
         # invoice" would only ever look at root-level files and miss every
-        # document the user had filed away. Collapsing `all_folders` into the
-        # root listing was the same bug for "what is my largest file?" — and that
-        # one is worse, because "the largest of the three files at the top level"
-        # is a confident wrong answer rather than an obviously empty one.
-        #
-        # `sort`/`order` are pushed down to the repository rather than applied
-        # here: ordering a page we already fetched would rank only the rows that
-        # happened to come back, which is precisely what makes a "largest file"
-        # answer untrustworthy.
+        # document the user had filed away.
         if folder_ref is not None:
             folder_id = await self._resolve_folder_id(user_id, folder_ref)
             if folder_id is None:
                 return await self._folder_argument_error(user_id, folder_ref)
             scan = limit if query is None else _QUERY_SCAN_LIMIT
             rows, total = await self._files.list_files(
-                user_id, folder_id, offset=0, limit=scan, sort=sort, order=order
+                user_id, folder_id, offset=0, limit=scan
             )
             if query is not None:
                 needle = query.casefold()
@@ -1139,22 +1071,14 @@ class AssistantToolBox:
             scope = "folder"
         elif query is not None:
             rows, total = await self._files.search_files(
-                user_id, query, offset=0, limit=limit, sort=sort, order=order
+                user_id, query, offset=0, limit=limit
             )
             # The repository's total is the number of matches, not the page it
             # returned, so "12 matches, showing 5" stays honest.
             matched = total
             scope = "all_folders"
-        elif all_folders:
-            rows, total = await self._files.list_all_files(
-                user_id, offset=0, limit=limit, sort=sort, order=order
-            )
-            matched = len(rows)
-            scope = "all_folders"
         else:
-            rows, total = await self._files.list_files(
-                user_id, None, offset=0, limit=limit, sort=sort, order=order
-            )
+            rows, total = await self._files.list_files(user_id, None, offset=0, limit=limit)
             matched = len(rows)
             scope = "root"
 
@@ -1164,10 +1088,6 @@ class AssistantToolBox:
             "count": matched,
             "total": total,
             "scope": scope,
-            # Stated explicitly so the model describes the order it actually got
-            # instead of assuming "newest first" and getting the ranking backwards
-            # in its answer ("here is your largest file" over the smallest one).
-            "ordered_by": {"key": sort.value, "direction": order.value},
         }
         if query is not None and matched == 0:
             result["note"] = (

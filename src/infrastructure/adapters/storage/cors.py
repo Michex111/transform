@@ -60,11 +60,23 @@ _S3_EXPOSED_HEADERS = ["ETag", "Content-Length", "Content-Type"]
 # local dev boot can never remove the deployed SPA's origin — the exact failure
 # that broke production uploads. Any additional deployed origin must be added to
 # ``S3_CORS_ALLOWED_ORIGINS`` in *every* environment (or pinned here).
+#
+# The deployed origins are pinned rather than left to the environment because a
+# Render env var only protects the bucket until the NEXT process to boot writes
+# it — and a developer's localhost-only config is exactly such a process. That
+# is why `transform-to.com` (the custom domain, canonical since 2026-10-01)
+# appears here even though production already sets it in its own env: the two
+# are not redundant, they cover different writers.
+#
+# `www.transform-to.com` is deliberately absent. It 301-redirects to the apex
+# (verified 2026-10-01), so the browser never issues a storage request carrying
+# it, and an allowed origin nobody serves only widens the rule set.
 ALWAYS_ALLOWED_ORIGINS: tuple[str, ...] = (
     "http://localhost:5173",  # Vite dev server
     "http://localhost:5174",  # Vite dev server (alternate port)
     "http://localhost:8000",  # API / legacy SPA origin
-    "https://transform-web.onrender.com",  # deployed SPA (Render static site)
+    "https://transform-web.onrender.com",  # deployed SPA (Render onrender host)
+    "https://transform-to.com",  # deployed SPA (custom domain, canonical)
 )
 
 
