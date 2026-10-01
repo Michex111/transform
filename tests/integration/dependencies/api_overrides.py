@@ -10,6 +10,7 @@ from src.application.exceptions.conversion_job_exception import InvalidConversio
 from src.application.exceptions.file_system_exceptions import FileRecordNotFoundError
 from src.domain.conversions.entities.conversion_job import ConversionJob
 from src.domain.conversions.value_object.conversion_type import ConversionType
+from src.domain.conversions.value_object.job_origin import JobOrigin
 from src.domain.subscriptions.value_object.tier import SubscriptionTier
 from src.infrastructure.database.models import UserFileModel
 from src.presentation.api.dependencies.auth_dependencies import get_current_user
@@ -38,6 +39,7 @@ class FakeConversionService:
         object_key: str,
         user_id: int,
         tier: "SubscriptionTier | None" = None,
+        origin: JobOrigin = JobOrigin.WEB,
     ) -> ConversionJob:
         del tier
         # Validate against the real registry so the route's InvalidConversion
@@ -51,6 +53,7 @@ class FakeConversionService:
             input_file=file_name,
             object_key=object_key,
             user_id=user_id,
+            origin=origin,
         )
         is_supported(job.conversion, get_registry().list_conversions())
         job.pending_processing()

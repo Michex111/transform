@@ -24,6 +24,7 @@ from redis.asyncio import Redis
 import src.infrastructure.adapters.queues.redis_stream_job_queue as queue_module
 from src.domain.conversions.entities.conversion_job import ConversionJob
 from src.domain.conversions.value_object.conversion_type import ConversionType
+from src.domain.conversions.value_object.job_origin import JobOrigin
 from src.infrastructure.adapters.queues.redis_stream_job_queue import (
     JobStream,
     JobStreamConsumer,
@@ -418,3 +419,43 @@ def test_publish_job_does_not_trim_the_input_streams() -> None:
     assert [(stream, maxlen) for stream, _, maxlen in redis.xadds] == [
         ("conversion_jobs", None)
     ]
+
+
+# ----------------------------------------------------------------------
+# origin — the worker needs it for origin-aware credit spending
+# ----------------------------------------------------------------------
+
+
+def test_build_job_preserves_the_origin_from_the_stream() -> None:
+    redis = StubRedisStream()
+    redis.add("conversion_jobs:high", _fields("api-job", origin="API"))
+    consumer = _consumer("worker-a", redis)
+
+    delivered = asyncio.run(consumer.fetch_job())
+
+    assert delivered is not None
+    assert delivered[1].origin is JobOrigin.API
+
+
+def test_build_job_defaults_a_missing_origin_to_web() -> None:
+    """An entry written before this field existed must not raise."""
+    redis = StubRedisStream()
+    redis.add("conversion_jobs:high", _fields("legacy-job"))
+    consumer = _consumer("worker-a", redis)
+
+    delivered = asyncio.run(consumer.fetch_job())
+
+    assert delivered is not None
+    assert delivered[1].origin is JobOrigin.WEB
+
+
+def test_build_job_tolerates_an_unknown_origin_value() -> None:
+    """A value this code no longer understands degrades, it does not raise."""
+    redis = StubRedisStream()
+    redis.add("conversion_jobs:high", _fields("odd-job", origin="CLI"))
+    consumer = _consumer("worker-a", redis)
+
+    delivered = asyncio.run(consumer.fetch_job())
+
+    assert delivered is not None
+    assert delivered[1].origin is JobOrigin.WEB

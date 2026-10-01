@@ -10,6 +10,7 @@ from src.application.services.file_listing import FileSortKey, FileSortOrder
 from src.domain.assistant.entities.conversation import Message, MessageRole
 from src.domain.conversions.entities.conversion_job import ConversionJob
 from src.domain.conversions.value_object.conversion_type import ConversionType
+from src.domain.conversions.value_object.job_origin import JobOrigin
 from src.domain.conversions.value_object.job_status import JobStatus
 from src.domain.security.enitities.api_key import APIKey, APIKeyStatus
 from src.domain.subscriptions.entities.credit import Credit
@@ -149,6 +150,77 @@ def test_conversion_job_repo_client_encryption_roundtrip() -> None:
                 assert updated is not None
                 assert updated.client_encrypted is False
                 assert updated.data_key_wrapped is None
+
+        asyncio.run(_run())
+
+
+def test_conversion_job_repo_origin_roundtrip() -> None:
+    """``origin`` is persisted and read back in both directions.
+
+    The worker's spend order depends on this value surviving the database, so a
+    defaulted column that silently read back as NULL would be a real bug (the
+    credit decision would fall back to WEB for API usage).
+    """
+    with sqlite_session_factory() as factory:
+
+        async def _run() -> None:
+            async with factory() as session:
+                user = await _create_user(factory)
+                repo = SQLConversionJobRepository(session)
+                await repo.save_conversion_job(
+                    ConversionJob(
+                        job_id="job-api",
+                        conversion=ConversionType("pdf", "docx"),
+                        input_file="input.pdf",
+                        object_key="uploads/input.pdf",
+                        user_id=user.id,
+                        origin=JobOrigin.API,
+                    )
+                )
+                await repo.save_conversion_job(
+                    ConversionJob(
+                        job_id="job-web",
+                        conversion=ConversionType("pdf", "docx"),
+                        input_file="input.pdf",
+                        object_key="uploads/input.pdf",
+                        user_id=user.id,
+                    )
+                )
+
+                api_job = await repo.get_conversion_job("job-api")
+                web_job = await repo.get_conversion_job("job-web")
+
+                assert api_job is not None
+                assert api_job.origin is JobOrigin.API
+                assert web_job is not None
+                assert web_job.origin is JobOrigin.WEB
+
+        asyncio.run(_run())
+
+
+def test_conversion_job_repo_reads_an_unknown_stored_origin_as_web() -> None:
+    """A value written by a newer/other producer must not raise on read."""
+    with sqlite_session_factory() as factory:
+
+        async def _run() -> None:
+            async with factory() as session:
+                session.add(
+                    ConversionJobModel(
+                        job_id="job-odd",
+                        status=JobStatus.PENDING,
+                        source_format="pdf",
+                        target_format="docx",
+                        input_file="input.pdf",
+                        origin="CLI",
+                    )
+                )
+                await session.commit()
+
+                repo = SQLConversionJobRepository(session)
+                fetched = await repo.get_conversion_job("job-odd")
+
+                assert fetched is not None
+                assert fetched.origin is JobOrigin.WEB
 
         asyncio.run(_run())
 

@@ -2,6 +2,7 @@
 
 from src.domain.conversions.entities.conversion_job import ConversionJob
 from src.domain.conversions.value_object.conversion_type import ConversionType
+from src.domain.conversions.value_object.job_origin import JobOrigin
 from src.infrastructure.adapters.queues.messages import ConversionJobMessage
 
 
@@ -69,3 +70,20 @@ def test_message_omits_client_encryption_fields_when_disabled() -> None:
     assert "data_key_wrapped" not in payload
     assert payload["client_encrypted"] == "false"
     assert ConversionJobMessage._to_bool(payload["client_encrypted"]) is False
+
+
+def test_message_carries_origin_as_a_plain_string() -> None:
+    """Redis stream fields must be strings; the enum is stringified on the way out."""
+    job = _job(user_id=7)
+    job.origin = JobOrigin.API
+
+    payload = ConversionJobMessage.from_conversion_job(job).to_dict()
+
+    assert payload["origin"] == "API"
+    assert type(payload["origin"]) is str
+
+
+def test_message_defaults_origin_to_web() -> None:
+    payload = ConversionJobMessage.from_conversion_job(_job(user_id=7)).to_dict()
+
+    assert payload["origin"] == "WEB"

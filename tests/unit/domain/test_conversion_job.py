@@ -3,6 +3,7 @@ import pytest
 from src.domain.conversions.entities.conversion_job import ConversionJob
 from src.domain.conversions.exceptions import InvalidStateTransition
 from src.domain.conversions.value_object.conversion_type import ConversionType
+from src.domain.conversions.value_object.job_origin import JobOrigin
 from src.domain.conversions.value_object.job_status import JobStatus
 
 
@@ -16,6 +17,50 @@ def test_valid_job_creation_defaults_to_pending_status() -> None:
     assert job.status == JobStatus.AWAITING_UPLOAD
     assert job.output_file is None
     assert job.error_message is None
+
+
+def test_origin_defaults_to_web() -> None:
+    """A caller that knows nothing about origin must be unchanged."""
+    job = ConversionJob(
+        job_id="job-1",
+        conversion=ConversionType(source_format="pdf", target_format="docx"),
+        input_file="s3-file_store/invoice.pdf",
+    )
+
+    assert job.origin is JobOrigin.WEB
+
+
+def test_origin_is_appended_last_so_positional_construction_still_maps() -> None:
+    """``origin`` was added **last** to keep positional callers working.
+
+    A previous change in this repo inserted a field in the middle of this
+    dataclass and silently remapped every positional argument after it. This
+    pins the order: ten positional arguments must still land on the same ten
+    fields, and ``origin`` must fall to its default.
+    """
+    job = ConversionJob(
+        "job-1",
+        ConversionType("pdf", "docx"),
+        "s3-file_store/invoice.pdf",
+        "s3-file_store/out.docx",
+        "uploads/invoice.pdf",
+        JobStatus.PENDING,
+        None,
+        1200,
+        3,
+        99,
+    )
+
+    assert job.job_id == "job-1"
+    assert job.input_file == "s3-file_store/invoice.pdf"
+    assert job.output_file == "s3-file_store/out.docx"
+    assert job.object_key == "uploads/invoice.pdf"
+    assert job.status is JobStatus.PENDING
+    assert job.error_message is None
+    assert job.compute_duration_ms == 1200
+    assert job.credits_used == 3
+    assert job.user_id == 99
+    assert job.origin is JobOrigin.WEB
 
 
 def test_start_processing_transitions_pending_to_processing(conversion_job: ConversionJob) -> None:

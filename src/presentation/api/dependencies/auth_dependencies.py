@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.application.services.api_key_service import APIKeyService
+from src.domain.conversions.value_object.job_origin import JobOrigin
 from src.infrastructure.auth.jwt_provider import verify_access_token
 from src.infrastructure.adapters.repository.sql_api_key_repo import SQLAPIKeyRepository
 from src.infrastructure.database.models import UserModel
@@ -109,3 +110,25 @@ async def get_current_user(
 
 
 CurrentUser = Annotated[UserModel, Depends(get_current_user)]
+
+
+async def get_request_origin(
+    x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
+) -> JobOrigin:
+    """Report **how** the request authenticated, for job-origin tracking.
+
+    Mirrors the precedence inside :func:`get_current_user` exactly: an
+    ``X-API-Key`` header wins over the bearer token, so a request that presents
+    both is an ``API`` request because that is the credential the API actually
+    used. This deliberately duplicates no authentication — it reads the same
+    header and performs no lookup, no validation and no I/O, so it adds nothing
+    to the request cost and cannot reject anyone. Invalid credentials are still
+    rejected by ``get_current_user``, which every endpoint here also depends on.
+
+    Only two outcomes are possible at this layer. ``GUEST`` is never produced by
+    a header — guest endpoints have no ``CurrentUser`` and set it literally.
+    """
+    return JobOrigin.API if x_api_key else JobOrigin.WEB
+
+
+RequestOrigin = Annotated[JobOrigin, Depends(get_request_origin)]

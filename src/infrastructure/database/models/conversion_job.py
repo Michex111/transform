@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 from sqlalchemy import BigInteger, Boolean, DateTime, Enum as SqlEnum, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
+from src.domain.conversions.value_object.job_origin import JobOrigin
 from src.domain.conversions.value_object.job_status import JobStatus
 from src.infrastructure.database.session import Base
 
@@ -39,6 +40,15 @@ class ConversionJobModel(Base):
     # never stored. ``client_encrypted`` flags a FENCR blob input.
     data_key_wrapped: Mapped[str | None] = mapped_column(String, nullable=True)
     client_encrypted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    # How the request that created the job authenticated (web session, API key,
+    # or guest). Stored as a plain ``String(16)`` rather than a Postgres native
+    # ENUM on purpose: adding a value to a native enum needs its own committed
+    # migration, and this repo has already been burned by that split (0009/0010).
+    # ``server_default`` because the column is non-nullable and the production
+    # table is populated — see migration 0021.
+    origin: Mapped[str] = mapped_column(
+        String(16), nullable=False, default=JobOrigin.WEB.value, server_default="WEB"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

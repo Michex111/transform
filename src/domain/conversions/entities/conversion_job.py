@@ -3,6 +3,7 @@ from datetime import datetime
 
 from src.domain.conversions.exceptions import InvalidStateTransition
 from src.domain.conversions.value_object.conversion_type import ConversionType
+from src.domain.conversions.value_object.job_origin import JobOrigin
 from src.domain.conversions.value_object.job_status import JobStatus
 
 @dataclass
@@ -34,6 +35,12 @@ class ConversionJob:
     # meaningless to them. Both stay 0 until the worker has run.
     input_size_bytes: int = 0
     output_size_bytes: int = 0
+    # How the request that created this job authenticated, which decides the
+    # credit spend order in the worker. Declared **last** on purpose: a new
+    # field with a default only stays safe for positional construction while
+    # nothing that already had a position moves. ``WEB`` is the pre-existing
+    # behaviour, so every caller that does not know about origin is unchanged.
+    origin: JobOrigin = JobOrigin.WEB
 
     def pending_processing(self):
         if self.status != JobStatus.AWAITING_UPLOAD:

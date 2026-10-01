@@ -25,7 +25,7 @@ from src.infrastructure.adapters.storage.sanitize import (
 from src.infrastructure.logging.audit import log_data_access
 from src.infrastructure.converters.conversion_map import build_conversion_map
 from src.infrastructure.converters.converter_registry import get_registry
-from src.presentation.api.dependencies.auth_dependencies import CurrentUser
+from src.presentation.api.dependencies.auth_dependencies import CurrentUser, RequestOrigin
 from src.presentation.api.dependencies.download_stream import iter_decrypted_object
 from src.presentation.api.dependencies.job_access import assert_job_owner
 from src.presentation.api.http_headers import content_disposition_attachment
@@ -80,6 +80,7 @@ def _to_response(job: ConversionJob, download_url: str | None = None) -> Convers
         created_at=job.created_at,
         data_key_wrapped=job.data_key_wrapped,
         client_encrypted=job.client_encrypted,
+        origin=str(job.origin),
     )
 
 
@@ -315,6 +316,7 @@ async def delete_conversion_history(
 async def create_conversion_job(
     payload: CreateConversionJobRequest,
     current_user: CurrentUser,
+    origin: RequestOrigin,
     conversion_service: Annotated[ConversionService, Depends(get_conversion_service)],
     file_service: Annotated[FileService, Depends(get_file_service)],
     encryption_service: Annotated[FileEncryptionService | None, Depends(get_encryption_service)],
@@ -340,6 +342,7 @@ async def create_conversion_job(
                 target_format=target_format,
                 object_key=file.file_key,
                 user_id=current_user.id,
+                origin=origin,
             )
             return _to_response(job)
 
@@ -359,6 +362,7 @@ async def create_conversion_job(
             # Reduced to a leaf display name — see ``_safe_display_name``.
             input_file=_safe_display_name(payload.input_key),
             user_id=current_user.id,
+            origin=origin,
         )
         # Register client-side (FENCR) encryption: the browser-uploaded object
         # is a FENCR blob; wrap the raw data key for at-rest storage.

@@ -53,6 +53,11 @@ class ConversionJobResponse(BaseModel):
     # FENCR blob was registered (and see the wrapped key is stored, not raw).
     data_key_wrapped: str | None = None
     client_encrypted: bool = False
+    # How the job's request authenticated (WEB/API/GUEST). Optional (not merely
+    # nullable) for the same reason as ``created_at``: the SPA and the API
+    # deploy independently, so a new client can talk to an older API that does
+    # not send it yet.
+    origin: str | None = None
 
 
 class ConversionHistoryResponse(BaseModel):

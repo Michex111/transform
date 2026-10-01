@@ -8,6 +8,7 @@ from src.domain.conversions.entities.conversion_job import ConversionJob
 from src.domain.conversions.policies.conversion_policy import is_supported
 from src.domain.conversions.policies.job_ownership import is_job_owner
 from src.domain.conversions.value_object.conversion_type import ConversionType
+from src.domain.conversions.value_object.job_origin import JobOrigin
 from src.domain.subscriptions.value_object.tier import SubscriptionTier
 from src.infrastructure.converters.converter_registry import get_registry
 
@@ -68,6 +69,7 @@ class ConversionService:
         object_key: str,
         user_id: int,
         tier: SubscriptionTier = SubscriptionTier.FREE,
+        origin: JobOrigin = JobOrigin.WEB,
     ) -> ConversionJob:
         """Create and enqueue a job that converts a file already stored in the
         user's library.
@@ -76,6 +78,11 @@ class ConversionService:
         ``object_key``, so the job is created directly and enqueued immediately
         (no separate upload/verify step). The worker downloads the existing
         object and converts it.
+
+        ``origin`` records how the request authenticated so the worker can pick
+        the right credit spend order; it defaults to ``WEB`` for callers (such
+        as the assistant tool) that do not thread the request's credential down
+        to this layer.
 
         Raises:
             InvalidConversion: If ``source_format`` / ``target_format`` is not
@@ -87,6 +94,7 @@ class ConversionService:
             input_file=file_name,
             object_key=object_key,
             user_id=user_id,
+            origin=origin,
         )
         await self.create_conversion_job(job)
         await self.push_conversion_job(job, tier=tier)

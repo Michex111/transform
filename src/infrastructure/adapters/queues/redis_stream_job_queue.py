@@ -2,6 +2,7 @@ from collections import deque
 
 from src.domain.conversions.entities.conversion_job import ConversionJob
 from src.domain.conversions.value_object.conversion_type import ConversionType
+from src.domain.conversions.value_object.job_origin import coerce_job_origin
 from src.domain.conversions.value_object.job_status import JobStatus
 from .messages import ConversionJobMessage as JobMessage
 from .stream_names import (
@@ -238,6 +239,11 @@ class JobStreamConsumer(RedisStreamQueue):
             # "true"/"false" string in the stream; parse it back to a bool.
             client_encrypted=JobMessage._to_bool(job.get("client_encrypted")),
             data_key_wrapped=job["data_key_wrapped"] if job.get("data_key_wrapped") else None,
+            # Defensive, NOT ``JobOrigin(raw)``: an old worker's message and an
+            # entry already sitting in the stream both lack this field entirely,
+            # and an unknown value must degrade to WEB rather than raise and
+            # make the job permanently undeliverable.
+            origin=coerce_job_origin(job.get("origin")),
         )
 
         return delivery_key, conversation_job

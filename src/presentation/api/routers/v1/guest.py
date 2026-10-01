@@ -34,6 +34,7 @@ from src.application.services.file_transfer_service import TransferService
 from src.domain.conversions.entities.conversion_job import ConversionJob
 from src.domain.conversions.exceptions import InvalidConversion
 from src.domain.conversions.value_object.conversion_type import ConversionType
+from src.domain.conversions.value_object.job_origin import JobOrigin
 from src.domain.subscriptions.value_object.tier import SubscriptionTier
 from src.infrastructure.adapters.cache.redis_session_adapter import RedisSessionAdapter
 from src.infrastructure.adapters.queues.redis_stream_status_queue import JobEventSubscriber
@@ -142,6 +143,9 @@ async def create_conversion_job(
             # Reduced to a leaf display name — see ``_safe_display_name``.
             input_file=_safe_display_name(payload.input_key),
             user_id=None,
+            # Guests never hold a wallet; the literal is set here rather than
+            # detected, because a guest request carries no credential to read.
+            origin=JobOrigin.GUEST,
         )
         # Guest jobs are ownerless; the data key is wrapped under the fixed
         # "guest" actor so the worker can unwrap it when it converts.

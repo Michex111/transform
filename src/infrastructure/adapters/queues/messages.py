@@ -1,5 +1,6 @@
 from dataclasses import dataclass, asdict
 from src.domain.conversions.entities.conversion_job import ConversionJob
+from src.domain.conversions.value_object.job_origin import JobOrigin
 
 
 @dataclass
@@ -16,6 +17,11 @@ class ConversionJobMessage:
     # as a "true"/"false" string because Redis stream fields must be strings.
     client_encrypted: bool = False
     data_key_wrapped: str | None = None
+    # How the job's request authenticated, so the worker can apply the
+    # origin-aware credit spend order. Serialized as a plain string (Redis
+    # stream fields must be strings); an old message that predates the field
+    # carries no ``origin`` key at all and the worker degrades it to WEB.
+    origin: JobOrigin = JobOrigin.WEB
 
     @classmethod
     def from_conversion_job(cls, job: ConversionJob):
@@ -32,6 +38,7 @@ class ConversionJobMessage:
             # runtime guarantee for a value that came from the database.
             client_encrypted=bool(job.client_encrypted),  # pyrefly: ignore[unnecessary-type-conversion]
             data_key_wrapped=job.data_key_wrapped,
+            origin=job.origin,
         )
 
     def to_dict(self) -> dict:
@@ -41,6 +48,10 @@ class ConversionJobMessage:
         # worker parses "true"/"false" back into a bool via ``_to_bool``.
         if "client_encrypted" in payload:
             payload["client_encrypted"] = "true" if payload["client_encrypted"] else "false"
+        # A StrEnum is a str at runtime, but stringify explicitly so the stream
+        # field is unambiguously a plain string regardless of how it arrived.
+        if "origin" in payload:
+            payload["origin"] = str(payload["origin"])
         return payload
 
     @staticmethod

@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 from src.infrastructure.database.models import ConversionJobModel
 from src.domain.conversions.entities.conversion_job import ConversionJob
 from src.domain.conversions.value_object.conversion_type import ConversionType
+from src.domain.conversions.value_object.job_origin import coerce_job_origin
 from src.domain.conversions.value_object.job_status import JobStatus
 
 from sqlalchemy import delete, func, or_, select, update
@@ -38,6 +39,10 @@ class SQLConversionJobRepository:
             output_size_bytes=job_data.output_size_bytes,
             data_key_wrapped=job_data.data_key_wrapped,
             client_encrypted=job_data.client_encrypted,
+            # Stored as the enum's plain string value. The column is a
+            # String(16), not a native enum, so this is what keeps a future
+            # origin from needing a schema migration.
+            origin=str(job_data.origin),
         )
         self.session.add(job_model)
         await self.session.commit()
@@ -454,4 +459,8 @@ class SQLConversionJobRepository:
             created_at=job_model.created_at,
             input_size_bytes=job_model.input_size_bytes,
             output_size_bytes=job_model.output_size_bytes,
+            # Defensive: a row written before 0021 defaults to WEB server-side,
+            # but any unrecognised value still degrades to WEB rather than
+            # raising on a history read.
+            origin=coerce_job_origin(job_model.origin),
         )
