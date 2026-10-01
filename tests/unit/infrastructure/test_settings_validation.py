@@ -10,6 +10,14 @@ from src.infrastructure.config.settings import Settings
 
 _ENV_EXAMPLE = Path(__file__).resolve().parents[3] / ".env.example"
 STATIC_SITE_ORIGIN = "https://transform-web.onrender.com"
+CUSTOM_DOMAIN_ORIGIN = "https://transform-to.com"
+
+#: Every origin the deployed SPA is actually served from. The Render host stays
+#: live after the custom-domain cutover, so both must be allowed — in the API's
+#: CORS config (or every call from the site fails) and in the bucket's rule set
+#: (or every presigned upload fails). `www.transform-to.com` is excluded on
+#: purpose: it 301-redirects to the apex, so no request ever carries it.
+DEPLOYED_SPA_ORIGINS = (CUSTOM_DOMAIN_ORIGIN, STATIC_SITE_ORIGIN)
 
 
 def _settings(**overrides) -> Settings:
@@ -66,18 +74,21 @@ def test_frontend_dist_dir_defaults_to_none() -> None:
 
 
 @pytest.mark.parametrize("key", ["ALLOWED_ORIGINS", "S3_CORS_ALLOWED_ORIGINS"])
-def test_env_example_allows_the_separately_hosted_spa_origin(key: str) -> None:
+def test_env_example_allows_every_deployed_spa_origin(key: str) -> None:
     """The SPA is a distinct origin; the env template must allow it everywhere.
 
-    Guards against a cutover regression where the API rejects the static site's
-    origin (CORS) or the bucket rejects its direct presigned uploads.
+    Guards against a cutover regression where the API rejects the deployed
+    site's origin (CORS) or the bucket rejects its direct presigned uploads.
+    Both deployed origins are asserted, because the template is what a new
+    deployment copies and a missing one fails silently in the browser.
     """
     line = next(
         (ln for ln in _ENV_EXAMPLE.read_text(encoding="utf-8").splitlines() if ln.startswith(f"{key}=")),
         None,
     )
     assert line is not None, f"{key} missing from .env.example"
-    assert STATIC_SITE_ORIGIN in line, f"{STATIC_SITE_ORIGIN} not allowed by {key} in .env.example"
+    for origin in DEPLOYED_SPA_ORIGINS:
+        assert origin in line, f"{origin} not allowed by {key} in .env.example"
 
 
 def test_production_rejects_plaintext_object_storage() -> None:
