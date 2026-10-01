@@ -22,6 +22,7 @@ from src.application.services.assistant_tools import (
 from src.domain.assistant.policies.assistant_policy import max_actions_per_turn
 from src.domain.conversions.entities.conversion_job import ConversionJob
 from src.domain.conversions.value_object.conversion_type import ConversionType
+from src.domain.conversions.value_object.job_origin import JobOrigin
 from src.domain.conversions.value_object.job_status import JobStatus
 from src.domain.subscriptions.value_object.tier import SubscriptionTier
 from src.infrastructure.database.models import UserFileModel, UserFolderModel
@@ -152,6 +153,7 @@ class FakeConversionService:
         object_key: str,
         user_id: int,
         tier: SubscriptionTier = SubscriptionTier.FREE,
+        origin: JobOrigin = JobOrigin.WEB,
     ) -> ConversionJob:
         self.converted.append(
             {
@@ -161,6 +163,7 @@ class FakeConversionService:
                 "object_key": object_key,
                 "user_id": user_id,
                 "tier": tier,
+                "origin": origin,
             }
         )
         job = ConversionJob(
@@ -169,6 +172,7 @@ class FakeConversionService:
             input_file=file_name,
             object_key=object_key,
             user_id=user_id,
+            origin=origin,
             status=JobStatus.PENDING,
         )
         self.jobs[job.job_id] = job
@@ -599,6 +603,25 @@ def test_start_conversion_enqueues_the_job_and_returns_an_artifact() -> None:
     assert conversions.converted[0]["object_key"] == "objects/report.pdf"
     assert conversions.converted[0]["tier"] == SubscriptionTier.FREE
     assert [artifact.type for artifact in artifacts] == ["job"]
+
+
+def test_start_conversion_threads_the_request_origin_to_the_job() -> None:
+    """An API-key assistant turn must be recorded as API, not the WEB default."""
+    conversions = FakeConversionService()
+    box = _toolbox(files=[_file("file-1")], conversion_service=conversions)
+    artifacts: list[Artifact] = []
+    result = asyncio.run(
+        box.execute(
+            "start_conversion",
+            {"file_id": "file-1", "target_format": "docx"},
+            user_id=OWNER,
+            tier=SubscriptionTier.FREE,
+            artifacts=artifacts,
+            origin=JobOrigin.API,
+        )
+    )
+    assert "error" not in result
+    assert conversions.converted[0]["origin"] is JobOrigin.API
 
 
 def test_start_conversion_respects_the_per_turn_action_limit() -> None:

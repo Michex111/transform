@@ -44,6 +44,7 @@ from src.domain.assistant.exceptions.assistant_exceptions import (
     AssistantQuotaExceeded,
     AssistantToolError,
 )
+from src.domain.conversions.value_object.job_origin import JobOrigin
 from src.domain.subscriptions.value_object.tier import SubscriptionTier
 from src.infrastructure.database.models import UserFileModel
 from tests.fakes.fake_assistant_model_resolver import FakeAssistantModelResolver
@@ -194,8 +195,9 @@ class ScriptedToolBox:
         tier: SubscriptionTier,
         artifacts: list[Artifact],
         conversation_id: str | None = None,
+        origin: JobOrigin = JobOrigin.WEB,
     ) -> dict:
-        del user_id, tier, conversation_id
+        del user_id, tier, conversation_id, origin
         self.executed.append((name, arguments))
         artifacts.extend(self.artifacts.get(name, []))
         return self.results.get(name, {})

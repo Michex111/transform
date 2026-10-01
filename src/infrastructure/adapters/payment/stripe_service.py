@@ -63,6 +63,25 @@ def _unix_to_datetime(value: Any) -> datetime | None:
 
 
 @dataclass(frozen=True, slots=True)
+class SavedPaymentMethod:
+    """One saved card, in the shape the SPA's billing page needs.
+
+    Deliberately a narrow projection of the Stripe object: only the fields the
+    card list renders and the single flag it acts on. ``is_default`` is derived
+    from the **customer's** ``invoice_settings.default_payment_method`` rather
+    than from the card itself, so this list is the single source of truth for
+    which card a future charge will use.
+    """
+
+    id: str
+    brand: str
+    last4: str
+    exp_month: int
+    exp_year: int
+    is_default: bool
+
+
+@dataclass(frozen=True, slots=True)
 class PlanChangeResult:
     """Outcome of an in-place plan change on an existing subscription.
 
@@ -816,3 +835,132 @@ class StripeService:
         except Exception as e:
             logger.error("Failed to create customer session: %s", e, exc_info=True)
             return None
+
+    # --- Saved payment methods --------------------------------------------
+    # The API-key-authenticated, server-side replacement for the Customer
+    # Portal's card screen (that portal cannot be branded). ``type="card"``
+    # everywhere: the Payment Element can also save SEPA/Link methods, but this
+    # screen can only render cards, so list and act on cards alone.
+
+    @staticmethod
+    def _payment_method_id(value: Any) -> str | None:
+        """The id from a ``default_payment_method`` that may be id or expanded."""
+        if isinstance(value, str):
+            return value
+        return _stripe_get(value, "id")
+
+    @staticmethod
+    def _to_saved_payment_method(method: Any, default_id: str | None) -> SavedPaymentMethod:
+        """Project a Stripe PaymentMethod onto the fields the UI shows."""
+        card = _stripe_get(method, "card")
+        method_id = _stripe_get(method, "id")
+        return SavedPaymentMethod(
+            id=str(method_id) if method_id else "",
+            brand=str(_stripe_get(card, "brand", "unknown")),
+            last4=str(_stripe_get(card, "last4", "")),
+            exp_month=int(_stripe_get(card, "exp_month", 0) or 0),
+            exp_year=int(_stripe_get(card, "exp_year", 0) or 0),
+            is_default=bool(method_id) and method_id == default_id,
+        )
+
+    async def list_payment_methods(self, customer_id: str) -> list[SavedPaymentMethod]:
+        """List the customer's saved cards, marking the default one.
+
+        Returns an empty list (not an error) when Stripe is unconfigured or the
+        call fails, so the billing page can render an empty section rather than
+        a 500. ``is_default`` comes from the customer's invoice settings, which
+        is the value Stripe actually consults when no subscription-level
+        override exists.
+        """
+        if not self._enabled:
+            return []
+
+        try:
+            client = self._get_client()
+            customer = await asyncio.to_thread(
+                client.v1.customers.retrieve, customer_id
+            )
+            default_id = self._payment_method_id(
+                _stripe_get(_stripe_get(customer, "invoice_settings"), "default_payment_method")
+            )
+            methods = await asyncio.to_thread(
+                client.v1.payment_methods.list,
+                {"customer": customer_id, "type": "card"},
+            )
+            data = _stripe_get(methods, "data", []) or []
+        except Exception as e:
+            logger.error("Failed to list payment methods: %s", e, exc_info=True)
+            return []
+
+        return [self._to_saved_payment_method(method, default_id) for method in data]
+
+    async def set_default_payment_method(
+        self,
+        customer_id: str,
+        payment_method_id: str,
+        subscription_id: str | None = None,
+    ) -> bool:
+        """Make a saved card the default, on the customer AND the subscription.
+
+        Updating the customer alone is not enough. A renewal charges the
+        **subscription's** ``default_payment_method``, falling back to the
+        customer's only when the subscription has none — and a subscription
+        created outside this service (Dashboard, a migration) may already pin
+        its own card. Setting only the customer default can therefore leave the
+        next invoice charging the OLD card while the UI claims otherwise.
+        """
+        if not self._enabled:
+            return False
+
+        try:
+            client = self._get_client()
+            await asyncio.to_thread(
+                client.v1.customers.update,
+                customer_id,
+                {"invoice_settings": {"default_payment_method": payment_method_id}},
+            )
+            if subscription_id:
+                await asyncio.to_thread(
+                    client.v1.subscriptions.update,
+                    subscription_id,
+                    {"default_payment_method": payment_method_id},
+                )
+            logger.info(
+                "Set default payment method",
+                extra={
+                    "customer_id": customer_id,
+                    "payment_method_id": payment_method_id,
+                    "subscription_id": subscription_id,
+                },
+            )
+            return True
+
+        except Exception as e:
+            logger.error("Failed to set default payment method: %s", e, exc_info=True)
+            return False
+
+    async def detach_payment_method(self, payment_method_id: str) -> bool:
+        """Detach a saved card from its customer.
+
+        The caller MUST already have refused detaching the default card of an
+        active subscription. Stripe warns that detaching a payment method used
+        by an active subscription breaks that subscription, because it removes
+        the customer default the subscription relies on; this method performs
+        only the mechanic, never the policy.
+        """
+        if not self._enabled:
+            return False
+
+        try:
+            client = self._get_client()
+            await asyncio.to_thread(
+                client.v1.payment_methods.detach, payment_method_id
+            )
+            logger.info(
+                "Detached payment method", extra={"payment_method_id": payment_method_id}
+            )
+            return True
+
+        except Exception as e:
+            logger.error("Failed to detach payment method: %s", e, exc_info=True)
+            return False

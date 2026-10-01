@@ -381,6 +381,76 @@ def test_upgrading_a_plan_raises_the_allowance_and_keeps_unspent_credits() -> No
 
 
 # ---------------------------------------------------------------------------
+# GAP 1 — `customer.subscription.updated` stored a NULL subscription id.
+#
+# The payload for that event IS the subscription object, so its id is at
+# ``event_data["id"]`` — there is no nested ``subscription`` field. The old
+# code read one anyway and stored NULL, which silently broke
+# ``cancel_subscription`` and the status endpoint's period lookup for every
+# user whose row was last written by this handler.
+# ---------------------------------------------------------------------------
+
+
+def test_subscription_updated_persists_the_payload_id_not_a_nested_field() -> None:
+    with sqlite_session_factory() as factory:
+
+        async def _run() -> None:
+            async with factory() as session:
+                event = {
+                    "id": "sub_123",
+                    "status": "active",
+                    "customer": "cus_1",
+                    "metadata": {"user_id": "42", "tier": "pro"},
+                    "items": {"data": [{"price": {"id": "price_pro_monthly"}}]},
+                }
+                # The premise of the bug: there is no nested subscription key.
+                assert "subscription" not in event
+
+                await webhooks._handle_subscription_updated(session, event)
+
+                from src.infrastructure.adapters.repository.sql_subscription_repo import (
+                    SQLSubscriptionRepository,
+                )
+
+                row = await SQLSubscriptionRepository(session).get_wallet(42)
+                assert row is not None
+                assert row.stripe_subscription_id == "sub_123"
+
+        asyncio.run(_run())
+
+
+def test_checkout_completed_still_reads_the_nested_subscription_field() -> None:
+    """Guard against "unifying" the three handlers.
+
+    A Checkout Session payload is NOT a subscription: its subscription
+    reference really is nested under ``subscription``. This pins that the
+    GAP 1 fix did not spread to the handler where the nested field is correct.
+    """
+    with sqlite_session_factory() as factory:
+
+        async def _run() -> None:
+            async with factory() as session:
+                event = {
+                    "id": "cs_1",
+                    "payment_status": "paid",
+                    "customer": "cus_1",
+                    "subscription": "sub_from_session",
+                    "metadata": {"user_id": "42", "tier": "pro", "kind": "subscription"},
+                }
+                await webhooks._handle_checkout_completed(session, event)
+
+                from src.infrastructure.adapters.repository.sql_subscription_repo import (
+                    SQLSubscriptionRepository,
+                )
+
+                row = await SQLSubscriptionRepository(session).get_wallet(42)
+                assert row is not None
+                assert row.stripe_subscription_id == "sub_from_session"
+
+        asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
 # SEC-6 — unbounded body read on the unauthenticated webhook
 # ---------------------------------------------------------------------------
 

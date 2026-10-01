@@ -3,7 +3,7 @@
 from datetime import datetime
 from enum import StrEnum
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from src.domain.subscriptions.value_object.tier import SubscriptionTier as DomainTier
 
@@ -119,6 +119,35 @@ class PaymentMethodSessionResponse(BaseModel):
     """
 
     client_secret: str | None = None
+    enabled: bool = True
+
+
+class SavedPaymentMethodResponse(BaseModel):
+    """One saved card, for the in-app billing screen.
+
+    Only what the card list renders plus the flag it acts on. ``is_default`` is
+    computed by the server from the customer's invoice settings, so the client
+    never has to guess which card a renewal will charge.
+    """
+
+    id: str
+    brand: str
+    last4: str
+    exp_month: int
+    exp_year: int
+    is_default: bool = False
+
+
+class PaymentMethodListResponse(BaseModel):
+    """The caller's saved cards.
+
+    ``enabled = False`` when Stripe is unconfigured or the user has no customer
+    yet — both ordinary states (a Free user has no customer until checkout) —
+    mirroring ``/payment-method-session`` so the SPA can hide the section rather
+    than show an empty Payment Element.
+    """
+
+    methods: list[SavedPaymentMethodResponse] = Field(default_factory=list)
     enabled: bool = True
 
 

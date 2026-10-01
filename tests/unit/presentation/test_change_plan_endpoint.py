@@ -307,3 +307,56 @@ def test_downgrade_is_scheduled_without_touching_the_wallet_now() -> None:
                 assert credit.remaining == 1500
 
         asyncio.run(_assert())
+
+
+# ---------------------------------------------------------------------------
+# GAP 2 — the upgrade is one transaction.
+#
+# Three separately-committing writes used to mean a failure between them could
+# leave carryover credited while the plan bucket was never reset (credits
+# created) or the tier switched while the wallet was not. The repositories now
+# take ``commit=False`` and the route commits once; this proves the rollback on
+# a mid-sequence failure leaves NO partial wallet behind.
+# ---------------------------------------------------------------------------
+
+
+def test_a_failure_mid_upgrade_leaves_no_partial_wallet(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with sqlite_session_factory() as factory:
+
+        async def _seed() -> None:
+            await _seed_subscription(factory, 42, DomainTier.PRO)
+            await _seed_bucket(factory, 42, allowance=500, remaining=320)
+
+        asyncio.run(_seed())
+        stripe = FakeStripeService()
+
+        async def _boom(*args: Any, **kwargs: Any) -> None:
+            raise RuntimeError("ledger write failed")
+
+        # Fail on the LAST of the three writes, after the wallet and the plan
+        # bucket have already been staged in the session.
+        monkeypatch.setattr(SQLCreditRepository, "record_transaction", _boom)
+
+        with pytest.raises(RuntimeError):
+            _call(factory, ChangePlanRequest(tier=SubscriptionTier.PRO_PLUS), stripe)
+
+        # The Stripe call happened before the local mutation; the rollback must
+        # not have undone it, but it must not have "half-applied" locally either.
+        assert stripe.calls != []
+
+        async def _assert() -> None:
+            async with factory() as session:
+                row = await SQLSubscriptionRepository(session).get_wallet(42)
+                assert row is not None
+                assert row.tier == DomainTier.PRO  # tier not switched
+                assert row.carryover_credits == 0  # nothing credited
+                credit = await SQLCreditRepository(session).get_credit(
+                    "42", current_period_key()
+                )
+                assert credit is not None
+                assert credit.allowance == 500  # plan bucket not reset
+                assert credit.remaining == 320
+
+        asyncio.run(_assert())

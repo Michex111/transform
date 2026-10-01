@@ -66,7 +66,7 @@ from src.infrastructure.adapters.repository.sql_subscription_repo import (
 )
 from src.infrastructure.config.settings import get_settings
 from src.infrastructure.logging.audit import log_data_access
-from src.presentation.api.dependencies.auth_dependencies import CurrentUser
+from src.presentation.api.dependencies.auth_dependencies import CurrentUser, RequestOrigin
 from src.presentation.api.dependencies.service_dependencies import (
     get_assistant_model_registry,
     get_assistant_quota,
@@ -302,6 +302,7 @@ async def chat(
     payload: ChatRequest,
     request: Request,
     current_user: CurrentUser,
+    origin: RequestOrigin,
     assistant: Annotated[AssistantService, Depends(get_assistant_service)],
     subscriptions: Annotated[SQLSubscriptionRepository, Depends(get_subscription_repository)],
 ) -> StreamingResponse:
@@ -314,6 +315,10 @@ async def chat(
         conversation_id=payload.conversation_id,
         file_ids=payload.file_ids,
         context=payload.context,
+        # How this request authenticated (API key vs browser). A conversion the
+        # assistant starts is labelled with it so the worker picks the right
+        # credit spend order instead of always assuming WEB.
+        origin=origin,
     )
 
     # Pull the first event eagerly: the access checks (quota, tier, conversation

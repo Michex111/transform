@@ -38,23 +38,131 @@ _TIER_BY_NAME: dict[str, SubscriptionTier] = {
 
 
 def _resolve_tier(tier_name: str | None) -> SubscriptionTier:
-    """Strictly resolve a tier name; never silently default to PRO."""
+    """Strictly resolve a tier name; never silently default to PRO.
+
+    The name-only resolver, kept for the strict callers (and tests) that must
+    not fall back to a price. :func:`_resolve_activation_tier` layers the
+    price-id fallback on top of the same table.
+    """
     tier = _TIER_BY_NAME.get((tier_name or "").lower())
     if tier is None:
         raise ValueError(f"Unrecognised subscription tier: {tier_name!r}")
     return tier
 
 
+def _tier_for_price_id(price_id: str | None) -> SubscriptionTier | None:
+    """Resolve a tier from a Stripe price id, or None when it is not configured.
+
+    This is the fallback for a subscription whose ``metadata.tier`` did not
+    survive onto the object the webhook received — most notably a **downgrade**,
+    whose new tier is carried by the subscription *schedule*'s second phase and
+    is copied onto the subscription by Stripe only at the phase boundary. If
+    that copy did not happen, ``metadata.tier`` still names the OLD plan and
+    this resolves the new one from the price instead.
+
+    Only the three self-serve prices are recognised, and only by exact match:
+    Stripe price ids are opaque, so a missing or unrelated id is simply "no
+    fallback", never a guess at another tier.
+    """
+    if not price_id:
+        return None
+    settings = get_settings()
+    by_price_id = {
+        settings.STRIPE_PRICE_PRO: SubscriptionTier.PRO,
+        settings.STRIPE_PRICE_PRO_PLUS: SubscriptionTier.PRO_PLUS,
+        settings.STRIPE_PRICE_ENTERPRISE: SubscriptionTier.ENTERPRISE,
+    }
+    return by_price_id.get(price_id)
+
+
+def _resolve_activation_tier(
+    tier_name: str | None, price_id: str | None
+) -> SubscriptionTier:
+    """Resolve the tier an activation should apply.
+
+    **The price wins when it resolves to a known tier.** The price is what the
+    customer is actually being billed, so it is ground truth; ``metadata.tier``
+    is a value this service wrote earlier and can be stale. That staleness is
+    not hypothetical — it is the exact downgrade case this function exists to
+    survive: a downgrade puts the new tier on the subscription *schedule*'s
+    second phase, and Stripe copies that onto the subscription only at the
+    phase boundary. If the copy does not happen, ``metadata.tier`` still names
+    the OLD plan, so a metadata-first order would re-apply the old tier and the
+    downgrade would silently never take effect.
+
+    Metadata is still consulted when the price is absent or unrecognised (a
+    legacy or non-self-serve price is simply "no information", never a guess),
+    which keeps the checkout path working — a `checkout.session.completed`
+    payload carries only a subscription *id*, so there is no price to read and
+    the metadata written at checkout is all there is.
+
+    Disagreement is logged at WARNING: it means one of the two sources is
+    wrong, and which one is genuinely ambiguous, so it should be visible rather
+    than silently resolved.
+
+    Raises ``ValueError`` when neither source resolves — the existing
+    "skip and log" path for callers. ``tier_name`` is deliberately NOT
+    defaulted to ``"pro"`` upstream: doing so would make every unrecognised
+    payload silently re-apply PRO.
+    """
+    from_price = _tier_for_price_id(price_id)
+    from_metadata = _TIER_BY_NAME.get((tier_name or "").lower())
+
+    if from_price is not None:
+        if from_metadata is not None and from_metadata is not from_price:
+            logger.warning(
+                "Tier sources disagree; trusting the billed price. "
+                "metadata.tier=%r price_id=%r resolved=%r",
+                tier_name,
+                price_id,
+                from_price,
+            )
+        return from_price
+
+    if from_metadata is not None:
+        return from_metadata
+
+    raise ValueError(
+        f"Unrecognised subscription tier: {tier_name!r} (price id {price_id!r})"
+    )
+
+
+def _first_price_id(subscription_data: Any) -> str | None:
+    """Read ``items.data[0].price.id`` from a subscription payload, or None.
+
+    The path is four levels deep and any level may be missing on a partial or
+    odd payload, so every step is guarded: a payload without a price must
+    degrade to "no fallback available", never raise an unexpected exception out
+    of a webhook.
+    """
+    data = _normalise_event_data(subscription_data)
+    items = data.get("items")
+    if not isinstance(items, dict):
+        return None
+    entries = items.get("data")
+    if not isinstance(entries, list) or not entries:
+        return None
+    first = entries[0]
+    if not isinstance(first, dict):
+        return None
+    price = first.get("price")
+    if not isinstance(price, dict):
+        return None
+    price_id = price.get("id")
+    return price_id if isinstance(price_id, str) else None
+
+
 async def _activate_subscription(
     db: AsyncSession,
     *,
     user_id: str,
-    tier_name: str,
+    tier_name: str | None,
     stripe_customer_id: str | None,
     stripe_subscription_id: str | None,
+    price_id: str | None = None,
 ) -> None:
     """Upsert the user's subscription row and grant the tier's monthly credits."""
-    tier = _resolve_tier(tier_name)
+    tier = _resolve_activation_tier(tier_name, price_id)
     actor_key = f"user:{user_id}"
 
     sub_repo = SQLSubscriptionRepository(db)
@@ -393,7 +501,9 @@ async def _refresh_allowance_for_invoice(db: AsyncSession, event_data: dict[str,
 
     metadata = getattr(sub, "metadata", None) or {}
     user_id = metadata.get("user_id")
-    tier_name = metadata.get("tier", "pro")
+    # Not defaulted to "pro": an absent tier must reach the price-id fallback
+    # inside ``_activate_subscription`` rather than silently re-applying PRO.
+    tier_name = metadata.get("tier")
     if not user_id:
         logger.info("Invoice subscription has no user metadata: %s", subscription_id)
         return
@@ -405,6 +515,7 @@ async def _refresh_allowance_for_invoice(db: AsyncSession, event_data: dict[str,
             tier_name=tier_name,
             stripe_customer_id=event_data.get("customer"),
             stripe_subscription_id=subscription_id,
+            price_id=_first_price_id(sub),
         )
     except ValueError as exc:
         logger.warning("Skipping invoice allowance refresh: %s", exc)
@@ -422,14 +533,26 @@ async def _handle_subscription_updated(db: AsyncSession, event_data: dict[str, A
         await _downgrade_to_free(db, user_id)
         return
 
-    tier_name = metadata.get("tier", "pro")
+    # Not defaulted to "pro": an absent tier must reach the price-id fallback
+    # inside ``_activate_subscription`` rather than silently re-applying PRO.
+    tier_name = metadata.get("tier")
     try:
         await _activate_subscription(
             db,
             user_id=user_id,
             tier_name=tier_name,
             stripe_customer_id=event_data.get("customer"),
-            stripe_subscription_id=event_data.get("subscription"),
+            # NOTE: this handler is the odd one out. A
+            # `customer.subscription.updated` payload IS the subscription
+            # object, so its own id lives at `event_data["id"]` — there is no
+            # nested `subscription` field, and reading one (the old code) stored
+            # NULL, silently breaking `cancel_subscription` and the status
+            # endpoint's period lookup. The sibling handlers intentionally keep
+            # `.subscription`: there the payload is a Checkout Session / Invoice
+            # and `.subscription` is the correct NESTED reference. Do not
+            # "unify" these three lines.
+            stripe_subscription_id=event_data.get("id"),
+            price_id=_first_price_id(event_data),
         )
     except ValueError as exc:
         logger.warning("Skipping subscription update: %s", exc)

@@ -182,14 +182,19 @@ class SQLSubscriptionRepository:
         carryover_expires_at: datetime | None,
         purchased_credits: int,
         purchased_credits_first: bool,
+        commit: bool = True,
     ) -> UserSubscriptionModel | None:
-        """Persist the full wallet state for a user and commit.
+        """Persist the full wallet state for a user and (by default) commit.
 
         Takes every field explicitly rather than defaulting some to "leave
         unchanged": the upgrade path must be able to *clear* an expiry as well
         as set one, and a sentinel/None-means-unchanged convention would make
         ``carryover_expires_at=None`` (a legitimate value) unexpressible.
         Returns the updated row, or ``None`` when the user has no row to update.
+
+        ``commit=False`` leaves the change pending so a caller that also writes
+        ``monthly_credits`` can commit both in one transaction. The default
+        preserves the historical behaviour.
         """
         row = await self.get_subscription_row(user_id)
         if row is None:
@@ -199,5 +204,6 @@ class SQLSubscriptionRepository:
         row.purchased_credits = purchased_credits
         row.purchased_credits_first = purchased_credits_first
         row.updated_at = datetime.now(UTC)
-        await self._session.commit()
+        if commit:
+            await self._session.commit()
         return row

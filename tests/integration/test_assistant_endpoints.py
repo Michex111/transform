@@ -31,6 +31,7 @@ from src.application.services.file_service import FileService
 from src.domain.assistant.exceptions.assistant_exceptions import AssistantQuotaExceeded
 from src.domain.conversions.entities.conversion_job import ConversionJob
 from src.domain.conversions.value_object.conversion_type import ConversionType
+from src.domain.conversions.value_object.job_origin import JobOrigin
 from src.domain.conversions.value_object.job_status import JobStatus
 from src.domain.subscriptions.value_object.tier import SubscriptionTier
 from src.infrastructure.adapters.repository.sql_conversation_repo import (
@@ -120,6 +121,7 @@ class FakeConversionService:
         object_key: str,
         user_id: int,
         tier: SubscriptionTier = SubscriptionTier.FREE,
+        origin: JobOrigin = JobOrigin.WEB,
     ) -> ConversionJob:
         self.converted.append(
             {
@@ -129,6 +131,7 @@ class FakeConversionService:
                 "object_key": object_key,
                 "user_id": user_id,
                 "tier": tier,
+                "origin": origin,
             }
         )
         job = ConversionJob(
@@ -137,6 +140,7 @@ class FakeConversionService:
             input_file=file_name,
             object_key=object_key,
             user_id=user_id,
+            origin=origin,
             status=JobStatus.PENDING,
         )
         self.jobs[job.job_id] = job
@@ -942,6 +946,35 @@ def test_start_conversion_tool_enqueues_a_real_job(tmp_path) -> None:
     done = frames[-1][1]
     assert [artifact["type"] for artifact in done["artifacts"]] == ["file", "job"]
     assert done["content"] == "Started it."
+
+
+def test_api_key_chat_labels_the_conversion_as_api(tmp_path) -> None:
+    """GAP 3: an X-API-Key assistant turn must not enqueue a WEB-labelled job.
+
+    ``get_request_origin`` reads the same header the authenticator used, and the
+    assistant router threads its result down to ``convert_library_file``. This
+    runs the whole HTTP → service → tool → job path, so a regression that
+    dropped the origin anywhere along it would fail here.
+    """
+    llm = FakeLlmPort(
+        [
+            tool_response("start_conversion", {"file_id": "objects/report.pdf", "target_format": "docx"}),
+            text_response("Started it."),
+        ]
+    )
+    files = [("report.pdf", "objects/report.pdf", minimal_pdf("hi"), USER_ID)]
+    with assistant_app(
+        str(tmp_path / "tool-api-origin.db"), seed_files=files, llm=llm
+    ) as harness:
+        response = harness.client.post(
+            "/api/v1/assistant/chat",
+            json={"message": "convert report.pdf to docx"},
+            headers={"X-API-Key": "test-api-key"},
+        )
+
+    assert response.status_code == 200
+    assert harness.conversions.converted
+    assert harness.conversions.converted[0]["origin"] is JobOrigin.API
 
 
 def test_the_model_cannot_convert_another_users_file(tmp_path) -> None:

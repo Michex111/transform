@@ -18,7 +18,7 @@ from src.domain.subscriptions.entities.credit import Credit
 from src.domain.subscriptions.policies.tier_policy import TierPolicy
 from src.domain.subscriptions.value_object.credit_period import current_period_key
 from src.domain.subscriptions.value_object.tier import SubscriptionTier as DomainTier
-from src.infrastructure.adapters.payment.stripe_service import StripeService
+from src.infrastructure.adapters.payment.stripe_service import SavedPaymentMethod, StripeService
 from src.infrastructure.adapters.repository.sql_credit_repo import SQLCreditRepository
 from src.infrastructure.adapters.repository.sql_subscription_repo import SQLSubscriptionRepository
 from src.infrastructure.config.settings import get_settings
@@ -36,8 +36,10 @@ from src.presentation.schemas.subscription import (
     ChangePlanResponse,
     CheckoutRequest,
     CheckoutResponse,
+    PaymentMethodListResponse,
     PaymentMethodSessionResponse,
     PortalResponse,
+    SavedPaymentMethodResponse,
     SubscriptionPlanResponse,
     SubscriptionStatus,
     SubscriptionStatusResponse,
@@ -264,46 +266,68 @@ async def change_plan(
         )
 
     # --- Upgrade: now, on this request ------------------------------------
-    # 1. Carry the unspent plan balance into the expiring carryover pool, and
-    #    optimistically record the new tier. Setting the tier here is what stops
-    #    a double-clicked upgrade from computing carryover twice before the
-    #    webhook lands: the second request then sees the target tier and 400s.
-    new_carryover = row.carryover_credits + old_plan_remaining
-    row.tier = requested
-    await subscription_repo.set_wallet(
-        current_user.id,
-        carryover_credits=new_carryover,
-        carryover_expires_at=result.previous_period_end,
-        purchased_credits=row.purchased_credits,
-        purchased_credits_first=row.purchased_credits_first,
-    )
-
-    # 2. Reset the plan bucket to the NEW tier's grant. Reset, not top-up:
-    #    whatever was left has just become carryover, so adding it here again
-    #    would double-count it (Pro 320 left -> Pro Plus must be 2000 + 320).
+    # All three writes below are one transaction. They used to commit
+    # separately, so a failure between them could leave carryover credited while
+    # the plan bucket was never reset (credits created) or the tier switched
+    # while the wallet was not (credits lost). The repositories therefore expose
+    # ``commit=False`` variants; this block commits once at the end.
+    #
+    # The Stripe call above has already happened; if any write here fails, the
+    # rollback below discards every local change, so the account is left exactly
+    # as Stripe still believes it is (the old tier) rather than half-switched.
     new_grant = TierPolicy.for_tier(requested).monthly_conversion_credits or 0
-    await credit_repo.save_credit(
-        Credit(
-            owner_id=str(current_user.id),
-            period_key=period_key,
-            allowance=new_grant,
-            remaining=new_grant,
+    new_carryover = row.carryover_credits + old_plan_remaining
+    try:
+        # 1. Carry the unspent plan balance into the expiring carryover pool,
+        #    and optimistically record the new tier. Setting the tier here is
+        #    what stops a double-clicked upgrade from computing carryover twice
+        #    before the webhook lands: the second request then sees the target
+        #    tier and 400s.
+        row.tier = requested
+        await subscription_repo.set_wallet(
+            current_user.id,
+            carryover_credits=new_carryover,
+            carryover_expires_at=result.previous_period_end,
+            purchased_credits=row.purchased_credits,
+            purchased_credits_first=row.purchased_credits_first,
+            commit=False,
         )
-    )
 
-    # 3. Ledger row for auditability. No reference_id: a plan change has no
-    #    external id to be idempotent against (and repeated upgrades are
-    #    already prevented by the tier guard above).
-    await credit_repo.record_transaction(
-        transaction_id=str(uuid.uuid4()),
-        user_id=current_user.id,
-        amount=old_plan_remaining,
-        transaction_type=TransactionType.CARRYOVER.value,
-        description=(
-            f"Carried {old_plan_remaining} unspent plan credits over from "
-            f"{previous_api_tier.value} to {requested.value}"
-        ),
-    )
+        # 2. Reset the plan bucket to the NEW tier's grant. Reset, not top-up:
+        #    whatever was left has just become carryover, so adding it here
+        #    again would double-count it (Pro 320 left -> Pro Plus 2000 + 320).
+        await credit_repo.save_credit(
+            Credit(
+                owner_id=str(current_user.id),
+                period_key=period_key,
+                allowance=new_grant,
+                remaining=new_grant,
+            ),
+            commit=False,
+        )
+
+        # 3. Ledger row for auditability. No reference_id: a plan change has no
+        #    external id to be idempotent against (and repeated upgrades are
+        #    already prevented by the tier guard above).
+        await credit_repo.record_transaction(
+            transaction_id=str(uuid.uuid4()),
+            user_id=current_user.id,
+            amount=old_plan_remaining,
+            transaction_type=TransactionType.CARRYOVER.value,
+            description=(
+                f"Carried {old_plan_remaining} unspent plan credits over from "
+                f"{previous_api_tier.value} to {requested.value}"
+            ),
+            commit=False,
+        )
+
+        await credit_repo.commit()
+    except Exception:
+        # Nothing above is durable until the commit, but the session may have
+        # been flushed; rolling back guarantees no partial wallet survives even
+        # if an outer layer were to commit the session.
+        await credit_repo.rollback()
+        raise
 
     return ChangePlanResponse(
         tier=domain_tier_to_api(requested),
@@ -387,6 +411,159 @@ async def create_payment_method_session(
             detail="Payment method session could not be created",
         )
     return PaymentMethodSessionResponse(client_secret=client_secret, enabled=True)
+
+
+def _payment_methods_response(
+    methods: list[SavedPaymentMethod], *, enabled: bool = True
+) -> PaymentMethodListResponse:
+    """Map the service's saved-card projections onto the API schema."""
+    return PaymentMethodListResponse(
+        methods=[
+            SavedPaymentMethodResponse(
+                id=method.id,
+                brand=method.brand,
+                last4=method.last4,
+                exp_month=method.exp_month,
+                exp_year=method.exp_year,
+                is_default=method.is_default,
+            )
+            for method in methods
+        ],
+        enabled=enabled,
+    )
+
+
+async def _customer_id_for(subscription_repo: SQLSubscriptionRepository, user_id: int) -> str | None:
+    row = await subscription_repo.get_subscription_row(user_id)
+    return row.stripe_customer_id if row else None
+
+
+@router.get("/payment-methods", response_model=PaymentMethodListResponse)
+async def list_payment_methods(
+    current_user: CurrentUser,
+    subscription_repo: Annotated[SQLSubscriptionRepository, Depends(get_subscription_repository)],
+    stripe_service: Annotated[StripeService, Depends(get_stripe_service)],
+) -> PaymentMethodListResponse:
+    """List the caller's saved cards.
+
+    Mirrors ``/payment-method-session``: unconfigured Stripe and "no customer
+    yet" are ordinary states, reported as ``enabled=False`` rather than raised,
+    because a Free user has no customer until their first checkout.
+    """
+    if not stripe_service.enabled:
+        return _payment_methods_response([], enabled=False)
+    customer_id = await _customer_id_for(subscription_repo, current_user.id)
+    if not customer_id:
+        return _payment_methods_response([], enabled=False)
+    return _payment_methods_response(await stripe_service.list_payment_methods(customer_id))
+
+
+async def _require_owned_payment_method(
+    *,
+    current_user_id: int,
+    payment_method_id: str,
+    subscription_repo: SQLSubscriptionRepository,
+    stripe_service: StripeService,
+) -> tuple[str, list[SavedPaymentMethod]]:
+    """Resolve the caller's Stripe customer and verify the card belongs to it.
+
+    Returns the customer id and the customer's cards. A card that is unknown or
+    owned by another customer answers 404 identically, so ids stay unenumerable
+    and a caller can never operate on somebody else's payment method.
+    """
+    if not stripe_service.enabled:
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="Stripe integration is not configured.",
+        )
+    customer_id = await _customer_id_for(subscription_repo, current_user_id)
+    if not customer_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No Stripe customer found for this account",
+        )
+    methods = await stripe_service.list_payment_methods(customer_id)
+    if payment_method_id not in {method.id for method in methods}:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Payment method not found",
+        )
+    return customer_id, methods
+
+
+@router.post(
+    "/payment-methods/{payment_method_id}/default",
+    response_model=PaymentMethodListResponse,
+)
+async def set_default_payment_method(
+    payment_method_id: str,
+    current_user: CurrentUser,
+    subscription_repo: Annotated[SQLSubscriptionRepository, Depends(get_subscription_repository)],
+    stripe_service: Annotated[StripeService, Depends(get_stripe_service)],
+) -> PaymentMethodListResponse:
+    """Make one of the caller's saved cards the default for future charges."""
+    customer_id, _ = await _require_owned_payment_method(
+        current_user_id=current_user.id,
+        payment_method_id=payment_method_id,
+        subscription_repo=subscription_repo,
+        stripe_service=stripe_service,
+    )
+    row = await subscription_repo.get_subscription_row(current_user.id)
+    updated = await stripe_service.set_default_payment_method(
+        customer_id,
+        payment_method_id,
+        # Also pin it on the active subscription: a renewal charges the
+        # subscription's own default, which can differ from the customer's.
+        subscription_id=row.stripe_subscription_id if row else None,
+    )
+    if not updated:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Default payment method could not be updated",
+        )
+    return _payment_methods_response(await stripe_service.list_payment_methods(customer_id))
+
+
+@router.delete(
+    "/payment-methods/{payment_method_id}",
+    response_model=PaymentMethodListResponse,
+)
+async def remove_payment_method(
+    payment_method_id: str,
+    current_user: CurrentUser,
+    subscription_repo: Annotated[SQLSubscriptionRepository, Depends(get_subscription_repository)],
+    stripe_service: Annotated[StripeService, Depends(get_stripe_service)],
+) -> PaymentMethodListResponse:
+    """Detach one of the caller's saved cards.
+
+    Refuses to remove the current default while an active subscription exists.
+    Stripe warns that detaching a payment method used by an active subscription
+    breaks that subscription, because it removes the customer default a renewal
+    falls back to. The user must choose a different default card first.
+    """
+    customer_id, methods = await _require_owned_payment_method(
+        current_user_id=current_user.id,
+        payment_method_id=payment_method_id,
+        subscription_repo=subscription_repo,
+        stripe_service=stripe_service,
+    )
+    target = next(method for method in methods if method.id == payment_method_id)
+    row = await subscription_repo.get_subscription_row(current_user.id)
+    if target.is_default and row is not None and row.stripe_subscription_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "This is the default payment method for an active subscription. "
+                "Set another card as default before removing it."
+            ),
+        )
+    removed = await stripe_service.detach_payment_method(payment_method_id)
+    if not removed:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Payment method could not be removed",
+        )
+    return _payment_methods_response(await stripe_service.list_payment_methods(customer_id))
 
 
 @router.get("/status", response_model=SubscriptionStatusResponse)

@@ -68,6 +68,7 @@ from src.domain.assistant.policies.assistant_policy import (
     max_attachments_for_tier,
     max_tool_iterations_for_tier,
 )
+from src.domain.conversions.value_object.job_origin import JobOrigin
 from src.domain.subscriptions.value_object.tier import SubscriptionTier
 from src.infrastructure.converters.conversion_map import build_conversion_map
 
@@ -335,6 +336,7 @@ class AssistantService:
         conversation_id: str | None,
         file_ids: list[str] | None = None,
         context: str | None = None,
+        origin: JobOrigin = JobOrigin.WEB,
     ) -> AsyncIterator[AssistantEvent]:
         """Run one turn, yielding deltas, tool events and a terminal event.
 
@@ -474,6 +476,9 @@ class AssistantService:
                     # the artifact can be resolved from a component (the mini
                     # chat) that does not know the conversation id itself.
                     conversation_id=conversation.id,
+                    # How this HTTP request authenticated, so a conversion the
+                    # assistant starts is labelled API for an X-API-Key turn.
+                    origin=origin,
                 )
                 produced = list(artifacts[before:])
                 collected.extend(produced)

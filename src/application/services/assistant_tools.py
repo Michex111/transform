@@ -45,6 +45,7 @@ from src.domain.assistant.policies.assistant_policy import (
 )
 from src.domain.conversions.entities.conversion_job import ConversionJob
 from src.domain.conversions.policies.job_ownership import is_job_owner
+from src.domain.conversions.value_object.job_origin import JobOrigin
 from src.domain.subscriptions.value_object.tier import SubscriptionTier
 from src.infrastructure.adapters.storage.sanitize import extension_from_filename
 from src.infrastructure.converters.conversion_map import build_conversion_map
@@ -332,6 +333,7 @@ class AssistantConversionServicePort(Protocol):
         object_key: str,
         user_id: int,
         tier: SubscriptionTier = SubscriptionTier.FREE,
+        origin: JobOrigin = JobOrigin.WEB,
     ) -> ConversionJob:
         ...
 
@@ -858,6 +860,7 @@ class AssistantToolBox:
         tier: SubscriptionTier,
         artifacts: list[Artifact],
         conversation_id: str | None = None,
+        origin: JobOrigin = JobOrigin.WEB,
     ) -> dict[str, Any]:
         """Run tool ``name`` and return a JSON-safe result.
 
@@ -871,6 +874,11 @@ class AssistantToolBox:
         to carry it. Defaults to ``None`` because a direct ``execute`` call (as
         in the unit tests, or any future non-chat caller) has no conversation;
         the artifact is still emitted, with ``"conversation_id": None``.
+
+        ``origin`` records how the HTTP request authenticated so a conversion the
+        assistant starts is labelled ``API`` for an ``X-API-Key`` turn instead of
+        always ``WEB``. It is a per-call parameter, not toolbox state, because the
+        toolbox is shared across requests.
         """
         try:
             return await self._dispatch(
@@ -880,6 +888,7 @@ class AssistantToolBox:
                 tier=tier,
                 artifacts=artifacts,
                 conversation_id=conversation_id,
+                origin=origin,
             )
         except Exception as exc:  # noqa: BLE001 — a tool must never abort the loop
             # Deliberately broad: every failure mode of a tool (a storage error,
@@ -898,6 +907,7 @@ class AssistantToolBox:
         tier: SubscriptionTier,
         artifacts: list[Artifact],
         conversation_id: str | None,
+        origin: JobOrigin = JobOrigin.WEB,
     ) -> dict[str, Any]:
         if name == "list_files":
             return await self._list_files(user_id, arguments, artifacts)
@@ -912,7 +922,7 @@ class AssistantToolBox:
         if name == "summarize_file":
             return await self._summarize_file(user_id, arguments, artifacts, tier=tier)
         if name == "start_conversion":
-            return await self._start_conversion(user_id, tier, arguments, artifacts)
+            return await self._start_conversion(user_id, tier, arguments, artifacts, origin=origin)
         if name == "get_conversion_status":
             return await self._get_conversion_status(user_id, arguments, artifacts)
         if name == "list_recent_conversions":
@@ -1270,6 +1280,8 @@ class AssistantToolBox:
         tier: SubscriptionTier,
         arguments: dict[str, Any],
         artifacts: list[Artifact],
+        *,
+        origin: JobOrigin = JobOrigin.WEB,
     ) -> dict[str, Any]:
         already = _actions_taken(artifacts)
         action_budget = max_actions_per_turn(tier)
@@ -1327,6 +1339,10 @@ class AssistantToolBox:
             object_key=row.file_key,
             user_id=user_id,
             tier=tier,
+            # The request's credential decides the credit spend order: an
+            # API-key turn spends purchased credits first, a browser turn the
+            # plan allowance. Defaults to WEB only for non-HTTP callers.
+            origin=origin,
         )
         artifacts.append(
             Artifact(

@@ -30,6 +30,7 @@ from src.domain.assistant.exceptions.assistant_exceptions import (
     AssistantDisabledError,
     AssistantQuotaExceeded,
 )
+from src.domain.conversions.value_object.job_origin import JobOrigin
 from src.domain.subscriptions.value_object.tier import SubscriptionTier
 from src.presentation.api.dependencies.service_dependencies import (
     get_assistant_model_registry,
@@ -202,9 +203,17 @@ class StubAssistantService:
         self.resolved: list[tuple[str, str, bool]] = []
 
     async def stream_chat(
-        self, *, user_id, tier, message, conversation_id, file_ids=None, context=None
+        self,
+        *,
+        user_id,
+        tier,
+        message,
+        conversation_id,
+        file_ids=None,
+        context=None,
+        origin: JobOrigin = JobOrigin.WEB,
     ):
-        del user_id, tier, message, conversation_id, file_ids, context
+        del user_id, tier, message, conversation_id, file_ids, context, origin
         if self.error is not None:
             raise self.error
         yield AssistantTextDelta(text="Hello")
