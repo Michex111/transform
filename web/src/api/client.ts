@@ -23,6 +23,7 @@ import {
   normalizeConversionMap,
   normalizeCreditBalance,
   normalizeCreditHistory,
+  normalizeCreditPreference,
   normalizeCreditPricing,
   normalizeDashboard,
   normalizeDeleteHistoryPreview,
@@ -1303,6 +1304,17 @@ export class ApiClient {
   // ---- Credits ----
   creditBalance = () =>
     this.request<unknown>('/v1/credits/balance', { cacheTtlMs: 30_000 }).then(normalizeCreditBalance)
+  /**
+   * Persist the credit spend-order preference.
+   *
+   * Only the preference is sent: the wallet balances are never client-writable,
+   * so a request cannot mint credits. Applies to API-origin conversions only.
+   */
+  setCreditPreference = (purchasedCreditsFirst: boolean) =>
+    this.request<unknown>('/v1/credits/preference', {
+      method: 'PATCH',
+      body: JSON.stringify({ purchased_credits_first: purchasedCreditsFirst }),
+    }).then(normalizeCreditPreference)
   creditHistory = () =>
     this.request<unknown>('/v1/credits/history', { cacheTtlMs: 30_000 }).then(normalizeCreditHistory)
   /**

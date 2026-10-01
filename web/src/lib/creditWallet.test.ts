@@ -153,8 +153,9 @@ describe("creditSpendingOrderCopy", () => {
 
   it("always explains that the setting cannot be changed here", () => {
     // No endpoint accepts this preference, so there is no success path to
-    // render — the note is the honest alternative to a fake save.
-    expect(creditSpendingOrderCopy(true).note).toContain("can't change this here yet");
+    // The setting is savable now, so the note explains its SCOPE (API-only)
+    // rather than apologising for a missing endpoint.
+    expect(creditSpendingOrderCopy(true).note).toContain("API conversions only");
     expect(creditSpendingOrderCopy(null).note).toContain("couldn't read this setting");
   });
 });

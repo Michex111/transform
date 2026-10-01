@@ -63,3 +63,17 @@ class CreditPricingResponse(BaseModel):
     credits: int
     price_usd: float
     price_per_credit: float
+
+
+class CreditPreferenceRequest(BaseModel):
+    """The user-controlled credit spend order.
+
+    Only this one field is accepted: the wallet balances themselves are never
+    client-writable.
+    """
+
+    purchased_credits_first: bool
+
+
+class CreditPreferenceResponse(BaseModel):
+    purchased_credits_first: bool

@@ -136,6 +136,44 @@ class SQLSubscriptionRepository:
         row.purchased_credits = purchased_credits
         row.updated_at = datetime.now(UTC)
 
+    async def set_credit_preference(
+        self, user_id: int, purchased_credits_first: bool
+    ) -> None:
+        """Persist the credit spend-order preference for a user.
+
+        A single-column write rather than a read-modify-write of the whole
+        wallet. That matters for more than tidiness: routing this through
+        :meth:`set_wallet` would mean the request carrying carryover and
+        purchased balances back from the client, i.e. letting a client rewrite
+        its own balances.
+
+        Creates a FREE row when the user has none. Someone on the free tier can
+        still buy credit packs, so "no subscription row yet" is not a reason to
+        refuse a preference — and the row is what the purchased-credit grant
+        needs to exist anyway. Mirrors :meth:`set_used_storage_bytes`.
+        """
+        result = await self._session.execute(
+            select(UserSubscriptionModel).where(UserSubscriptionModel.user_id == user_id)
+        )
+        row = result.scalar_one_or_none()
+        now = datetime.now(UTC)
+        if row is None:
+            self._session.add(
+                UserSubscriptionModel(
+                    actor_key=f"user:{user_id}",
+                    user_id=user_id,
+                    tier=SubscriptionTier.FREE,
+                    used_storage_bytes=0,
+                    purchased_credits_first=purchased_credits_first,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+        else:
+            row.purchased_credits_first = purchased_credits_first
+            row.updated_at = now
+        await self._session.commit()
+
     async def set_wallet(
         self,
         user_id: int,

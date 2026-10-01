@@ -49,6 +49,7 @@ import type {
   ConversionMapResponse,
   ConversionStats,
   CreditBalanceResponse,
+  CreditPreferenceResponse,
   CreditPricingResponse,
   CreditTransactionResponse,
   DashboardResponse,
@@ -581,6 +582,19 @@ export function normalizeCreditBalance(value: unknown): CreditBalanceResponse {
     purchased_credits: asNullableNumber(o.purchased_credits),
     purchased_credits_first: asNullableBoolean(o.purchased_credits_first),
     total_available: asNullableNumber(o.total_available),
+  }
+}
+
+/**
+ * The saved spend-order preference.
+ *
+ * A missing/malformed value coerces to `false`, matching the server default —
+ * this response is only ever read after a successful PATCH, so an unusable
+ * body means "not enabled" rather than "unknown".
+ */
+export function normalizeCreditPreference(value: unknown): CreditPreferenceResponse {
+  return {
+    purchased_credits_first: asBoolean(asObject(value).purchased_credits_first, false),
   }
 }
 

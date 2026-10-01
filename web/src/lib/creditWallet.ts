@@ -113,21 +113,23 @@ export interface CreditSpendingOrderCopy {
   /** True when the API actually reported the value (false on an older API). */
   known: boolean;
   /**
-   * The honest explanation under the control.
+   * The explanation shown under the control.
    *
-   * There is deliberately no success path here: no endpoint accepts this
-   * preference yet, and this repo does not ship confirm-then-error or
-   * fake-success UI. The control is rendered disabled with this note instead.
+   * This is a real, savable setting now (`PATCH /v1/credits/preference`). The
+   * note therefore explains the *scope* rather than apologising for a missing
+   * endpoint — the restriction that matters is that it only affects API
+   * conversions, which a user cannot infer from the toggle alone.
    */
   note: string;
 }
 
 /**
- * The read-only state and copy for the `purchased_credits_first` control.
+ * The state and copy for the `purchased_credits_first` control.
  *
  * `checked` is only meaningful when `known` is true; an API that never sent the
  * field leaves the control off with a note that says so, rather than claiming
- * the account's real preference.
+ * the account's real preference. A still-unknown value is nonetheless
+ * settable, so the note does not claim otherwise.
  */
 export function creditSpendingOrderCopy(
   value: boolean | null | undefined,
@@ -137,8 +139,8 @@ export function creditSpendingOrderCopy(
     checked: value === true,
     known,
     note: known
-      ? "You can't change this here yet — our API doesn't accept the update. Ask support and we'll set it for you."
-      : "We couldn't read this setting from the API, and there's no way to change it here yet. Ask support and we'll set it for you.",
+      ? "Applies to API conversions only — browser conversions always use your plan credits first."
+      : "We couldn't read this setting from the API. Turning it on will save it.",
   };
 }
 

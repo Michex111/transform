@@ -1,23 +1,30 @@
 /**
  * The "spend purchased credits first" preference.
  *
- * Rendered read-only, on purpose: no endpoint accepts this preference yet (the
- * profile PATCH takes names and the default save folder only), and this repo
- * does not ship confirm-then-error or fake-success UI. So the control shows the
- * account's real value from `/credits/balance` and a note that says plainly it
- * cannot be changed here, rather than a toggle that appears to save and does not.
+ * Savable via `PATCH /v1/credits/preference`. The value is read from
+ * `/credits/balance` (the same source the Billing page uses, so the two cannot
+ * disagree about the account's state) and saved with an optimistic update that
+ * rolls back on failure — a switch that stayed flipped after a failed save
+ * would be a lie about the account.
+ *
+ * The restriction the copy has to carry is that this only affects
+ * **API-origin** conversions: browser conversions always spend plan credits
+ * first. A user cannot infer that from the toggle alone.
  */
 
 import { useEffect, useState } from "react";
 import { Coins } from "@phosphor-icons/react";
 import { useAuth } from "@/auth/AuthContext";
+import { useToast } from "@/auth/ToastContext";
 import { Card, Skeleton } from "@/components/ui";
 import { creditSpendingOrderCopy } from "@/lib/creditWallet";
 
 export function CreditPreferenceSection() {
   const { api: client } = useAuth();
+  const { success, error } = useToast();
   // `undefined` means "still loading"; `null` means the API did not report it.
   const [preference, setPreference] = useState<boolean | null | undefined>(undefined);
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -27,14 +34,36 @@ export function CreditPreferenceSection() {
         if (active) setPreference(balance.purchased_credits_first ?? null);
       })
       .catch(() => {
-        // The preference cannot be edited here either way, so a failed read is
-        // not worth an error toast — it just reads as "unknown".
+        // A failed read is not worth an error toast on first paint — the note
+        // already covers "we couldn't read this", and the control stays usable.
         if (active) setPreference(null);
       });
     return () => {
       active = false;
     };
   }, [client]);
+
+  async function toggle(next: boolean) {
+    if (saving) return;
+    const previous = preference;
+    // Optimistic: the switch moves immediately, then reverts if the save fails.
+    setPreference(next);
+    setSaving(true);
+    try {
+      const saved = await client.setCreditPreference(next);
+      setPreference(saved.purchased_credits_first);
+      success(
+        saved.purchased_credits_first
+          ? "API conversions will use purchased credits first."
+          : "API conversions will use your plan credits first.",
+      );
+    } catch (err) {
+      setPreference(previous ?? null);
+      error(err instanceof Error ? err.message : "Could not save this setting");
+    } finally {
+      setSaving(false);
+    }
+  }
 
   const loading = preference === undefined;
   const copy = creditSpendingOrderCopy(preference ?? null);
@@ -65,10 +94,11 @@ export function CreditPreferenceSection() {
             aria-checked={copy.checked}
             aria-label="Spend purchased credits first"
             aria-describedby="credit-spending-order-note"
-            disabled
+            disabled={loading || saving}
+            onClick={() => toggle(!copy.checked)}
             className={`relative mt-0.5 h-6 w-11 shrink-0 rounded-full border transition-colors ${
               copy.checked ? "border-primary bg-primary" : "border-outline-strong bg-surface-variant"
-            } cursor-not-allowed opacity-60`}
+            } ${loading || saving ? "cursor-not-allowed opacity-60" : "cursor-pointer"}`}
           >
             <span
               className={`absolute top-0.5 h-4 w-4 rounded-full bg-on-background transition-transform ${

@@ -657,6 +657,16 @@ export interface CreditPurchaseRequest {
   ui_mode?: 'embedded'
 }
 
+/** The user-controlled credit spend order (`PATCH /v1/credits/preference`). */
+export interface CreditPreferenceResponse {
+  /**
+   * When true, **API-origin** conversions spend purchased credits before plan
+   * credits. Browser conversions always spend plan credits first regardless,
+   * so purchased credits are not burned by ordinary UI usage.
+   */
+  purchased_credits_first: boolean
+}
+
 export interface CreditPricingResponse {
   credits: number
   price_usd: number

@@ -28,6 +28,8 @@ from src.presentation.api.dependencies.service_dependencies import (
 )
 from src.presentation.schemas.credit import (
     CreditBalanceResponse,
+    CreditPreferenceRequest,
+    CreditPreferenceResponse,
     CreditPricingResponse,
     CreditPurchaseRequest,
     CreditTransactionResponse,
@@ -189,3 +191,28 @@ async def purchase_credits(
 async def get_credit_pricing() -> list[CreditPricingResponse]:
     """Get credit pricing information."""
     return _PRICING
+
+
+@router.patch("/preference", response_model=CreditPreferenceResponse)
+async def set_credit_preference(
+    payload: CreditPreferenceRequest,
+    current_user: CurrentUser,
+    subscription_repo: Annotated[SQLSubscriptionRepository, Depends(get_subscription_repository)],
+) -> CreditPreferenceResponse:
+    """Set whether API conversions spend purchased credits before plan credits.
+
+    Only ``purchased_credits_first`` is accepted. The wallet balances are never
+    client-writable: they are derived from payments and consumption, so a
+    request that could set them would be a way to mint credits.
+
+    Applies to **API-origin** jobs only. Browser conversions always spend plan
+    credits first, so that credits the user paid for are not burned by ordinary
+    UI usage — that restriction lives in the worker, and this endpoint only
+    records the preference.
+    """
+    await subscription_repo.set_credit_preference(
+        current_user.id, payload.purchased_credits_first
+    )
+    return CreditPreferenceResponse(
+        purchased_credits_first=payload.purchased_credits_first
+    )
