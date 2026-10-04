@@ -14,8 +14,13 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  checkoutButtonLabel,
+  checkoutCardHint,
+  checkoutUrlWithPromo,
+  checkoutUrlWithoutPromo,
   describeIntent,
   embeddedCheckoutEnabled,
+  normalizePromoCode,
   parseCheckoutIntent,
   publishableKey,
   requestedUiMode,
@@ -128,5 +133,118 @@ describe("embedded checkout availability", () => {
     vi.stubEnv("VITE_STRIPE_PUBLISHABLE_KEY", "  pk_live_abc  ");
     expect(publishableKey()).toBe("pk_live_abc");
     expect(embeddedCheckoutEnabled()).toBe(true);
+  });
+});
+
+describe("promotion codes in the checkout intent", () => {
+  it("carries a code from the URL", () => {
+    expect(parseCheckoutIntent("?tier=PRO&promo=CAMPUS2026")).toEqual({
+      kind: "subscription",
+      tier: "PRO",
+      promo: "CAMPUS2026",
+    });
+  });
+
+  it("leaves a URL without a code exactly as it was", () => {
+    // `promo` is absent, not present-and-undefined, so existing callers and
+    // tests that compare with `toEqual` are untouched.
+    const intent = parseCheckoutIntent("?tier=PRO");
+    expect(intent).toEqual({ kind: "subscription", tier: "PRO" });
+    expect(intent).not.toHaveProperty("promo");
+  });
+
+  it("treats a blank or whitespace-only code as absent", () => {
+    expect(parseCheckoutIntent("?tier=PRO&promo=")).toEqual({ kind: "subscription", tier: "PRO" });
+    expect(parseCheckoutIntent("?tier=PRO&promo=%20%20")).toEqual({
+      kind: "subscription",
+      tier: "PRO",
+    });
+  });
+
+  it("trims a padded code but keeps its casing", () => {
+    // Stripe matches case-insensitively, and echoing the customer's own casing
+    // back is friendlier than shouting it.
+    expect(parseCheckoutIntent("?tier=PRO&promo=%20campus2026%20")).toEqual({
+      kind: "subscription",
+      tier: "PRO",
+      promo: "campus2026",
+    });
+  });
+
+  it("carries a code with a credit pack too", () => {
+    expect(parseCheckoutIntent("?credits=100&promo=GIFT")).toEqual({
+      kind: "credits",
+      amount: 100,
+      promo: "GIFT",
+    });
+  });
+
+  it("normalises a raw code value", () => {
+    expect(normalizePromoCode("  CAMPUS2026 ")).toBe("CAMPUS2026");
+    expect(normalizePromoCode("")).toBeUndefined();
+    expect(normalizePromoCode("   ")).toBeUndefined();
+    expect(normalizePromoCode(null)).toBeUndefined();
+    expect(normalizePromoCode(undefined)).toBeUndefined();
+  });
+});
+
+describe("promo URL builders", () => {
+  it("adds the code to the current URL", () => {
+    expect(checkoutUrlWithPromo("?tier=PRO", "CAMPUS2026")).toBe(
+      "/app/checkout?tier=PRO&promo=CAMPUS2026",
+    );
+  });
+
+  it("replaces a code that is already there", () => {
+    expect(checkoutUrlWithPromo("?tier=PRO&promo=OLD", "NEW")).toBe(
+      "/app/checkout?tier=PRO&promo=NEW",
+    );
+  });
+
+  it("encodes a code with spaces and reserved characters", () => {
+    // Round-trips through the parser, which is what the page actually relies on.
+    const url = checkoutUrlWithPromo("?tier=PRO", "Campus 2026 & Co");
+    expect(url).toContain("promo=Campus%202026%20%26%20Co");
+    const search = url.slice(url.indexOf("?"));
+    expect(parseCheckoutIntent(search)).toEqual({
+      kind: "subscription",
+      tier: "PRO",
+      promo: "Campus 2026 & Co",
+    });
+  });
+
+  it("drops only the code when removing it", () => {
+    // The escape hatch for a mistyped code must keep the purchase intact.
+    expect(checkoutUrlWithoutPromo("?tier=PRO&promo=BAD")).toBe("/app/checkout?tier=PRO");
+    expect(checkoutUrlWithoutPromo("?tier=PRO")).toBe("/app/checkout?tier=PRO");
+    expect(checkoutUrlWithoutPromo("?promo=BAD")).toBe("/app/checkout");
+  });
+});
+
+describe("checkoutButtonLabel", () => {
+  it("invites a free start when nothing is due", () => {
+    expect(checkoutButtonLabel(0)).toBe("Start my free month");
+  });
+
+  it("keeps the paying wording when there is an amount", () => {
+    expect(checkoutButtonLabel(999)).toBe("Pay");
+  });
+
+  it("defaults to paying when the API did not report a total", () => {
+    // An older API omits `amount_total`. Claiming something is free on missing
+    // data would be the worst possible failure mode here.
+    expect(checkoutButtonLabel(null)).toBe("Pay");
+    expect(checkoutButtonLabel(undefined)).toBe("Pay");
+  });
+});
+
+describe("checkoutCardHint", () => {
+  it("says no card is required for a zero total", () => {
+    expect(checkoutCardHint(0)).toContain("No card required");
+  });
+
+  it("keeps the Stripe reassurance when a card is collected", () => {
+    expect(checkoutCardHint(999)).toContain("Stripe");
+    expect(checkoutCardHint(null)).toContain("Stripe");
   });
 });

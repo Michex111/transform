@@ -28,7 +28,7 @@
  */
 
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { loadStripe, type Stripe } from "@stripe/stripe-js";
 import {
   CheckoutElementsProvider,
@@ -38,16 +38,23 @@ import {
 import { Check, Lock } from "@phosphor-icons/react";
 import { useAuth } from "@/auth/AuthContext";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
-import { Button, Card, Logo, Skeleton } from "@/components/ui";
+import { Badge, Button, Card, Logo, Skeleton } from "@/components/ui";
 import { trustedExternalUrl } from "@/lib/download";
+import { discountSummary } from "@/lib/promoDiscount";
 import { STRIPE_CHECKOUT_APPEARANCE } from "@/lib/stripeAppearance";
 import {
+  checkoutButtonLabel,
+  checkoutCardHint,
+  checkoutUrlWithPromo,
+  checkoutUrlWithoutPromo,
   describeIntent,
   embeddedCheckoutEnabled,
+  normalizePromoCode,
   parseCheckoutIntent,
   publishableKey,
   requestedUiMode,
 } from "@/lib/stripeCheckout";
+import type { CheckoutResponse } from "@/api/types";
 
 /**
  * Stripe.js is loaded once per page life. `loadStripe` injects a `<script>` tag
@@ -84,7 +91,14 @@ type Phase = "creating" | "ready" | "failed";
  * as before. `if_required` would keep a card on the page but leave the success
  * destination to be re-derived here, duplicating server config for no gain.
  */
-function CheckoutForm({ onFailure }: { onFailure: (message: string) => void }) {
+function CheckoutForm({
+  amountTotal,
+  onFailure,
+}: {
+  /** Minor-unit total the session will charge, or `null` when unreported. */
+  amountTotal: number | null;
+  onFailure: (message: string) => void;
+}) {
   const state = useCheckoutElements();
   const [submitting, setSubmitting] = useState(false);
 
@@ -117,11 +131,11 @@ function CheckoutForm({ onFailure }: { onFailure: (message: string) => void }) {
     <form onSubmit={submit} className="flex flex-col gap-5 p-6">
       <PaymentElement />
       <Button type="submit" size="lg" disabled={submitting}>
-        {submitting ? "Processing…" : "Pay"}
+        {submitting ? "Processing…" : checkoutButtonLabel(amountTotal)}
       </Button>
       <p className="flex items-center justify-center gap-1.5 text-xs text-muted">
         <Lock size={13} weight="fill" aria-hidden />
-        Payments are handled by Stripe. Your card details never touch our servers.
+        {checkoutCardHint(amountTotal)}
       </p>
     </form>
   );
@@ -169,6 +183,7 @@ export function CheckoutPage() {
   const { api: client } = useAuth();
   const [searchParams] = useSearchParams();
   const search = searchParams.toString();
+  const navigate = useNavigate();
 
   // Keyed on the search string, not on `searchParams`, which is a fresh object
   // on every render and would re-create the session in a loop.
@@ -178,6 +193,20 @@ export function CheckoutPage() {
   const [failure, setFailure] = useState("");
   const [clientSecret, setClientSecret] = useState<string | null>(null);
   const [summary, setSummary] = useState<Summary | null>(null);
+  // The session's own report of what was discounted. `null` until the API
+  // answers, and on an API too old to send the additive discount fields.
+  const [session, setSession] = useState<CheckoutResponse | null>(null);
+  // The code as the customer is typing it; only read on submit.
+  const [promoDraft, setPromoDraft] = useState("");
+
+  // Everything the order summary and the button say about the discount is
+  // derived here, from pure helpers, so none of it is decided inline in JSX.
+  const discount = useMemo(
+    () => discountSummary(session, { renewalPrice: summary?.amount ?? null }),
+    [session, summary],
+  );
+  const amountTotal = session?.amount_total ?? null;
+  const isSubscription = intent?.kind === "subscription";
 
   // A description of the purchase, fetched independently of the payment flow so
   // a failure to load it can never block or delay checkout. The form is the
@@ -238,10 +267,14 @@ export function CheckoutPage() {
 
         const handle =
           intent.kind === "subscription"
-            ? await client.checkout(intent.tier, mode)
+            ? await client.checkout(intent.tier, mode, intent.promo)
             : await client.purchaseCredits(intent.amount, mode);
 
         if (cancelled) return;
+
+        // The session is the only thing that knows the real total and whether a
+        // code was applied, so both the summary and the button read from it.
+        setSession(handle);
 
         if (!handle.client_secret) {
           // Hosted fallback. Guarded the same way downloads are: assigning an
@@ -276,6 +309,27 @@ export function CheckoutPage() {
   // without discarding the form the customer has already filled in.
   function reportFailure(message: string) {
     setFailure(message);
+  }
+
+  /**
+   * Apply a typed code by navigating to the same checkout URL with `&promo=`.
+   *
+   * A Stripe discount is attached to the **session**, so applying a code means
+   * creating a new session — and the URL is what drives session creation here.
+   * Routing the code through it keeps exactly ONE code path and leaves
+   * validation to the server. This runs on submit rather than on every
+   * keystroke, which also avoids minting a session per character.
+   */
+  function applyPromo(event: FormEvent) {
+    event.preventDefault();
+    const code = normalizePromoCode(promoDraft);
+    if (!code) return;
+    navigate(checkoutUrlWithPromo(search, code), { replace: true });
+  }
+
+  /** Return to an ordinary checkout when a code was mistyped or has expired. */
+  function removePromo() {
+    navigate(checkoutUrlWithoutPromo(search), { replace: true });
   }
 
   return (
@@ -313,6 +367,13 @@ export function CheckoutPage() {
                 </p>
                 <p className="mt-1.5 text-sm text-muted">{failure}</p>
                 <div className="mt-5 flex flex-wrap gap-3">
+                  {/* The retry-without-the-code path. A mistyped or expired code
+                      must never leave the customer on a dead page. */}
+                  {intent?.promo && (
+                    <Button type="button" onClick={removePromo}>
+                      Remove promo code
+                    </Button>
+                  )}
                   <Link
                     to="/app/billing"
                     className="inline-flex h-10 items-center rounded-lg bg-primary px-4 text-sm font-semibold text-on-primary transition-colors hover:bg-primary/90"
@@ -356,7 +417,7 @@ export function CheckoutPage() {
                           elementsOptions: { appearance: STRIPE_CHECKOUT_APPEARANCE },
                         }}
                       >
-                        <CheckoutForm onFailure={reportFailure} />
+                        <CheckoutForm amountTotal={amountTotal} onFailure={reportFailure} />
                       </CheckoutElementsProvider>
                     </ErrorBoundary>
                   )}
@@ -389,8 +450,29 @@ export function CheckoutPage() {
                   <p className="text-xs font-medium uppercase tracking-wider text-muted">Summary</p>
                   <div className="mt-3 flex items-baseline justify-between gap-4">
                     <span className="font-display text-base font-semibold">{summary.title}</span>
-                    {summary.amount && (
-                      <span className="font-display text-lg font-semibold">{summary.amount}</span>
+                    {discount?.free ? (
+                      // A struck-through original next to an explicit free
+                      // statement: the customer must never read the crossed-out
+                      // price as a charge.
+                      <span className="flex flex-col items-end text-right">
+                        {summary.amount && (
+                          <span className="text-sm text-muted line-through">{summary.amount}</span>
+                        )}
+                        <span className="font-display text-lg font-semibold text-success">
+                          {discount.headline}
+                        </span>
+                      </span>
+                    ) : discount?.total ? (
+                      <span className="flex flex-col items-end text-right">
+                        {summary.amount && (
+                          <span className="text-sm text-muted line-through">{summary.amount}</span>
+                        )}
+                        <span className="font-display text-lg font-semibold">{discount.total}</span>
+                      </span>
+                    ) : (
+                      summary.amount && (
+                        <span className="font-display text-lg font-semibold">{summary.amount}</span>
+                      )
                     )}
                   </div>
                   {summary.lines.length > 0 && (
@@ -416,8 +498,65 @@ export function CheckoutPage() {
                 </div>
               )}
 
-              {intent?.kind === "subscription" && (
-                <p className="mt-5 border-t border-outline pt-4 text-xs text-muted">
+              {/* Rendered outside the summary block: the discount is a fact
+                  from the session, not from the pricing catalogue, and must
+                  still appear if the courtesy summary failed to load. */}
+              {discount && (
+                <div className="mt-4 rounded-lg border border-outline bg-success/10 p-3">
+                  <div className="flex items-start justify-between gap-3">
+                    <p className="text-sm font-semibold text-success">{discount.headline}</p>
+                    {discount.code && <Badge color="var(--color-success)">{discount.code}</Badge>}
+                  </div>
+                  {discount.dueToday && (
+                    <p className="mt-1.5 text-sm font-medium text-on-background">
+                      {discount.dueToday}
+                    </p>
+                  )}
+                  {discount.detail && <p className="mt-1.5 text-xs text-muted">{discount.detail}</p>}
+                </div>
+              )}
+
+              {/* The code is in the URL but the session has not answered yet.
+                  Without this the summary would look identical to a plain
+                  checkout while the discount is being applied. */}
+              {isSubscription && intent?.promo && !discount && (
+                <p className="mt-4 border-t border-outline pt-4 text-xs text-muted">
+                  Applying code <span className="font-medium text-on-background">{intent.promo}</span>…
+                </p>
+              )}
+
+              {/* Entry point for a code the customer was given out of band. It
+                  only exists before a code is applied; once one is in the URL
+                  the discount block above (or the error below) takes over. */}
+              {isSubscription && !intent?.promo && (
+                <details className="mt-4 border-t border-outline pt-4">
+                  <summary className="cursor-pointer text-sm text-muted transition-colors hover:text-on-background">
+                    Have a promo code?
+                  </summary>
+                  <form onSubmit={applyPromo} className="mt-3 flex gap-2">
+                    <input
+                      type="text"
+                      value={promoDraft}
+                      onChange={(event) => setPromoDraft(event.target.value)}
+                      placeholder="Promo code"
+                      aria-label="Promo code"
+                      autoComplete="off"
+                      className="h-10 min-w-0 flex-1 rounded-lg border border-outline-strong bg-surface-variant px-3 text-sm text-on-background placeholder:text-muted focus:border-primary focus:outline-none"
+                    />
+                    <Button
+                      type="submit"
+                      variant="secondary"
+                      size="sm"
+                      disabled={!promoDraft.trim()}
+                    >
+                      Apply
+                    </Button>
+                  </form>
+                </details>
+              )}
+
+              {isSubscription && (
+                <p className="mt-4 border-t border-outline pt-4 text-xs text-muted">
                   Billed monthly. Cancel any time — you keep your plan until the period ends.
                 </p>
               )}

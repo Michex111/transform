@@ -657,6 +657,21 @@ export interface CreditPurchaseRequest {
   ui_mode?: 'embedded' | 'elements'
 }
 
+/**
+ * Body of `POST /v1/subscription/checkout`.
+ *
+ * `promotion_code` is optional and **only sent when present**: a request
+ * without a code stays byte-identical to the one this app made before promo
+ * codes existed (same convention as `ui_mode`).
+ */
+export interface SubscriptionCheckoutRequest {
+  tier: string
+  /** See `CheckoutResponse.client_secret`. Omitted entirely when hosted. */
+  ui_mode?: 'embedded' | 'elements'
+  /** The customer's promotion code; omitted entirely when there is none. */
+  promotion_code?: string
+}
+
 /** The user-controlled credit spend order (`PATCH /v1/credits/preference`). */
 export interface CreditPreferenceResponse {
   /**
@@ -744,6 +759,16 @@ export interface SubscriptionStatusResponse {
   cancel_at_period_end?: boolean | null
 }
 
+/**
+ * How long a Stripe promotion code's discount lasts.
+ *
+ * `"once"` (this billing period only), `"repeating"` (a fixed number of
+ * months, which the API does not itself report) or `"forever"`. Anything else
+ * is folded to `null` by `normalizeCheckout` — an unrecognised value must not
+ * drive copy about what the customer will be charged.
+ */
+export type DiscountDuration = "once" | "repeating" | "forever"
+
 export interface CheckoutResponse {
   /**
    * Where to send the browser for a **hosted** session; `""` for an embedded
@@ -765,6 +790,24 @@ export interface CheckoutResponse {
    * test, exactly as `trustedExternalUrl(checkout_url)` guards the hosted one.
    */
   client_secret: string
+
+  // ---- Applied promotion code (additive) ----
+  //
+  // Every field below is optional on the same independent-deploy rule as the
+  // rest of this file: the API and the SPA ship separately, so a new bundle can
+  // briefly talk to an API that does not send them. `null` is the single "the
+  // API did not say" value read through `normalizeCheckout`, and the UI must
+  // render NO discount rather than a fabricated one.
+  /** Total due, in the currency's minor unit (`999` → `$9.99`, `0` → free). */
+  amount_total?: number | null
+  /** ISO-4217 code for `amount_total`, e.g. `"usd"`. */
+  currency?: string | null
+  /** The code Stripe actually applied, as stored. */
+  discount_code?: string | null
+  /** The discount's size, e.g. `100`. */
+  discount_percent_off?: number | null
+  /** How long the discount lasts; see {@link DiscountDuration}. */
+  discount_duration?: DiscountDuration | null
 }
 
 /** Stripe Customer Portal session for self-service subscription management. */

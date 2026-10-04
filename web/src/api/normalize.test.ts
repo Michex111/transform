@@ -44,6 +44,7 @@ import {
   normalizeDashboard,
   normalizeDeleteHistoryPreview,
   normalizeDeleteHistoryRange,
+  normalizeDiscountDuration,
   normalizeFile,
   normalizeFileDownload,
   normalizeFileList,
@@ -403,6 +404,64 @@ describe("redirect + auth payloads", () => {
     // page would try to mount a checkout with a secret it cannot use.
     expect(normalizeCheckout({ client_secret: 42 }).client_secret).toBe("");
     expect(normalizeCheckout({ client_secret: {} }).client_secret).toBe("");
+  });
+});
+
+describe("normalizeCheckout promotion fields", () => {
+  it("folds every absent discount field to null", () => {
+    // The API and the SPA deploy independently, so an older API sends none of
+    // these. `null` is the one "the API did not say" value that makes the order
+    // summary render no discount at all — never an empty or misleading row.
+    const c = normalizeCheckout({});
+    expect(c.amount_total).toBeNull();
+    expect(c.currency).toBeNull();
+    expect(c.discount_code).toBeNull();
+    expect(c.discount_percent_off).toBeNull();
+    expect(c.discount_duration).toBeNull();
+  });
+
+  it("preserves a well-formed discount losslessly", () => {
+    const valid = {
+      checkout_url: "",
+      client_secret: "cs_test_abc",
+      amount_total: 0,
+      currency: "usd",
+      discount_code: "CAMPUS2026",
+      discount_percent_off: 100,
+      discount_duration: "once",
+    };
+    expect(normalizeCheckout(valid)).toEqual(valid);
+  });
+
+  it("treats an empty string for a string field as absent", () => {
+    // `""` is not a currency and not a code; both mean the API did not send one.
+    const c = normalizeCheckout({ currency: "", discount_code: "" });
+    expect(c.currency).toBeNull();
+    expect(c.discount_code).toBeNull();
+  });
+
+  it("rejects malformed discount primitives", () => {
+    const c = normalizeCheckout({
+      amount_total: "0",
+      currency: 5,
+      discount_code: 42,
+      discount_percent_off: "100",
+      discount_duration: "weekly",
+    });
+    expect(c.amount_total).toBeNull();
+    expect(c.currency).toBeNull();
+    expect(c.discount_code).toBeNull();
+    expect(c.discount_percent_off).toBeNull();
+    expect(c.discount_duration).toBeNull();
+  });
+
+  it("accepts exactly the three known durations", () => {
+    expect(normalizeDiscountDuration("once")).toBe("once");
+    expect(normalizeDiscountDuration("repeating")).toBe("repeating");
+    expect(normalizeDiscountDuration("forever")).toBe("forever");
+    expect(normalizeDiscountDuration("weekly")).toBeNull();
+    expect(normalizeDiscountDuration(null)).toBeNull();
+    expect(normalizeDiscountDuration(3)).toBeNull();
   });
 
   it("never stores an undefined access token", () => {

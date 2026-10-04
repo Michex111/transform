@@ -55,6 +55,7 @@ import type {
   DashboardResponse,
   DeleteHistoryPreviewResponse,
   DeleteHistoryRangeResponse,
+  DiscountDuration,
   FileDownloadResponse,
   FileListResponse,
   FileMetadataResponse,
@@ -798,17 +799,39 @@ export function normalizeTokenResponse(value: unknown): TokenResponse {
 }
 
 /**
+ * Coerce a raw `discount_duration` to the three values the UI understands.
+ *
+ * Anything else (an absent field, `null`, a future Stripe duration, a
+ * non-string) becomes `null` = "the API did not say", so the copy that explains
+ * what happens after the discount is simply omitted rather than guessed. This is
+ * not the place to invent a renewal story.
+ */
+export function normalizeDiscountDuration(value: unknown): DiscountDuration | null {
+  return value === "once" || value === "repeating" || value === "forever" ? value : null
+}
+
+/**
  * These carry a URL the client navigates to. Without normalisation a missing
  * field navigates the browser to the literal string "undefined".
  *
  * `client_secret` is the embedded counterpart: when it is present the client
  * mounts Stripe.js instead of navigating anywhere.
+ *
+ * The promotion-code block is additive: every field folds to `null` when the API
+ * does not send it, and `""` counts as "not sent" for the string fields (an
+ * empty code is not a code). `null` is what tells the order summary to render
+ * no discount at all — never an empty or, worse, a misleading row.
  */
 export function normalizeCheckout(value: unknown): CheckoutResponse {
   const o = asObject(value)
   return {
     checkout_url: asString(o.checkout_url),
     client_secret: asString(o.client_secret),
+    amount_total: asNullableNumber(o.amount_total),
+    currency: asNullableString(o.currency) || null,
+    discount_code: asNullableString(o.discount_code) || null,
+    discount_percent_off: asNullableNumber(o.discount_percent_off),
+    discount_duration: normalizeDiscountDuration(o.discount_duration),
   }
 }
 

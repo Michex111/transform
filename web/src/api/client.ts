@@ -78,6 +78,7 @@ import type {
   RefreshTokenRequest,
   RequestPhoneVerificationRequest,
   ResetPasswordRequest,
+  SubscriptionCheckoutRequest,
   TokenResponse,
   UpdateProfileRequest,
   UserCreateRequest,
@@ -1347,10 +1348,16 @@ export class ApiClient {
   /** Open a Stripe Customer Portal session for self-service billing management. */
   createPortalSession = () =>
     this.request<unknown>('/v1/subscription/portal', { method: 'POST' }).then(normalizePortal)
-  checkout = (tier: string, uiMode?: 'embedded' | 'elements') =>
+  checkout = (tier: string, uiMode?: 'embedded' | 'elements', promotionCode?: string) =>
     this.request<unknown>('/v1/subscription/checkout', {
       method: 'POST',
-      body: JSON.stringify({ tier, ...(uiMode ? { ui_mode: uiMode } : {}) }),
+      body: JSON.stringify({
+        tier,
+        ...(uiMode ? { ui_mode: uiMode } : {}),
+        // Only sent when a code is present, so a request without one is
+        // byte-identical to the one this app made before promo codes existed.
+        ...(promotionCode ? { promotion_code: promotionCode } : {}),
+      } satisfies SubscriptionCheckoutRequest),
     }).then(normalizeCheckout)
   cancelSubscription = () =>
     this.request<unknown>('/v1/subscription/cancel', { method: 'POST' }).then(
