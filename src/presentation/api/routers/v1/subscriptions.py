@@ -170,6 +170,25 @@ async def create_checkout_session(
     row = await subscription_repo.get_subscription_row(current_user.id)
     customer_id = row.stripe_customer_id if row else None
 
+    # Resolve an optional promotion code BEFORE creating anything. A blank or
+    # whitespace-only value is treated as absent (no lookup at all); a
+    # non-blank code that resolves to nothing is rejected, because silently
+    # charging full price when a student typed a code is the worst outcome.
+    #
+    # The resolved RECORD is passed through, not just the id: the coupon's
+    # percentage and duration are only readable from the lookup (a session's
+    # `discounts[]` carries neither), and the SPA needs them to explain the
+    # discount at all.
+    promotion = None
+    promotion_code = (payload.promotion_code or "").strip()
+    if promotion_code:
+        promotion = await stripe_service.resolve_promotion_code(promotion_code)
+        if promotion is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="That promotion code isn't valid or has expired.",
+            )
+
     settings = get_settings()
     handle = await stripe_service.create_checkout_session(
         user_id=str(current_user.id),
@@ -179,13 +198,22 @@ async def create_checkout_session(
         cancel_url=settings.STRIPE_CANCEL_URL,
         customer_id=customer_id,
         ui_mode=payload.ui_mode.value,
+        promotion=promotion,
     )
     if handle is None:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Stripe checkout session could not be created",
         )
-    return CheckoutResponse(checkout_url=handle.url, client_secret=handle.client_secret)
+    return CheckoutResponse(
+        checkout_url=handle.url,
+        client_secret=handle.client_secret,
+        amount_total=handle.amount_total,
+        currency=handle.currency,
+        discount_code=handle.discount_code,
+        discount_percent_off=handle.discount_percent_off,
+        discount_duration=handle.discount_duration,
+    )
 
 
 @router.post("/change-plan", response_model=ChangePlanResponse)

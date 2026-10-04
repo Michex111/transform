@@ -107,20 +107,41 @@ class CheckoutRequest(BaseModel):
     # Defaults to hosted so an SPA that has not been updated yet keeps the exact
     # behaviour it was built against.
     ui_mode: CheckoutUiMode = CheckoutUiMode.HOSTED
+    # Customer-facing promotion code ("a free month of Pro"). Optional and
+    # blank-tolerant: an SPA that never sends it — or sends an empty string —
+    # gets the exact pre-promo behaviour. Resolution to a Stripe ``promo_…`` id
+    # happens server-side and an unknown/expired code is a 400, never a silent
+    # full-price charge.
+    promotion_code: str | None = None
 
 
 class CheckoutResponse(BaseModel):
     """How the client should complete the session it just created.
 
-    Exactly one field is populated, chosen by the requested ``ui_mode``: a
-    hosted session yields ``checkout_url`` to navigate to, an embedded one
-    yields ``client_secret`` to mount Stripe.js with. Both are optional so the
-    API and the SPA can be deployed in either order without a window where a
-    checkout cannot be started.
+    Exactly one of ``checkout_url``/``client_secret`` is populated, chosen by
+    the requested ``ui_mode``: a hosted session yields ``checkout_url`` to
+    navigate to, an embedded one yields ``client_secret`` to mount Stripe.js
+    with. Both are optional so the API and the SPA can be deployed in either
+    order without a window where a checkout cannot be started.
+
+    The discount fields are a read-back of what Stripe actually applied, so the
+    SPA can show "100% off" and ``$0.00`` from the server's word rather than
+    re-deriving it. Every one is optional/defaulted so an older SPA that ignores
+    them is unaffected.
     """
 
     checkout_url: str | None = None
     client_secret: str | None = None
+    #: Session total in minor units (e.g. cents), after discounts, from Stripe.
+    amount_total: int | None = None
+    #: ISO currency, lowercase (e.g. ``"usd"``).
+    currency: str | None = None
+    #: The customer-facing code actually applied, when Stripe expanded it.
+    discount_code: str | None = None
+    #: Percent taken off by the applied coupon (100.0 for a free-month promo).
+    discount_percent_off: float | None = None
+    #: ``"once"`` | ``"repeating"`` | ``"forever"``.
+    discount_duration: str | None = None
 
 
 class PortalResponse(BaseModel):

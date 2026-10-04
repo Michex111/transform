@@ -88,8 +88,9 @@ class MockStripeService:
         cancel_url,
         customer_id=None,
         ui_mode="hosted",
+        promotion=None,
     ):
-        del email, success_url, cancel_url, customer_id
+        del email, success_url, cancel_url, customer_id, promotion
         self.checkout_calls.append({"user_id": user_id, "tier": tier, "ui_mode": ui_mode})
         if ui_mode == "embedded":
             return CheckoutSessionHandle(

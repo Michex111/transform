@@ -169,14 +169,61 @@ class CheckoutUiMode(StrEnum):
 class CheckoutSessionHandle:
     """The minimum a browser needs to complete a Checkout Session.
 
-    Exactly one field is populated: a hosted session has a ``url`` to navigate
-    to, an embedded one has a ``client_secret`` to mount Stripe.js with.
-    ``client_secret`` is designed to be exposed to the browser, but it must
-    never be written to a log or an error report.
+    Exactly one of ``url``/``client_secret`` is populated: a hosted session has
+    a ``url`` to navigate to, an embedded one has a ``client_secret`` to mount
+    Stripe.js with. ``client_secret`` is designed to be exposed to the browser,
+    but it must never be written to a log or an error report.
+
+    The remaining fields are a defensive read-back of what Stripe actually
+    applied to the session (total, currency, discount), so the API can report
+    the applied promotion instead of guessing. They are all optional/defaulted
+    so every existing construction — including the credit-purchase path and
+    hand-written test doubles that predate them — stays valid.
     """
 
     url: str | None = None
     client_secret: str | None = None
+    #: Session total in minor units (e.g. cents), after discounts.
+    amount_total: int | None = None
+    #: ISO currency, lowercase.
+    currency: str | None = None
+    #: The customer-facing promotion code that was applied, when expandable.
+    discount_code: str | None = None
+    #: Percent off from the applied coupon.
+    discount_percent_off: float | None = None
+    #: Coupon duration: ``"once"``, ``"repeating"`` or ``"forever"``.
+    discount_duration: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedPromotion:
+    """A customer-facing promotion code, resolved against Stripe.
+
+    This is the **source of truth** for the response's discount fields, and that
+    is not a preference — it is the only place the facts exist. A resolved
+    ``Discount`` on a Checkout Session carries no ``percent_off`` and no
+    ``duration`` at all: they live on the *coupon*, which a Discount only
+    reaches through ``discount.source.coupon``, and ``discount.promotion_code``
+    arrives as a bare ``promo_…`` id unless it is explicitly expanded. So
+    reading the coupon off the session yields ``None`` for every field, the SPA
+    renders no discount block, and the feature is silently dead while looking
+    perfectly healthy. (Verified against the installed SDK: `_discount.py`
+    declares ``promotion_code: ExpandableField[PromotionCode]`` and puts
+    ``coupon`` under its nested ``Source`` class.)
+
+    We already fetch the promotion code to turn the student's typed string into
+    an id, so expanding its coupon there costs nothing extra and is
+    version-independent: it does not matter what shape the session reports.
+    """
+
+    #: The ``promo_…`` id that ``checkout.sessions.create``'s ``discounts`` wants.
+    id: str
+    #: The code as Stripe spells it, so the UI shows canonical casing.
+    code: str | None = None
+    #: ``None`` when the coupon is an amount-off coupon rather than a percentage.
+    percent_off: float | None = None
+    #: ``"once"`` | ``"repeating"`` | ``"forever"``.
+    duration: str | None = None
 
 
 # Appearance for the embedded form, mirroring the SPA's design tokens in
@@ -361,6 +408,65 @@ class StripeService:
             params["success_url"] = success_url
             params["cancel_url"] = cancel_url
 
+    async def resolve_promotion_code(self, code: str) -> ResolvedPromotion | None:
+        """Resolve a customer-facing promotion code against Stripe.
+
+        ``checkout.sessions.create`` wants the promotion-code **id**, not the
+        human string a student typed, so the code has to be looked up first.
+        Stripe matches ``code`` case-insensitively and it is unique among
+        *active* codes, so ``active=True`` is what makes an expired or
+        deactivated code fail to resolve instead of being applied.
+
+        ``expand=["data.coupon"]`` is what makes the response useful: without it
+        ``PromotionCode.coupon`` is a bare ``coupon_…`` id and the percentage and
+        duration are unreadable. Reading them here (rather than off the created
+        session) is deliberate — see :class:`ResolvedPromotion`.
+
+        ``_stripe_list`` reads the result, NOT ``.data``: ``promotion_codes.list``
+        returns a ``ListObject`` envelope, but a bare ``.data`` access on a plain
+        list is precisely the pattern that previously broke the downgrade path.
+
+        Returns ``None`` (never raises) when Stripe is unconfigured, the code is
+        blank, or nothing active matches. The caller turns ``None`` into a 400 so
+        a bad code is surfaced rather than silently charged at full price.
+        """
+        normalized = code.strip()
+        if not self._enabled or not normalized:
+            return None
+
+        client = self._get_client()
+        result = await asyncio.to_thread(
+            client.v1.promotion_codes.list,
+            {
+                "code": normalized,
+                "active": True,
+                "limit": 1,
+                "expand": ["data.coupon"],
+            },
+        )
+        matches = _stripe_list(result)
+        if not matches:
+            logger.info("No active Stripe promotion code matched the supplied code")
+            return None
+
+        match = matches[0]
+        promotion_code_id = _stripe_get(match, "id")
+        if not promotion_code_id:
+            logger.warning("A matched promotion code carried no id; ignoring")
+            return None
+
+        coupon = _stripe_get(match, "coupon")
+        percent_off = _stripe_get(coupon, "percent_off")
+        duration = _stripe_get(coupon, "duration")
+        return ResolvedPromotion(
+            id=str(promotion_code_id),
+            # Prefer Stripe's own spelling; fall back to what was typed so the
+            # UI still has something to show if the field is ever absent.
+            code=_stripe_get(match, "code") or normalized,
+            percent_off=float(percent_off) if isinstance(percent_off, (int, float)) else None,
+            duration=str(duration) if isinstance(duration, str) else None,
+        )
+
     async def create_checkout_session(
         self,
         user_id: str,
@@ -370,6 +476,7 @@ class StripeService:
         cancel_url: str,
         customer_id: str | None = None,
         ui_mode: str = CheckoutUiMode.HOSTED,
+        promotion: ResolvedPromotion | None = None,
     ) -> CheckoutSessionHandle | None:
         """
         Create a Stripe checkout session for a subscription upgrade.
@@ -385,10 +492,17 @@ class StripeService:
             ui_mode: ``hosted`` (Stripe's page), ``embedded`` (Stripe's embedded
                 Checkout on our page) or ``elements`` (the Payment Element on
                 our page, which is the one that can be themed dark).
+            promotion: Optional promotion to apply as the session's discount.
+                This is the **record returned by** :meth:`resolve_promotion_code`,
+                not the human code — the id inside it is what Stripe wants, and
+                the coupon facts inside it are what the response reports (see
+                :class:`ResolvedPromotion` for why they cannot come from the
+                created session).
 
         Returns:
-            A handle carrying either the redirect URL or the client secret, or
-            None if Stripe is not configured / the tier is not self-serve.
+            A handle carrying either the redirect URL or the client secret plus
+            the session's totals/discount read-back, or None if Stripe is not
+            configured / the tier is not self-serve.
         """
         if not self._enabled:
             logger.warning("Stripe not configured; cannot create checkout session")
@@ -416,6 +530,16 @@ class StripeService:
                 },
                 "integration_identifier": self._integration_identifier(),
             }
+            # A 100%-off promotion code makes the total due 0; without this
+            # Stripe would still demand a card and the "free month" would not be
+            # free. It is set unconditionally because it is harmless at full
+            # price — the total is non-zero, so a card is still collected.
+            params["payment_method_collection"] = "if_required"
+            if promotion is not None:
+                # `discounts[].promotion_code` takes the `promo_…` ID, not the
+                # human-readable code (resolved beforehand by
+                # `resolve_promotion_code`).
+                params["discounts"] = [{"promotion_code": promotion.id}]
             self._apply_ui_mode(
                 params,
                 resolved_mode,
@@ -441,30 +565,112 @@ class StripeService:
                     "ui_mode": str(resolved_mode),
                 },
             )
-            return self._session_handle(session, resolved_mode)
+            return self._session_handle(session, resolved_mode, promotion)
 
         except Exception as e:
             logger.error("Failed to create Stripe checkout session: %s", e, exc_info=True)
             raise
 
     @staticmethod
+    def _first_discount(session: Any) -> Any | None:
+        """The session's applied discount, from either SDK field, or None.
+
+        A Checkout Session exposes the applied discount as ``discounts`` — and
+        the SDK declares that as a **plain** ``List[Discount]``, not a
+        ``{data: []}`` envelope like ``subscription.items``. Older API versions
+        use a singular ``discount``. Read both defensively; a session with no
+        discount must return None rather than raise.
+        """
+        singular = _stripe_get(session, "discount")
+        if singular is not None:
+            return singular
+        discounts = _stripe_list(_stripe_get(session, "discounts"))
+        return discounts[0] if discounts else None
+
+    @staticmethod
+    def _discount_fields(session: Any) -> dict[str, Any]:
+        """Best-effort read of the session's applied discount, from the session.
+
+        This is only a FALLBACK. A resolved ``Discount`` cannot carry
+        ``percent_off`` or ``duration`` — those live on the coupon, which a
+        Discount reaches only through its nested ``source`` object — and
+        ``promotion_code`` arrives as a bare ``promo_…`` id unless it was
+        explicitly expanded. So every branch here is expected to miss in
+        practice; :class:`ResolvedPromotion` is what actually supplies these
+        fields. It is kept because it costs nothing and covers the case where
+        Stripe does hand back an expanded object.
+
+        Every read goes through ``_stripe_get`` and a missing value becomes
+        ``None``, never an exception.
+        """
+        discount = StripeService._first_discount(session)
+        if discount is None:
+            return {}
+        promotion_code = _stripe_get(discount, "promotion_code")
+        code = (
+            None
+            if isinstance(promotion_code, str)
+            else _stripe_get(promotion_code, "code")
+        )
+        # The coupon hangs off the Discount's nested `source`, not off the
+        # Discount itself (verified against the SDK's `_discount.py`).
+        coupon = _stripe_get(_stripe_get(discount, "source"), "coupon")
+        if coupon is None:
+            coupon = _stripe_get(promotion_code, "coupon")
+        percent_off = _stripe_get(coupon, "percent_off")
+        duration = _stripe_get(coupon, "duration")
+        return {
+            "discount_code": code,
+            "discount_percent_off": percent_off,
+            "discount_duration": duration,
+        }
+
+    @staticmethod
     def _session_handle(
-        session: Any, ui_mode: CheckoutUiMode
+        session: Any,
+        ui_mode: CheckoutUiMode,
+        promotion: ResolvedPromotion | None = None,
     ) -> CheckoutSessionHandle:
         """Pick out the one value the browser needs for this mode.
 
-        The two are deliberately exclusive. A hosted session does carry a
-        ``client_secret``, but it is useless once the session is hosted, and
-        handing the browser a credential it has no use for is exactly the kind
-        of thing that ends up in a log line.
+        The two credentials are deliberately exclusive. A hosted session does
+        carry a ``client_secret``, but it is useless once the session is hosted,
+        and handing the browser a credential it has no use for is exactly the
+        kind of thing that ends up in a log line.
 
         Both in-page modes need the secret: ``embedded_page`` mounts Stripe's
         embedded Checkout with it, ``elements`` mounts the Payment Element with
         it. Only a hosted session needs a URL to navigate to.
+
+        The discount facts come from ``promotion`` (the record already resolved
+        for the session create) and fall back to whatever the session reports.
+        That order is load-bearing, not a preference — see
+        :class:`ResolvedPromotion` for why the session cannot supply them.
         """
+        projected: dict[str, Any] = {
+            "amount_total": _stripe_get(session, "amount_total"),
+            "currency": _stripe_get(session, "currency"),
+        }
+        projected.update(StripeService._discount_fields(session))
+        if promotion is not None:
+            # `promotion` wins only where the session had nothing to say, so a
+            # future Stripe that does expand the discount is still believed.
+            projected["discount_code"] = (
+                projected.get("discount_code") or promotion.code
+            )
+            projected["discount_percent_off"] = (
+                projected.get("discount_percent_off")
+                if projected.get("discount_percent_off") is not None
+                else promotion.percent_off
+            )
+            projected["discount_duration"] = (
+                projected.get("discount_duration") or promotion.duration
+            )
         if ui_mode in (CheckoutUiMode.EMBEDDED, CheckoutUiMode.ELEMENTS):
-            return CheckoutSessionHandle(client_secret=session.client_secret)
-        return CheckoutSessionHandle(url=session.url)
+            return CheckoutSessionHandle(
+                client_secret=session.client_secret, **projected
+            )
+        return CheckoutSessionHandle(url=session.url, **projected)
 
     async def create_credit_purchase_session(
         self,
