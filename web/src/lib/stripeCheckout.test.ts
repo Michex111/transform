@@ -120,7 +120,7 @@ describe("embedded checkout availability", () => {
   it("is on for a real publishable key", () => {
     vi.stubEnv("VITE_STRIPE_PUBLISHABLE_KEY", "pk_test_abc123");
     expect(embeddedCheckoutEnabled()).toBe(true);
-    expect(requestedUiMode()).toBe("embedded");
+    expect(requestedUiMode()).toBe("elements");
     expect(publishableKey()).toBe("pk_test_abc123");
   });
 

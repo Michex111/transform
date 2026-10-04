@@ -229,7 +229,7 @@ def test_env_example_documents_the_email_transport_settings() -> None:
 # Checkout presentation (embedded vs Stripe-hosted)
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("mode", ["auto", "embedded", "hosted"])
+@pytest.mark.parametrize("mode", ["auto", "embedded", "elements", "hosted"])
 def test_supported_checkout_ui_modes_validate(mode: str) -> None:
     _settings(STRIPE_CHECKOUT_UI_MODE=mode).validate_settings()  # should not raise
 

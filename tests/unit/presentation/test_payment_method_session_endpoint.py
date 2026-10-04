@@ -19,14 +19,26 @@ from src.presentation.schemas.subscription import PaymentMethodSessionResponse
 
 
 class _FakeStripeService:
-    def __init__(self, *, enabled: bool = True, client_secret: str | None = "cs_seti_1") -> None:
+    def __init__(
+        self,
+        *,
+        enabled: bool = True,
+        client_secret: str | None = "cs_seti_1",
+        setup_intent_secret: str | None = "seti_secret_1",
+    ) -> None:
         self.enabled = enabled
         self._client_secret = client_secret
+        self._setup_intent_secret = setup_intent_secret
         self.customer_sessions: list[str] = []
+        self.setup_intents: list[str] = []
 
     async def create_customer_session(self, customer_id: str) -> str | None:
         self.customer_sessions.append(customer_id)
         return self._client_secret
+
+    async def create_setup_intent(self, customer_id: str) -> str | None:
+        self.setup_intents.append(customer_id)
+        return self._setup_intent_secret
 
 
 class _FakeSubscriptionRepo:
@@ -69,6 +81,31 @@ def test_returns_a_client_secret_for_an_existing_stripe_customer() -> None:
     assert response.client_secret == "cs_seti_abc"
     assert response.enabled is True
     assert stripe.customer_sessions == ["cus_123"]
+
+
+def test_returns_a_setup_intent_secret_alongside_the_session() -> None:
+    """Both secrets are needed: the session says which cards exist and whether
+    a new one may be saved, the SetupIntent is what the new card attaches to."""
+    stripe = _FakeStripeService(setup_intent_secret="seti_secret_xyz")
+    repo = _FakeSubscriptionRepo("cus_123")
+
+    response = _call(stripe, repo)
+
+    assert response.setup_intent_client_secret == "seti_secret_xyz"
+    assert stripe.setup_intents == ["cus_123"]
+
+
+def test_a_failed_setup_intent_still_returns_the_session() -> None:
+    """The Payment Element can create its own intent at confirmation time, so
+    this degrades to that mode instead of losing card management entirely."""
+    stripe = _FakeStripeService(setup_intent_secret=None)
+    repo = _FakeSubscriptionRepo("cus_123")
+
+    response = _call(stripe, repo)
+
+    assert response.enabled is True
+    assert response.client_secret == "cs_seti_1"
+    assert response.setup_intent_client_secret is None
 
 
 def test_a_free_user_without_a_customer_degrades_quietly() -> None:

@@ -46,6 +46,15 @@ export function tierRank(tier: string | null | undefined): number {
   return TIER_RANK[normaliseTier(tier)] ?? 0;
 }
 
+/**
+ * The rank of the most expensive plan a customer can buy without sales.
+ *
+ * Derived from `SELF_SERVE_TIERS` rather than written as the literal `2`, so
+ * that adding a third self-serve tier moves the "nothing above this" boundary
+ * along with it instead of leaving it behind at the old plan.
+ */
+const TOP_SELF_SERVE_RANK = Math.max(...SELF_SERVE_TIERS.map((tier) => tierRank(tier)));
+
 /** A display name for a tier enum value: `"PRO_PLUS"` → `"Pro Plus"`. */
 export function tierLabel(tier: string | null | undefined): string {
   const value = (tier ?? "").trim();
@@ -58,6 +67,22 @@ export function tierLabel(tier: string | null | undefined): string {
 
 function isSelfServeTier(tier: string): tier is SelfServeTier {
   return (SELF_SERVE_TIERS as readonly string[]).includes(tier);
+}
+
+/**
+ * Whether `tier` is the most expensive plan a customer can buy without sales.
+ *
+ * The billing page treats this tier differently from the ones below it: there is
+ * no upgrade left to sell, so an in-page Change plan section could only ever
+ * hold downgrades, and the hero's button sends the customer to `/pricing` to
+ * compare instead. Enterprise answers false — it sits *above* this tier and is
+ * not self-serve at all, which is a different situation with a different action
+ * (contact sales).
+ */
+export function isTopSelfServeTier(tier: string | null | undefined): boolean {
+  const current = normaliseTier(tier);
+  if (!isSelfServeTier(current)) return false;
+  return tierRank(current) === TOP_SELF_SERVE_RANK;
 }
 
 export interface PlanChangeOption {
@@ -88,11 +113,14 @@ export function canChangePlanTo(
 }
 
 /**
- * The plan changes worth offering from `currentTier`.
+ * The plan changes worth offering in the billing page's Change plan section.
  *
  * Empty when there is nothing to offer — a Free account (no subscription to
- * change) or an Enterprise one (not self-serve) — which is the signal for the
- * billing page to omit the section instead of rendering dead buttons.
+ * change), an Enterprise one (not self-serve), or the top self-serve plan (see
+ * `isTopSelfServeTier`, which has nothing above it). Empty is the signal for
+ * the billing page to omit the section entirely rather than render dead
+ * buttons, and for the hero's "Change plan" button to send the customer to
+ * `/pricing` instead of scrolling to a section that is not there.
  */
 export function planChangeOptions(
   currentTier: string | null | undefined,
@@ -100,6 +128,9 @@ export function planChangeOptions(
   const current = normaliseTier(currentTier);
   const rank = tierRank(current);
   if (rank === 0 || rank === 3) return [];
+  // The top self-serve plan: an upgrade is impossible, and its downgrade is
+  // offered on the pricing page (and by the retention flow) rather than here.
+  if (isTopSelfServeTier(current)) return [];
   return SELF_SERVE_TIERS.filter((tier) => tier !== current).map((tier) => ({
     tier,
     label: tierLabel(tier),
@@ -107,10 +138,77 @@ export function planChangeOptions(
   }));
 }
 
+/**
+ * Where the plan hero's primary button sends the customer.
+ *
+ * `pricing` compares plans on the public pricing page, `change-plan-section`
+ * scrolls down to the in-page Change plan card, and `support` is for an
+ * Enterprise account, which is not self-serve.
+ */
+export type PlanHeroTarget = "pricing" | "change-plan-section" | "support";
+
+export interface PlanHeroCta {
+  label: string;
+  target: PlanHeroTarget;
+}
+
+/**
+ * The plan hero's single primary action, for every tier.
+ *
+ * The same shape as `planCta` on the pricing page, and for the same reason: a
+ * decision about where a button leads has to be testable, and this repo's Node
+ * test environment cannot click one. The rule it encodes is that the button
+ * always leads somewhere real —
+ *   - Free/Guest: the pricing page, because there is no subscription to change
+ *     yet;
+ *   - PRO: the Change plan section below, where the upgrade to Pro Plus waits;
+ *   - PRO_PLUS: the pricing page, because nothing sits above it and its own
+ *     downgrade is offered there rather than in a section of its own (see
+ *     `isTopSelfServeTier`);
+ *   - Enterprise: support, because it is not self-serve.
+ */
+export function planHeroCta(tier: string | null | undefined): PlanHeroCta {
+  const rank = tierRank(tier);
+  if (rank === 0) return { label: "Choose a plan", target: "pricing" };
+  if (rank >= 3) return { label: "Contact us", target: "support" };
+  if (planChangeOptions(tier).length > 0) {
+    return { label: "Change plan", target: "change-plan-section" };
+  }
+  return { label: "Change plan", target: "pricing" };
+}
+
 export interface PlanChangeFeedback {
   kind: "upgrade" | "downgrade";
   title: string;
   detail: string;
+}
+
+/**
+ * The explanation shown above the Change plan card's buttons.
+ *
+ * Derived from the options on screen rather than written once. The card offers
+ * only upgrades now (Pro Plus, the one tier with a downgrade, no longer gets the
+ * section), and a paragraph promising that "downgrades start at the end of your
+ * billing period" next to a single Upgrade button describes a control the
+ * customer cannot see. Building the copy from the same list that renders the
+ * buttons means it cannot outlive them.
+ */
+export function planChangeExplainer(options: readonly PlanChangeOption[]): string {
+  const parts: string[] = [];
+
+  if (options.some((option) => option.direction === "upgrade")) {
+    parts.push(
+      "Upgrades take effect immediately and are prorated — you're only charged the difference for the rest of this period, and any unspent plan credits carry over to the new plan.",
+    );
+  }
+
+  if (options.some((option) => option.direction === "downgrade")) {
+    parts.push(
+      "Downgrades start at the end of your current billing period, so you keep what you already paid for.",
+    );
+  }
+
+  return parts.join(" ");
 }
 
 function creditWord(count: number): string {

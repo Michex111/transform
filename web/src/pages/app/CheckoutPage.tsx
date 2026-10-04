@@ -1,26 +1,46 @@
 /**
  * The brand-themed checkout.
  *
- * Replaces the redirect to `checkout.stripe.com` with Stripe's **embedded**
- * checkout mounted inside our own page, which is what lets the surrounding
- * frame carry the product's navigation, typography and colour. Stripe still
- * hosts and renders the card fields inside an iframe, so the PCI scope is
- * unchanged (SAQ A) — only the chrome around it is ours.
+ * Replaces the redirect to `checkout.stripe.com` with Stripe's **Payment
+ * Element** mounted inside our own dark page. Stripe still hosts and renders the
+ * card fields inside an iframe, so the PCI scope is unchanged (SAQ A) — only the
+ * chrome around it is ours, and the form is themed with the Appearance API.
+ *
+ * Why the Payment Element rather than Stripe's embedded Checkout, which this
+ * page used before: embedded Checkout **cannot be made dark**. Its
+ * `branding_settings` exposes only background, button, font and shape; Stripe
+ * rejects a `theme`/`color_mode` parameter outright, and the payment sheet
+ * renders white no matter what `background_color` says — the session stored
+ * `#121417` and still painted a white form (both verified against the live
+ * account, and visible in the rendered `—checkout-white: #ffffff` on the
+ * sheet). The Payment Element is themed through the Appearance API, which does
+ * support a dark theme and is already how the Billing page's card form looks.
+ *
+ * Crucially this is **not** a change of payment product: the server still
+ * creates a Checkout Session (`ui_mode: "elements"`), so line items, taxes,
+ * metadata, fulfilment and every webhook behave exactly as before.
  *
  * What is being bought is read from the query string rather than from router
  * state, so a refresh or a bookmark keeps working. The session is created by
- * this page on mount: an embedded session's client secret is short-lived and
- * single-use, so passing one through navigation would leave a stale secret
- * behind the back button.
+ * this page on mount: a checkout client secret is short-lived and single-use, so
+ * passing one through navigation would leave a stale secret behind the back
+ * button.
  */
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { loadStripe, type Stripe, type StripeEmbeddedCheckout } from "@stripe/stripe-js";
+import { loadStripe, type Stripe } from "@stripe/stripe-js";
+import {
+  CheckoutElementsProvider,
+  PaymentElement,
+  useCheckoutElements,
+} from "@stripe/react-stripe-js/checkout";
 import { Check, Lock } from "@phosphor-icons/react";
 import { useAuth } from "@/auth/AuthContext";
-import { Card, Logo, Skeleton } from "@/components/ui";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
+import { Button, Card, Logo, Skeleton } from "@/components/ui";
 import { trustedExternalUrl } from "@/lib/download";
+import { STRIPE_CHECKOUT_APPEARANCE } from "@/lib/stripeAppearance";
 import {
   describeIntent,
   embeddedCheckoutEnabled,
@@ -53,6 +73,98 @@ interface Summary {
 
 type Phase = "creating" | "ready" | "failed";
 
+/**
+ * The form, which must sit inside `<CheckoutElementsProvider>`: the checkout
+ * hooks only work there.
+ *
+ * `checkout.confirm()` with no options uses the default `redirect: "always"`,
+ * which lands the customer on the session's `return_url` — the same URL the
+ * hosted flow used, so the SPA's existing `?checkout=success` handling (and the
+ * webhook that actually grants the credits or activates the plan) fires exactly
+ * as before. `if_required` would keep a card on the page but leave the success
+ * destination to be re-derived here, duplicating server config for no gain.
+ */
+function CheckoutForm({ onFailure }: { onFailure: (message: string) => void }) {
+  const state = useCheckoutElements();
+  const [submitting, setSubmitting] = useState(false);
+
+  if (state.type === "loading") return <FormSkeleton />;
+
+  // Stripe reports a rejected session (an expired secret, a misconfiguration)
+  // as this state rather than by throwing — but it can also throw, which is
+  // what the boundary around this tree is for.
+  if (state.type === "error") {
+    return <FormUnavailable message={state.error.message} />;
+  }
+
+  const { checkout } = state;
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    if (submitting) return;
+    setSubmitting(true);
+    const result = await checkout.confirm();
+    if (result.type === "error") {
+      setSubmitting(false);
+      onFailure(result.error.message);
+      return;
+    }
+    // Success means the redirect to `return_url` is under way; leaving the
+    // button in its busy state is deliberate, since the page is on its way out.
+  }
+
+  return (
+    <form onSubmit={submit} className="flex flex-col gap-5 p-6">
+      <PaymentElement />
+      <Button type="submit" size="lg" disabled={submitting}>
+        {submitting ? "Processing…" : "Pay"}
+      </Button>
+      <p className="flex items-center justify-center gap-1.5 text-xs text-muted">
+        <Lock size={13} weight="fill" aria-hidden />
+        Payments are handled by Stripe. Your card details never touch our servers.
+      </p>
+    </form>
+  );
+}
+
+/** The form's own placeholder, so the page keeps its shape while it loads. */
+function FormSkeleton() {
+  return (
+    <div className="flex flex-col gap-3 p-6" role="status" aria-live="polite">
+      <Skeleton className="h-4 w-28" />
+      <Skeleton className="h-11 w-full" />
+      <Skeleton className="h-11 w-full" />
+      <Skeleton className="h-11 w-2/3" />
+      <Skeleton className="mt-1 h-12 w-full" />
+      <span className="text-sm text-muted">Preparing secure checkout…</span>
+    </div>
+  );
+}
+
+/**
+ * Shown when the form itself cannot be used.
+ *
+ * Both paths that reach this are honest about it and leave a way forward: the
+ * customer can go back to billing (where the card forms and the hosted portal
+ * live) or pick a plan again. Never a dead end and never a blank card.
+ */
+function FormUnavailable({ message }: { message: string }) {
+  return (
+    <div className="p-6" role="alert">
+      <p className="text-sm font-medium text-on-background">Payment couldn't be loaded</p>
+      <p className="mt-1.5 text-sm text-muted">{message}</p>
+      <div className="mt-5 flex flex-wrap gap-3">
+        <Link
+          to="/app/billing"
+          className="inline-flex h-10 items-center rounded-lg bg-primary px-4 text-sm font-semibold text-on-primary transition-colors hover:bg-primary/90"
+        >
+          Back to billing
+        </Link>
+      </div>
+    </div>
+  );
+}
+
 export function CheckoutPage() {
   const { api: client } = useAuth();
   const [searchParams] = useSearchParams();
@@ -62,9 +174,9 @@ export function CheckoutPage() {
   // on every render and would re-create the session in a loop.
   const intent = useMemo(() => parseCheckoutIntent(search), [search]);
 
-  const slotRef = useRef<HTMLDivElement | null>(null);
   const [phase, setPhase] = useState<Phase>("creating");
   const [failure, setFailure] = useState("");
+  const [clientSecret, setClientSecret] = useState<string | null>(null);
   const [summary, setSummary] = useState<Summary | null>(null);
 
   // A description of the purchase, fetched independently of the payment flow so
@@ -116,14 +228,13 @@ export function CheckoutPage() {
     }
 
     let cancelled = false;
-    let instance: StripeEmbeddedCheckout | null = null;
 
     void (async () => {
       try {
-        // Only ever ask for `embedded` when this build can actually render it.
+        // Only ever ask for `elements` when this build can actually mount it.
         // A build with no publishable key asks for nothing and receives a
         // hosted URL, i.e. exactly the pre-existing behaviour.
-        const mode = requestedUiMode() === "embedded" ? ("embedded" as const) : undefined;
+        const mode = requestedUiMode() === "elements" ? ("elements" as const) : undefined;
 
         const handle =
           intent.kind === "subscription"
@@ -142,24 +253,10 @@ export function CheckoutPage() {
           return;
         }
 
-        const stripe = await stripePromise;
-        if (cancelled) return;
-        if (!stripe) throw new Error("Card payments are unavailable. Please try again later.");
-
-        const checkout = await stripe.createEmbeddedCheckoutPage({
-          clientSecret: handle.client_secret,
-        });
-
-        if (cancelled) {
-          // StrictMode ran this effect twice and this instance lost the race.
-          // Destroying it here is what keeps an orphaned iframe out of the DOM
-          // (and `instance` stays null, so cleanup cannot double-destroy it).
-          checkout.destroy();
-          return;
-        }
-
-        instance = checkout;
-        if (slotRef.current) checkout.mount(slotRef.current);
+        // The secret goes straight to the provider; the Element is mounted by
+        // React rather than imperatively, so there is no instance to tear down
+        // and no StrictMode double-mount race to manage.
+        setClientSecret(handle.client_secret);
         setPhase("ready");
       } catch (err) {
         if (cancelled) return;
@@ -172,9 +269,14 @@ export function CheckoutPage() {
 
     return () => {
       cancelled = true;
-      instance?.destroy();
     };
   }, [client, intent]);
+
+  // A failed confirmation keeps the session usable, so this reports the problem
+  // without discarding the form the customer has already filled in.
+  function reportFailure(message: string) {
+    setFailure(message);
+  }
 
   return (
     <div className="min-h-dvh bg-background">
@@ -226,33 +328,57 @@ export function CheckoutPage() {
                 </div>
               </Card>
             ) : (
-              <Card className="relative min-h-[22rem] overflow-hidden">
-                {/* Stripe mounts its iframe into this node. It is rendered in
-                    both the "creating" and "ready" phases and is never swapped
-                    for a different element, so React cannot replace the node
-                    out from under the mounted iframe. */}
-                <div ref={slotRef} className="min-h-[22rem]" />
-                {phase === "creating" && (
-                  <div
-                    className="absolute inset-0 flex flex-col gap-3 bg-surface p-6"
-                    role="status"
-                    aria-live="polite"
-                  >
-                    <Skeleton className="h-4 w-32" />
-                    <Skeleton className="h-11 w-full" />
-                    <Skeleton className="h-11 w-full" />
-                    <Skeleton className="h-11 w-2/3" />
-                    <span className="mt-2 text-sm text-muted">Preparing secure checkout…</span>
-                  </div>
-                )}
-              </Card>
-            )}
+              <>
+                <Card className="overflow-hidden">
+                  {phase === "creating" || !clientSecret ? (
+                    <FormSkeleton />
+                  ) : (
+                    // Stripe.js throws on an unusable secret — inside render,
+                    // which without a boundary unmounts this whole route and
+                    // leaves a blank page (verified in a browser on the Billing
+                    // card form). The boundary keeps the failure inside the
+                    // form, and `resetKey` lets a retry clear it.
+                    <ErrorBoundary
+                      resetKey={clientSecret}
+                      onError={(err) => reportFailure(err.message)}
+                      fallback={<FormUnavailable message={failure || "Please try again."} />}
+                    >
+                      <CheckoutElementsProvider
+                        stripe={stripePromise}
+                        options={{
+                          clientSecret,
+                          // Branded, not Stripe's stock light theme. The
+                          // Appearance API takes literal values because its
+                          // iframe cannot resolve our CSS custom properties,
+                          // which is why the palette lives as hex in exactly one
+                          // place — `lib/stripeAppearance` — pinned to `@theme`
+                          // by a test.
+                          elementsOptions: { appearance: STRIPE_CHECKOUT_APPEARANCE },
+                        }}
+                      >
+                        <CheckoutForm onFailure={reportFailure} />
+                      </CheckoutElementsProvider>
+                    </ErrorBoundary>
+                  )}
+                </Card>
 
-            {phase !== "failed" && (
-              <p className="mt-4 flex items-center justify-center gap-1.5 text-xs text-muted">
-                <Lock size={13} weight="fill" aria-hidden />
-                Secured by Stripe
-              </p>
+                {/* A confirmation failure is reported here rather than inside
+                    the form, so the card the customer already filled in is not
+                    thrown away. */}
+                {phase === "ready" && failure && (
+                  <p
+                    role="alert"
+                    className="mt-4 rounded-lg border border-error/40 bg-error/10 px-3 py-2 text-sm text-error"
+                  >
+                    {failure}
+                  </p>
+                )}
+
+                <p className="mt-4 flex items-center justify-center gap-1.5 text-xs text-muted">
+                  <Lock size={13} weight="fill" aria-hidden />
+                  Secured by Stripe
+                </p>
+              </>
             )}
           </div>
 

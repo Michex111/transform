@@ -1342,6 +1342,7 @@ describe("wallet split, plan change, payment method session", () => {
     // to mount the Payment Element with no secret, which renders blank.
     expect(normalizePaymentMethodSession({})).toEqual({
       client_secret: null,
+      setup_intent_client_secret: null,
       enabled: false,
     });
     expect(normalizePaymentMethodSession({ enabled: "true" }).enabled).toBe(false);
@@ -1350,11 +1351,25 @@ describe("wallet split, plan change, payment method session", () => {
 
   it("normalizePaymentMethodSession preserves a real session", () => {
     expect(
-      normalizePaymentMethodSession({ client_secret: "cs_test_abc", enabled: true }),
-    ).toEqual({ client_secret: "cs_test_abc", enabled: true });
+      normalizePaymentMethodSession({
+        client_secret: "cs_test_abc",
+        setup_intent_client_secret: "seti_secret_abc",
+        enabled: true,
+      }),
+    ).toEqual({
+      client_secret: "cs_test_abc",
+      setup_intent_client_secret: "seti_secret_abc",
+      enabled: true,
+    });
     expect(
       normalizePaymentMethodSession({ client_secret: null, enabled: false }),
-    ).toEqual({ client_secret: null, enabled: false });
+    ).toEqual({ client_secret: null, setup_intent_client_secret: null, enabled: false });
+    // An older API omits the SetupIntent entirely; `null` makes the section
+    // fall back to the Element's deferred mode rather than fail.
+    expect(
+      normalizePaymentMethodSession({ client_secret: "cs_test_abc", enabled: true })
+        .setup_intent_client_secret,
+    ).toBeNull();
   });
 
   it("normalizePaymentMethodList degrades a malformed body to no cards, not undefined", () => {
@@ -1379,8 +1394,11 @@ describe("wallet split, plan change, payment method session", () => {
           exp_month: 4,
           exp_year: 2032,
           is_default: true,
+          // The API sends the wallet as a plain string. A shape it does not
+          // use reads as "no wallet" rather than leaking an object into the UI.
+          wallet: "apple_pay",
           // A field this SPA does not know about yet must not crash the list.
-          wallet: { type: "apple_pay" },
+          future_field: { anything: true },
         },
         // A half-populated row still renders rather than throwing.
         { id: "pm_2", exp_month: "not-a-number" },
@@ -1395,6 +1413,7 @@ describe("wallet split, plan change, payment method session", () => {
       exp_month: 4,
       exp_year: 2032,
       is_default: true,
+      wallet: "apple_pay",
     });
     expect(list.methods[1]).toEqual({
       id: "pm_2",
@@ -1404,6 +1423,17 @@ describe("wallet split, plan change, payment method session", () => {
       exp_year: 0,
       // Absent `is_default` reads as "not the default", never `undefined`.
       is_default: false,
+      // A hand-keyed card has no wallet, and that must stay null.
+      wallet: null,
     });
+  });
+
+  it("normalizePaymentMethodList drops a non-string wallet instead of rendering it", () => {
+    const list = normalizePaymentMethodList({
+      enabled: true,
+      methods: [{ id: "pm_1", wallet: { type: "apple_pay" } }],
+    });
+
+    expect(list.methods[0].wallet).toBeNull();
   });
 });

@@ -15,7 +15,7 @@ _SUPPORTED_ENVIRONMENTS = frozenset({"development", "production"})
 # How the checkout form is presented. ``auto`` (the default) honours what the
 # client asks for, so an older SPA keeps getting Stripe's own page while a newer
 # one asks for the embedded form — the two can be deployed in either order.
-_SUPPORTED_CHECKOUT_UI_MODES = frozenset({"auto", "embedded", "hosted"})
+_SUPPORTED_CHECKOUT_UI_MODES = frozenset({"auto", "embedded", "elements", "hosted"})
 # The single authoritative ceiling for a single authenticated upload. Every
 # per-tier cap defaults to this (and ``validate_settings()`` refuses to start
 # if a tier is configured above it), so "what can the store actually accept" is
@@ -110,11 +110,17 @@ class Settings(BaseSettings):
     #                as before when it asks for nothing. This is what makes an
     #                API-first rollout safe: an old SPA gets the hosted page
     #                from the new API while the new SPA is still building.
-    #   "embedded" — always render the form inside our own page. Only safe once
-    #                the SPA that mounts it is deployed, because the API then
-    #                never returns a URL to redirect to.
+    #   "elements" — always render the Payment Element inside our own page. This
+    #                is what the current SPA asks for, because it is the only
+    #                in-page mode that can carry the app's dark theme: Stripe's
+    #                embedded Checkout accepts background/button/font/shape but
+    #                has no theme, rejects a `theme` parameter, and paints its
+    #                payment sheet white regardless of `background_color`.
+    #   "embedded" — always render Stripe's embedded Checkout page inside our own
+    #                page. Kept so an SPA that has not been redeployed still
+    #                works; light-only.
     #   "hosted"   — always use Stripe's own page. This is the kill switch:
-    #                flip it and restart to undo a bad embedded deploy without
+    #                flip it and restart to undo a bad in-page deploy witho
     #                shipping any code.
     STRIPE_CHECKOUT_UI_MODE: str = "auto"
     # Logo shown by the embedded form. Unset means "derive it from APP_BASE_URL

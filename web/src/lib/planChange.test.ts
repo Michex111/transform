@@ -13,8 +13,11 @@ import type { ChangePlanResponse } from "@/api/types";
 import {
   canChangePlanTo,
   describePlanChange,
+  isTopSelfServeTier,
+  planChangeExplainer,
   planChangeFailure,
   planChangeOptions,
+  planHeroCta,
   tierLabel,
   tierRank,
 } from "./planChange";
@@ -90,17 +93,109 @@ describe("planChangeOptions", () => {
     ]);
   });
 
-  it("offers a downgrade from PRO_PLUS", () => {
-    expect(planChangeOptions("PRO_PLUS")).toEqual([
-      { tier: "PRO", label: "Pro", direction: "downgrade" },
-    ]);
-  });
-
   it("offers nothing to a Free account or an Enterprise one", () => {
     // Empty is the signal to omit the section rather than render dead buttons.
     expect(planChangeOptions("FREE")).toEqual([]);
     expect(planChangeOptions(null)).toEqual([]);
     expect(planChangeOptions("ENTERPRISE")).toEqual([]);
+  });
+
+  it("offers nothing to Pro Plus: it has no upgrade, and its downgrade lives on /pricing", () => {
+    // REVERSED DELIBERATELY. This used to be `[{tier: "PRO", direction:
+    // "downgrade"}]`, which rendered a Change plan section holding a single
+    // downgrade button. The section is for upgrades now: Pro Plus is the top
+    // self-serve plan, so the billing page drops the section for it and the
+    // hero's "Change plan" button sends the customer to the pricing page
+    // instead, where `planCta` offers "Switch to Pro" against the existing
+    // subscription. The retention flow's cheaper-plan offer is unaffected — it
+    // uses `canChangePlanTo`, which still answers yes (asserted above).
+    expect(planChangeOptions("PRO_PLUS")).toEqual([]);
+  });
+});
+
+describe("isTopSelfServeTier", () => {
+  it("is true only for the most expensive self-serve plan", () => {
+    expect(isTopSelfServeTier("PRO_PLUS")).toBe(true);
+    // Case/whitespace tolerant, like every other tier helper here.
+    expect(isTopSelfServeTier(" pro_plus ")).toBe(true);
+  });
+
+  it("is false for the plans below it and for Enterprise", () => {
+    expect(isTopSelfServeTier("PRO")).toBe(false);
+    expect(isTopSelfServeTier("PREMIUM")).toBe(false);
+    expect(isTopSelfServeTier("FREE")).toBe(false);
+    expect(isTopSelfServeTier(null)).toBe(false);
+    expect(isTopSelfServeTier("SOMETHING_ELSE")).toBe(false);
+    // Enterprise sits ABOVE this tier and is not self-serve, so it is not the
+    // top self-serve plan — its action is "contact sales", not "compare".
+    expect(isTopSelfServeTier("ENTERPRISE")).toBe(false);
+  });
+});
+
+describe("planHeroCta", () => {
+  it("sends a Free or unknown account to the pricing page", () => {
+    expect(planHeroCta("FREE")).toEqual({ label: "Choose a plan", target: "pricing" });
+    // `null` is the state before the plan read answers; the card is a skeleton
+    // then, so the safest reading is the one a brand-new account gets.
+    expect(planHeroCta(null)).toEqual({ label: "Choose a plan", target: "pricing" });
+    expect(planHeroCta("SOMETHING_ELSE")).toEqual({ label: "Choose a plan", target: "pricing" });
+  });
+
+  it("scrolls PRO to the section below, where its upgrade waits", () => {
+    expect(planHeroCta("PRO")).toEqual({
+      label: "Change plan",
+      target: "change-plan-section",
+    });
+  });
+
+  it("sends Pro Plus to the pricing page, because there is no section for it", () => {
+    // The pairing that matters: this tier is exactly the one whose
+    // `planChangeOptions` is empty, so the old "scroll to the section" branch
+    // would have been a scroll to nothing. The label stays "Change plan"
+    // because comparing plans is still what the customer is doing.
+    expect(planChangeOptions("PRO_PLUS")).toEqual([]);
+    expect(planHeroCta("PRO_PLUS")).toEqual({ label: "Change plan", target: "pricing" });
+  });
+
+  it("sends Enterprise to support instead of a self-serve action", () => {
+    expect(planHeroCta("ENTERPRISE")).toEqual({ label: "Contact us", target: "support" });
+  });
+});
+
+describe("planChangeExplainer", () => {
+  it("describes only the upgrade when an upgrade is all that is offered", () => {
+    // The PRO case, and the one the copy must not overpromise: the card renders
+    // a single "Upgrade to Pro Plus" button, so a sentence about downgrades
+    // would be explaining a control that is not on screen.
+    const text = planChangeExplainer(planChangeOptions("PRO"));
+    expect(text).toContain("Upgrades take effect immediately and are prorated");
+    expect(text).toContain("carry over to the new plan");
+    expect(text).not.toContain("Downgrades");
+  });
+
+  it("describes a downgrade when one is offered", () => {
+    const text = planChangeExplainer([
+      { tier: "PRO", label: "Pro", direction: "downgrade" },
+    ]);
+    expect(text).toContain("Downgrades start at the end of your current billing period");
+    expect(text).not.toContain("Upgrades");
+  });
+
+  it("states both when both are offered", () => {
+    const text = planChangeExplainer([
+      { tier: "PRO_PLUS", label: "Pro Plus", direction: "upgrade" },
+      { tier: "PRO", label: "Pro", direction: "downgrade" },
+    ]);
+    expect(text).toContain("Upgrades take effect immediately");
+    expect(text).toContain("Downgrades start at the end");
+    // Upgrade first, downgrade second — the order the buttons render in.
+    expect(text.indexOf("Upgrades")).toBeLessThan(text.indexOf("Downgrades"));
+  });
+
+  it("says nothing when there is nothing to explain", () => {
+    // Pro Plus and Enterprise reach no options at all, so an empty string is the
+    // correct explanation for an empty card.
+    expect(planChangeExplainer([])).toBe("");
   });
 });
 

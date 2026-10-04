@@ -2,10 +2,17 @@
  * Plan management inside our own UI.
  *
  * Replaces the Customer Portal's "change plan" screen, which cannot be branded.
- * An upgrade applies immediately (the API prorates) and converts the unspent
- * plan balance into expiring carryover; a downgrade is scheduled for the end of
- * the period. Both go through `changePlan`, never `checkout` — creating a second
+ * Everything goes through `changePlan`, never `checkout` — creating a second
  * subscription would double-bill the customer.
+ *
+ * Today only PRO reaches this card, so the only button it renders is an upgrade:
+ * an upgrade applies immediately (the API prorates) and converts the unspent
+ * plan balance into expiring carryover. Pro Plus has nothing above it, so
+ * `planChangeOptions` returns no options for it at all and the billing page
+ * omits the section — that customer's "Change plan" button goes to the pricing
+ * page, where the downgrade is offered against the existing subscription. The
+ * rendering below still handles a downgrade option because it renders whatever
+ * the model offers; the model is where the tier rule lives.
  *
  * All the decisions (which actions to offer, what the confirmation says, where
  * a failure sends the user) live in `lib/planChange` and are unit-tested; this
@@ -19,7 +26,7 @@ import { ApiError } from "@/api/client";
 import { useAuth } from "@/auth/AuthContext";
 import { useToast } from "@/auth/ToastContext";
 import { Button, Card } from "@/components/ui";
-import { describePlanChange, planChangeFailure, planChangeOptions } from "@/lib/planChange";
+import { describePlanChange, planChangeExplainer, planChangeFailure, planChangeOptions } from "@/lib/planChange";
 
 export function PlanChangeCard({
   currentTier,
@@ -40,8 +47,10 @@ export function PlanChangeCard({
   } | null>(null);
 
   const options = planChangeOptions(currentTier);
-  // Nothing to offer a Free account (no subscription to change) or an
-  // Enterprise one (not self-serve), so the section is omitted entirely.
+  // Nothing to offer a Free account (no subscription to change), an Enterprise
+  // one (not self-serve) or Pro Plus (nothing above it), so the section is
+  // omitted entirely — `BillingPage` checks the same rule before rendering the
+  // wrapper, so no empty gap is left in the page's stack either.
   if (options.length === 0) return null;
 
   async function change(tier: string) {
@@ -73,10 +82,13 @@ export function PlanChangeCard({
   return (
     <Card hover className="p-6">
       <h2 className="font-display text-lg font-semibold">Change plan</h2>
-      <p className="mt-1 text-sm text-muted">
-        Upgrades take effect now. Downgrades start at the end of your current billing period, so you
-        keep what you already paid for.
-      </p>
+      {/* The proration and any carryover are explained *before* the click: both
+          are money, and a confirmation that only appears afterwards cannot help
+          someone decide. The words come from `planChangeExplainer(options)`, so
+          they only ever describe the buttons actually rendered below — see the
+          function's own note. The exact carryover number still comes from the
+          response, since only the server knows what was left. */}
+      <p className="mt-1 text-sm text-muted">{planChangeExplainer(options)}</p>
 
       <div className="mt-4 flex flex-wrap gap-2">
         {options.map((option) => {

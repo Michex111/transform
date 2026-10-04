@@ -1,220 +1,222 @@
 import { useEffect, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
-import { AnimatePresence, motion } from "motion/react";
-import { Check, CaretDown, Sparkle } from "@phosphor-icons/react";
-import { api } from "@/api/client";
+import { useNavigate } from "react-router-dom";
+import { ApiError } from "@/api/client";
 import { useAuth } from "@/auth/AuthContext";
 import { useToast } from "@/auth/ToastContext";
-import { Button, Card, Skeleton } from "@/components/ui";
+import { Skeleton } from "@/components/ui";
+import { ComparisonTable } from "@/components/pricing/ComparisonTable";
+import { CreditPacks } from "@/components/pricing/CreditPacks";
+import { EnterpriseBand } from "@/components/pricing/EnterpriseBand";
+import { PlanCard } from "@/components/pricing/PlanCard";
+import { PricingFaq } from "@/components/pricing/PricingFaq";
+import { PricingHero } from "@/components/pricing/PricingHero";
+import type { CreditPricingResponse, SubscriptionPlanResponse } from "@/api/types";
 import { trustedExternalUrl } from "@/lib/download";
-import { Stagger, Item, Reveal } from "@/lib/motion";
-import { aiPlanFeatures } from "@/lib/planFeatures";
+import { Stagger, Item } from "@/lib/motion";
+import { describePlanChange, planChangeFailure, tierRank } from "@/lib/planChange";
+import { planCta } from "@/lib/pricingPlans";
 import { embeddedCheckoutEnabled } from "@/lib/stripeCheckout";
-import type { SubscriptionPlanResponse } from "@/api/types";
-
-const FAQS = [
-  { q: "Can I cancel anytime?", a: "Yes. Cancel from Billing and keep your tier until the period ends." },
-  { q: "Do unused credits roll over?", a: "Credits refresh each monthly period on subscription plans." },
-  { q: "What happens to my files after conversion?", a: "Your history is kept for 30 days; files you delete are removed." },
-];
 
 export function PricingPage() {
-  const [plans, setPlans] = useState<SubscriptionPlanResponse[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [checkoutLoading, setCheckoutLoading] = useState<string | null>(null);
-  const [faqOpen, setFaqOpen] = useState<number | null>(0);
-  const { error } = useToast();
-  const { isAuthenticated } = useAuth();
+  const { api: client, isAuthenticated, isLoading: authLoading } = useAuth();
+  const { success, error } = useToast();
   const navigate = useNavigate();
 
+  const [plans, setPlans] = useState<SubscriptionPlanResponse[]>([]);
+  const [plansLoading, setPlansLoading] = useState(true);
+  const [packs, setPacks] = useState<CreditPricingResponse[]>([]);
+  const [packsLoading, setPacksLoading] = useState(true);
+  /** The signed-in account's tier; `null` for a guest or while unknown. */
+  const [currentTier, setCurrentTier] = useState<string | null>(null);
+  const [statusLoading, setStatusLoading] = useState(false);
+  /** Which request is in flight, e.g. `checkout:PRO` or `credits:500`. */
+  const [busy, setBusy] = useState<string | null>(null);
+
+  // Catalogue data. Both reads are independent, so a failure of one still lets
+  // the other render instead of blanking the whole page.
   useEffect(() => {
     let active = true;
-    setLoading(true);
-    api
+    setPlansLoading(true);
+    setPacksLoading(true);
+
+    client
       .subscriptionPlans()
-      .then((p) => active && setPlans(p))
-      .catch((e: Error) => error(e.message))
-      .finally(() => active && setLoading(false));
+      .then((next) => active && setPlans(next))
+      .catch((err: Error) => active && error(err.message))
+      .finally(() => active && setPlansLoading(false));
+
+    client
+      .creditPricing()
+      .then((next) => active && setPacks(next))
+      .catch((err: Error) => active && error(err.message))
+      .finally(() => active && setPacksLoading(false));
+
     return () => {
       active = false;
     };
-  }, [error]);
+  }, [client, error]);
 
-  async function upgrade(tier: string) {
-    // When this build can mount an embedded form, checkout happens inside the
-    // app on the branded page. Otherwise fall through to the hosted flow, which
-    // is what every deployment without a publishable key still uses.
+  // The viewer's tier decides each card's CTA, so waiting for it avoids
+  // flashing "Current plan" at a paid account while an older API answers.
+  useEffect(() => {
+    if (authLoading) return;
+    if (!isAuthenticated) {
+      setCurrentTier(null);
+      setStatusLoading(false);
+      return;
+    }
+
+    let active = true;
+    setStatusLoading(true);
+    client
+      .subscriptionStatus()
+      .then((status) => active && setCurrentTier(status.tier))
+      .catch(() => active && setCurrentTier(null))
+      .finally(() => active && setStatusLoading(false));
+
+    return () => {
+      active = false;
+    };
+  }, [client, isAuthenticated, authLoading]);
+
+  const pageLoading = plansLoading || authLoading || (isAuthenticated && statusLoading);
+  const enterprisePlan = plans.find((plan) => tierRank(plan.tier) === 3) ?? null;
+  const busyCredits =
+    busy?.startsWith("credits:") === true ? Number(busy.slice("credits:".length)) : null;
+  const busyForPlan = (tier: string) =>
+    busy === `checkout:${tier}` || busy === `change:${tier}`;
+
+  /**
+   * Start a new subscription. Embedded builds keep the payment form in the app;
+   * everything else falls through to the hosted session, which is what every
+   * deployment without a publishable key already used.
+   */
+  async function startCheckout(tier: string) {
     if (embeddedCheckoutEnabled()) {
       navigate(`/app/checkout?tier=${encodeURIComponent(tier)}`);
       return;
     }
-    setCheckoutLoading(tier);
+
+    setBusy(`checkout:${tier}`);
     try {
-      const { checkout_url } = await api.checkout(tier);
-      // Guard the navigation the same way downloads are guarded: an API-supplied
-      // `javascript:`/`data:` URL assigned to `location` would run in this
-      // origin, and an arbitrary host would be an open redirect.
+      const { checkout_url } = await client.checkout(tier);
+      // Guard the navigation the same way downloads are guarded: an
+      // API-supplied `javascript:`/`data:` URL assigned to `location` would run
+      // in this origin, and an arbitrary host would be an open redirect.
       const target = trustedExternalUrl(checkout_url);
       if (!target) throw new Error("Could not start checkout");
       window.location.assign(target);
     } catch (err) {
       error(err instanceof Error ? err.message : "Could not start checkout");
-      setCheckoutLoading(null);
+      setBusy(null);
+    }
+  }
+
+  /** Move an existing paid subscription to another tier (never a new checkout). */
+  async function changePlan(tier: string) {
+    setBusy(`change:${tier}`);
+    try {
+      const result = await client.changePlan(tier);
+      const feedback = describePlanChange(result);
+      success(`${feedback.title} — ${feedback.detail}`);
+      // A successful write clears the client's read cache, so this is a live
+      // read of the tier the account is now actually on.
+      const status = await client.subscriptionStatus().catch(() => null);
+      if (status) setCurrentTier(status.tier);
+    } catch (err) {
+      const status = err instanceof ApiError ? err.status : 0;
+      const message = err instanceof Error ? err.message : "";
+      const failure = planChangeFailure(status, message);
+      if (failure.goToPricing) {
+        // 409: there is no subscription to change yet, so start one instead of
+        // leaving the user on a dead button with nothing to do next.
+        await startCheckout(tier);
+      } else {
+        error(failure.message);
+      }
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function buyCredits(credits: number) {
+    if (!isAuthenticated) {
+      navigate("/register");
+      return;
+    }
+
+    if (embeddedCheckoutEnabled()) {
+      navigate(`/app/checkout?credits=${encodeURIComponent(String(credits))}`);
+      return;
+    }
+
+    setBusy(`credits:${credits}`);
+    try {
+      const { checkout_url } = await client.purchaseCredits(credits);
+      const target = trustedExternalUrl(checkout_url);
+      if (!target) throw new Error("Could not start checkout");
+      window.location.assign(target);
+    } catch (err) {
+      error(err instanceof Error ? err.message : "Could not start checkout");
+      setBusy(null);
     }
   }
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-16 sm:px-6">
-      <Reveal className="mb-12 text-center">
-        <p className="mb-2 text-xs font-medium uppercase tracking-wider text-muted">Pricing</p>
-        <h1 className="font-display text-4xl font-semibold tracking-tight">Simple plans. Real power.</h1>
-        <p className="mt-3 text-muted">Start free. Upgrade when the work demands it.</p>
-      </Reveal>
+      <PricingHero />
 
-      {loading ? (
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          {Array.from({ length: 4 }).map((_, i) => (
-            <div key={i} className="relative flex h-full flex-col rounded-2xl border border-outline bg-surface p-6">
-              <Skeleton className="h-5 w-24" />
-              <Skeleton className="mt-3 h-8 w-20" />
-              <div className="mt-6 flex-1 space-y-2.5">
-                {Array.from({ length: 4 }).map((_, j) => (
-                  <Skeleton key={j} className="h-3 w-full" />
-                ))}
-              </div>
-              <Skeleton className="mt-6 h-10 w-full" />
-            </div>
-          ))}
-        </div>
-      ) : (
-      <Stagger className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-        {plans.map((plan) => {
-          const popular = plan.tier === "PRO_PLUS";
-          const enterprise = plan.tier === "ENTERPRISE";
-          const aiRows = aiPlanFeatures(plan.ai);
-          return (
-            <Item key={plan.tier} className="h-full">
+      <section aria-label="Plans">
+        {pageLoading ? (
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            {Array.from({ length: 4 }).map((_, i) => (
               <div
-                className={`relative flex h-full flex-col rounded-2xl border bg-surface p-6 transition-all ${
-                  popular ? "border-primary shadow-lg" : "border-outline"
-                } hover:-translate-y-1 hover:border-primary/50`}
+                key={i}
+                className="relative flex h-full flex-col rounded-2xl border border-outline bg-surface p-6"
               >
-                {popular && (
-                  <span className="absolute -top-3 left-1/2 -translate-x-1/2 rounded-full bg-primary px-3 py-0.5 text-xs font-semibold text-on-primary">
-                    Most popular
-                  </span>
-                )}
-                <h2 className="font-display text-lg font-semibold">{plan.name}</h2>
-                <p className="mt-3 font-display text-3xl font-semibold">
-                  {enterprise
-                    ? "Custom"
-                    : plan.price_monthly_usd == null
-                      ? "$0"
-                      : `$${plan.price_monthly_usd}`}
-                  {!enterprise && (
-                    <span className="text-base font-normal text-muted">/mo</span>
-                  )}
-                </p>
-                <ul className="mt-6 flex-1 space-y-2.5">
-                  {plan.features.map((f) => (
-                    <li key={f} className="flex items-start gap-2 text-sm text-on-background">
-                      <Check size={16} weight="bold" className="mt-0.5 shrink-0 text-success" />
-                      {f}
-                    </li>
+                <Skeleton className="h-5 w-24" />
+                <Skeleton className="mt-3 h-8 w-20" />
+                <div className="mt-6 flex-1 space-y-2.5">
+                  {Array.from({ length: 4 }).map((_, j) => (
+                    <Skeleton key={j} className="h-3 w-full" />
                   ))}
-                </ul>
-                {/* A distinct group for the assistant, only when the plan has
-                    one. `aiPlanFeatures` owns the wording (and returns `[]` for
-                    a plan without AI), so nothing hardcoded leaks in here. */}
-                {aiRows.length > 0 && (
-                  <div className="mt-5 rounded-xl border border-outline bg-surface-variant/40 p-3">
-                    <p className="flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-muted">
-                      <Sparkle size={13} weight="fill" className="shrink-0 text-primary" aria-hidden />
-                      AI assistant
-                    </p>
-                    <ul className="mt-2.5 space-y-2">
-                      {aiRows.map((row) => (
-                        <li key={row} className="flex items-start gap-2 text-sm text-on-background">
-                          <Check size={16} weight="bold" className="mt-0.5 shrink-0 text-primary" />
-                          {row}
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-                <div className="mt-6">
-                  {enterprise ? (
-                    <Link to="/app/support" className="block">
-                      <Button variant="secondary" className="w-full">
-                        Contact sales
-                      </Button>
-                    </Link>
-                  ) : plan.price_monthly_usd == null ? (
-                    <Link to="/register" className="block">
-                      <Button variant="secondary" className="w-full">
-                        Start free
-                      </Button>
-                    </Link>
-                  ) : isAuthenticated ? (
-                    <Button
-                      variant={popular ? "primary" : "secondary"}
-                      className="w-full"
-                      disabled={checkoutLoading === plan.tier}
-                      onClick={() => upgrade(plan.tier)}
-                    >
-                      {checkoutLoading === plan.tier ? "Redirecting…" : `Upgrade to ${plan.name}`}
-                    </Button>
-                  ) : (
-                    <Link to="/register" className="block">
-                      <Button variant={popular ? "primary" : "secondary"} className="w-full">
-                        {`Upgrade to ${plan.name}`}
-                      </Button>
-                    </Link>
-                  )}
                 </div>
+                <Skeleton className="mt-6 h-10 w-full" />
               </div>
-            </Item>
-          );
-        })}
-      </Stagger>
+            ))}
+          </div>
+        ) : (
+          <Stagger className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            {plans.map((plan) => (
+              <Item key={plan.tier} className="h-full">
+                <PlanCard
+                  plan={plan}
+                  cta={planCta({ plan, currentTier, isAuthenticated })}
+                  busy={busyForPlan(plan.tier)}
+                  onCheckout={() => startCheckout(plan.tier)}
+                  onChangePlan={() => changePlan(plan.tier)}
+                />
+              </Item>
+            ))}
+          </Stagger>
+        )}
+      </section>
+
+      {!pageLoading && <ComparisonTable plans={plans} />}
+
+      {!authLoading && (
+        <CreditPacks
+          packs={packs}
+          loading={packsLoading}
+          isAuthenticated={isAuthenticated}
+          busyCredits={busyCredits}
+          onBuy={buyCredits}
+        />
       )}
 
-      {/* FAQ — small accordion reusing the Support-page pattern. */}
-      <Card className="mt-16 overflow-hidden">
-        <div className="border-b border-outline px-5 py-4">
-          <h2 className="font-display text-lg font-semibold">Frequently asked</h2>
-        </div>
-        <ul className="divide-y divide-outline">
-          {FAQS.map((f, i) => (
-            <li key={f.q}>
-              <button
-                onClick={() => setFaqOpen(faqOpen === i ? null : i)}
-                className="flex w-full items-center justify-between px-5 py-4 text-left"
-                aria-expanded={faqOpen === i}
-              >
-                <span className="text-sm font-medium text-on-background">{f.q}</span>
-                <CaretDown
-                  size={16}
-                  className={`text-muted transition-transform ${faqOpen === i ? "rotate-180" : ""}`}
-                />
-              </button>
-              <AnimatePresence initial={false}>
-                {faqOpen === i && (
-                  <motion.p
-                    className="px-5 pb-4 text-sm text-muted"
-                    initial={{ height: 0, opacity: 0 }}
-                    animate={{ height: "auto", opacity: 1 }}
-                    exit={{ height: 0, opacity: 0 }}
-                    transition={{ duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
-                  >
-                    {f.a}
-                  </motion.p>
-                )}
-              </AnimatePresence>
-            </li>
-          ))}
-        </ul>
-      </Card>
+      <PricingFaq />
+
+      {!pageLoading && <EnterpriseBand plan={enterprisePlan} />}
     </div>
   );
 }

@@ -1,38 +1,90 @@
-import { useCallback, useEffect, useState } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
-import { Coins, Receipt } from "@phosphor-icons/react";
+/**
+ * Billing.
+ *
+ * Structured to keep customers rather than to make leaving easy. Reading top to
+ * bottom the page goes: what you're on and how much you've used → the next plan
+ * up → change plan (only where there is an upgrade to make) → buying credits →
+ * managing the card → the billing record → and only then, in a deliberately
+ * quiet card at the very bottom, cancelling. The cancel card opens a three-step
+ * retention wizard instead of cancelling immediately, and nothing above it is a
+ * cancel control.
+ *
+ * Every API field is optional-by-contract: the page is deployed independently of
+ * the API, so a response that omits the plan price, the wallet split,
+ * `cancel_at_period_end` or invoices renders fewer lines rather than a fabricated
+ * zero. `null` from the API means "did not say", never `0`.
+ */
+
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Link, useLocation, useNavigate } from "react-router-dom";
+import { CalendarX, Lifebuoy } from "@phosphor-icons/react";
 import { useAuth } from "@/auth/AuthContext";
 import { useToast } from "@/auth/ToastContext";
-import { Button, Card, Skeleton, SkeletonText } from "@/components/ui";
-import { Modal } from "@/components/Modal";
+import { Button, Card } from "@/components/ui";
 import { trustedExternalUrl } from "@/lib/download";
-import { formatDate, formatDateOrNull } from "@/lib/format";
-import { availableCredits, creditWalletRows } from "@/lib/creditWallet";
-import { tierLabel } from "@/lib/planChange";
+import { formatDateOrNull } from "@/lib/format";
+import { planChangeOptions, tierRank } from "@/lib/planChange";
 import { embeddedCheckoutEnabled } from "@/lib/stripeCheckout";
+import { PlanHeroCard } from "./billing/PlanHeroCard";
+import { UpgradeNudgeCard } from "./billing/UpgradeNudgeCard";
 import { PlanChangeCard } from "./billing/PlanChangeCard";
+import { CreditsCard } from "./billing/CreditsCard";
 import { PaymentMethodSection } from "./billing/PaymentMethodSection";
+import { BillingHistoryCard } from "./billing/BillingHistoryCard";
+import { CancelPlanCard } from "./billing/CancelPlanCard";
+import { CancelRetentionModal } from "./billing/CancelRetentionModal";
 import type {
   CreditBalanceResponse,
   CreditPricingResponse,
   CreditTransactionResponse,
+  DashboardResponse,
+  InvoiceListResponse,
+  StorageStats,
+  SubscriptionPlanResponse,
   SubscriptionStatusResponse,
 } from "@/api/types";
+
+interface BillingData {
+  plan: SubscriptionStatusResponse | null;
+  credit: CreditBalanceResponse | null;
+  pricing: CreditPricingResponse[];
+  history: CreditTransactionResponse[];
+  storage: StorageStats | null;
+  plans: SubscriptionPlanResponse[];
+  invoices: InvoiceListResponse | null;
+  invoicesFailure: string | null;
+}
+
+const EMPTY: BillingData = {
+  plan: null,
+  credit: null,
+  pricing: [],
+  history: [],
+  storage: null,
+  plans: [],
+  invoices: null,
+  invoicesFailure: null,
+};
+
+/** A user-facing message for a rejected promise we did not type. */
+function failureMessage(reason: unknown): string {
+  if (reason instanceof Error && reason.message) return reason.message;
+  return "Something went wrong loading your billing details.";
+}
 
 export function BillingPage() {
   const { api: client } = useAuth();
   const { success, error } = useToast();
   const navigate = useNavigate();
   const location = useLocation();
-  const [plan, setPlan] = useState<SubscriptionStatusResponse | null>(null);
-  const [credit, setCredit] = useState<CreditBalanceResponse | null>(null);
-  const [pricing, setPricing] = useState<CreditPricingResponse[]>([]);
-  const [history, setHistory] = useState<CreditTransactionResponse[]>([]);
+
+  const [data, setData] = useState<BillingData>(EMPTY);
   const [loading, setLoading] = useState(true);
-  const [portalLoading, setPortalLoading] = useState(false);
-  const [invoicesLoading, setInvoicesLoading] = useState(false);
+  const [resumeBusy, setResumeBusy] = useState(false);
   const [cancelOpen, setCancelOpen] = useState(false);
-  const [cancelling, setCancelling] = useState(false);
+
+  const changePlanRef = useRef<HTMLDivElement | null>(null);
+  const paymentRef = useRef<HTMLDivElement | null>(null);
 
   // Show feedback when the user returns from Stripe-hosted Checkout or the
   // Customer Portal, then strip the query params so a refresh doesn't re-show it.
@@ -54,24 +106,49 @@ export function BillingPage() {
     navigate("/app/billing", { replace: true });
   }, [location.search, navigate, success, error]);
 
+  // Load everything the page shows. Each call settles independently: a failing
+  // invoice read (or an API that predates the endpoint) must not blank out the
+  // plan and wallet, and the invoice section has its own honest message for it.
   useEffect(() => {
     let active = true;
     setLoading(true);
-    Promise.all([
+    Promise.allSettled([
       client.subscriptionStatus(),
       client.creditBalance(),
       client.creditPricing(),
       client.creditHistory(),
+      client.dashboard(),
+      client.subscriptionPlans(),
+      client.listInvoices(),
     ])
-      .then(([p, c, pr, h]) => {
-        if (!active) return;
-        setPlan(p);
-        setCredit(c);
-        setPricing(pr);
-        setHistory(h);
-      })
-      .catch((e: Error) => error(e.message))
-      .finally(() => active && setLoading(false));
+      .then(
+        ([plan, credit, pricing, history, dashboard, plans, invoices]: [
+          PromiseSettledResult<SubscriptionStatusResponse>,
+          PromiseSettledResult<CreditBalanceResponse>,
+          PromiseSettledResult<CreditPricingResponse[]>,
+          PromiseSettledResult<CreditTransactionResponse[]>,
+          PromiseSettledResult<DashboardResponse>,
+          PromiseSettledResult<SubscriptionPlanResponse[]>,
+          PromiseSettledResult<InvoiceListResponse>,
+        ]) => {
+          if (!active) return;
+          setData({
+            plan: plan.status === "fulfilled" ? plan.value : null,
+            credit: credit.status === "fulfilled" ? credit.value : null,
+            pricing: pricing.status === "fulfilled" ? pricing.value : [],
+            history: history.status === "fulfilled" ? history.value : [],
+            storage: dashboard.status === "fulfilled" ? dashboard.value.storage_stats : null,
+            plans: plans.status === "fulfilled" ? plans.value : [],
+            invoices: invoices.status === "fulfilled" ? invoices.value : null,
+            invoicesFailure:
+              invoices.status === "rejected" ? failureMessage(invoices.reason) : null,
+          });
+          // The plan and the wallet are the page; if either failed, say so.
+          if (plan.status === "rejected") error(failureMessage(plan.reason));
+          else if (credit.status === "rejected") error(failureMessage(credit.reason));
+          setLoading(false);
+        },
+      );
     return () => {
       active = false;
     };
@@ -83,7 +160,7 @@ export function BillingPage() {
     const onCreditsUpdated = () => {
       client
         .creditBalance()
-        .then((balance) => setCredit(balance))
+        .then((balance) => setData((prev) => ({ ...prev, credit: balance })))
         .catch((e: Error) => error(e.message));
     };
     window.addEventListener("credits:updated", onCreditsUpdated);
@@ -95,16 +172,25 @@ export function BillingPage() {
   // does NOT set `loading`: flipping the whole page back to skeletons after a
   // one-click upgrade reads as a page reload. `changePlan` is a POST, so the
   // client's read cache was already dropped and these are live values.
+  //
+  // The storage stats come along because an upgrade changes the quota, and a
+  // stale meter next to a freshly-changed plan is the kind of detail that makes
+  // a page feel broken.
   const refreshBilling = useCallback(async () => {
     try {
-      const [p, c, h] = await Promise.all([
+      const [plan, credit, history, dashboard] = await Promise.all([
         client.subscriptionStatus(),
         client.creditBalance(),
         client.creditHistory(),
+        client.dashboard(),
       ]);
-      setPlan(p);
-      setCredit(c);
-      setHistory(h);
+      setData((prev) => ({
+        ...prev,
+        plan,
+        credit,
+        history,
+        storage: dashboard.storage_stats,
+      }));
     } catch (e) {
       error(e instanceof Error ? e.message : "Could not refresh your billing details");
     }
@@ -132,253 +218,149 @@ export function BillingPage() {
     }
   }
 
-  /**
-   * Open the Stripe Customer Portal, where invoices and receipts live — it is
-   * the only place they are served and it cannot be embedded.
-   *
-   * Shared by the "Manage subscription" button and the quieter "Invoices & tax"
-   * link, so both get the same URL guard and the same recovery: the portal needs
-   * an existing Stripe customer, and a Free account has none, so a 404 sends them
-   * to pick a plan rather than showing a raw error.
-   */
-  async function openCustomerPortal(setBusy: (busy: boolean) => void) {
-    setBusy(true);
+  async function resume() {
+    if (resumeBusy) return;
+    setResumeBusy(true);
     try {
-      const { portal_url } = await client.createPortalSession();
-      const target = trustedExternalUrl(portal_url);
-      if (!target) throw new Error("The billing portal link was not valid. Please try again.");
-      window.location.assign(target);
+      await client.resumeSubscription();
+      success("Your plan will renew again");
+      await refreshBilling();
     } catch (err) {
-      const message = err instanceof Error ? err.message : "";
-      if (message.toLowerCase().includes("no stripe customer")) {
-        navigate("/pricing");
-      } else {
-        error(message || "Could not open billing portal");
-      }
+      error(err instanceof Error ? err.message : "Could not resume your subscription");
     } finally {
-      setBusy(false);
+      setResumeBusy(false);
     }
   }
 
-  const openPortal = () => openCustomerPortal(setPortalLoading);
-  const openInvoices = () => openCustomerPortal(setInvoicesLoading);
-
-  async function cancel() {
-    if (cancelling) return;
-    setCancelling(true);
-    try {
-      await client.cancelSubscription();
-      const p = await client.subscriptionStatus();
-      setPlan(p);
-      success("Subscription cancelled");
-      setCancelOpen(false);
-    } catch (err) {
-      error(err instanceof Error ? err.message : "Could not cancel subscription");
-    } finally {
-      setCancelling(false);
-    }
+  function scrollTo(ref: React.RefObject<HTMLDivElement | null>) {
+    ref.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
-  // Absent on an older API and `null` for tiers without persistent credits —
-  // both omit the line rather than showing a placeholder date.
-  const resetLabel = formatDateOrNull(credit?.credits_reset_at);
-  // The wallet split: one row per bucket that actually holds credits. An older
-  // API sends no split, so this is empty and only the total is shown.
-  const walletRows = creditWalletRows(credit);
-  const creditsTotal = availableCredits(credit);
-  // A Free account has no Stripe customer, so there is no card to manage.
-  const hasSubscription = plan != null && plan.tier !== "FREE";
+  const plan = data.plan;
+  const free = tierRank(plan?.tier) === 0;
+  const hasSubscription = plan != null && !free;
+  const ending = plan?.cancel_at_period_end === true;
+  const endsOn = formatDateOrNull(plan?.current_period_end);
+  const showCancelCard = !loading && hasSubscription && !ending;
+  // Whether the Change plan card has anything to offer this tier. Gated on the
+  // wrapper (not just inside the card) because the page is a `space-y-6` stack:
+  // an empty wrapper would still add a 24px gap where the section used to be.
+  // Pro Plus is the tier this is about — nothing above it, and its downgrade is
+  // offered on the pricing page the hero's button now points at.
+  const showPlanChange = !loading && planChangeOptions(plan?.tier ?? null).length > 0;
 
   return (
     <div className="mx-auto max-w-5xl space-y-6">
-      <h1 className="font-display text-2xl font-semibold">Billing</h1>
-
-      {/* Current plan */}
-      <Card hover className="p-6">
-        {loading ? (
-          <div className="space-y-3">
-            <Skeleton className="h-3 w-24" />
-            <Skeleton className="h-8 w-40" />
-            <Skeleton className="h-3 w-32" />
-          </div>
-        ) : (
-          <div className="flex flex-wrap items-center justify-between gap-4">
-            <div>
-              <p className="text-xs font-semibold uppercase tracking-wide text-muted">Current plan</p>
-              <div className="mt-1 flex items-center gap-2">
-                {/* `tierLabel` turns the raw enum (`PRO_PLUS`) into "Pro Plus";
-                    the API's tier values are identifiers, not copy. */}
-                <h2 className="font-display text-2xl font-semibold">{tierLabel(plan?.tier)}</h2>
-                <span className="rounded-full bg-success/15 px-2.5 py-0.5 text-xs font-semibold text-success">
-                  {plan?.status ?? "Active"}
-                </span>
-              </div>
-              {plan?.current_period_end && (
-                <p className="mt-1 text-sm text-muted">Renews {formatDate(plan.current_period_end)}</p>
-              )}
-            </div>
-            <div className="flex flex-col items-end gap-1.5">
-              <div className="flex items-center gap-2">
-                <Button variant="secondary" onClick={openPortal} disabled={portalLoading}>
-                  {portalLoading ? "Opening…" : "Manage subscription"}
-                </Button>
-                {plan && plan.tier !== "FREE" && (
-                  <Button variant="destructive" onClick={() => setCancelOpen(true)}>
-                    Cancel subscription
-                  </Button>
-                )}
-              </div>
-              {/* Deliberately quieter than everything around it: changing the plan
-                  is the page's primary action, and invoices are a lookup, not a
-                  decision. Guarded by the same `trustedExternalUrl` check. */}
-              <button
-                type="button"
-                onClick={openInvoices}
-                disabled={invoicesLoading}
-                className="inline-flex items-center gap-1 text-xs font-medium text-muted transition-colors hover:text-on-background disabled:opacity-50"
-              >
-                <Receipt size={13} aria-hidden />
-                {invoicesLoading ? "Opening…" : "Invoices & tax"}
-              </button>
-            </div>
+      {/* Header */}
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h1 className="font-display text-2xl font-semibold">Billing</h1>
+          <p className="mt-1 text-sm text-muted">
+            Manage your plan, credits and payment details.
+          </p>
         </div>
-        )}
-      </Card>
+        {/* Quiet by design: support is a first-class route, not a billing action. */}
+        <Link
+          to="/app/support"
+          className="inline-flex items-center gap-1.5 text-sm font-medium text-muted transition-colors hover:text-on-background"
+        >
+          <Lifebuoy size={15} aria-hidden />
+          Need help?
+        </Link>
+      </div>
 
-      {/* Change plan — the primary action on this page. Omitted for a Free
-          account (no subscription to change) and for Enterprise, which is not
-          self-serve; `planChangeOptions` decides that. */}
-      {!loading && (
-        <PlanChangeCard
+      {/* A scheduled cancellation is the one thing that outranks the plan card:
+          it changes what the plan card means. Prominent, but calm. */}
+      {!loading && ending && (
+        <Card className="border-warning/40 bg-warning/5 p-5">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="flex min-w-0 items-start gap-3">
+              <CalendarX size={20} className="mt-0.5 shrink-0 text-warning" aria-hidden />
+              <div className="min-w-0">
+                <p className="text-sm font-medium text-on-background">
+                  {endsOn
+                    ? `Your plan ends on ${endsOn}. Nothing is charged after that.`
+                    : "Your plan ends at the end of the current billing period. Nothing is charged after that."}
+                </p>
+                <p className="mt-0.5 text-sm text-muted">You can keep it and renew as normal.</p>
+              </div>
+            </div>
+            <Button variant="secondary" size="sm" onClick={resume} disabled={resumeBusy}>
+              {resumeBusy ? "Resuming…" : "Resume plan"}
+            </Button>
+          </div>
+        </Card>
+      )}
+
+      {/* 2 — Plan & usage. The primary action here is change/choose, never cancel. */}
+      <PlanHeroCard
+        loading={loading}
+        plan={plan}
+        credit={data.credit}
+        storage={data.storage}
+        plans={data.plans}
+        onScrollToChangePlan={() => scrollTo(changePlanRef)}
+        onScrollToPaymentMethod={() => scrollTo(paymentRef)}
+        onResume={resume}
+        resumeBusy={resumeBusy}
+      />
+
+      {/* 3 — Upgrade nudge. Omitted entirely when the plan list failed to load. */}
+      {!loading && data.plans.length > 0 && (
+        <UpgradeNudgeCard
+          plans={data.plans}
           currentTier={plan?.tier ?? null}
-          onChanged={() => {
-            void refreshBilling();
-          }}
+          onChanged={() => void refreshBilling()}
         />
       )}
 
-      {/* Credits */}
-      <Card hover className="p-6">
-        <div className="flex items-center justify-between">
-          <div>
-            <p className="text-xs font-semibold uppercase tracking-wide text-muted">Credits remaining</p>
-            {loading ? (
-              <Skeleton className="mt-1 h-8 w-24" />
-            ) : (
-              <p className="mt-1 font-display text-3xl font-semibold">{creditsTotal}</p>
-            )}
-          </div>
-          <Coins size={28} className="text-primary" />
+      {/* 4 — Change plan, the scroll target for the hero's primary button when
+          that button is a scroll at all. Omitted for Free, Enterprise and Pro
+          Plus, which is why the hero asks `planHeroCta` before scrolling. */}
+      {showPlanChange && (
+        <div ref={changePlanRef} id="change-plan" className="scroll-mt-6">
+          <PlanChangeCard
+            currentTier={plan?.tier ?? null}
+            onChanged={() => void refreshBilling()}
+          />
         </div>
-        {/* When the monthly plan allowance refreshes. Shown in the viewer's
-            local timezone, and omitted for tiers without persistent credits. */}
-        {!loading && resetLabel && (
-          <p className="mt-2 text-xs text-muted">
-            Plan credits reset{" "}
-            <span className="font-medium text-on-background">{resetLabel}</span>
-          </p>
-        )}
-        {/* The split, so expiring carryover is visible. A bucket the API did
-            not send, or one at zero, is omitted rather than printed as 0. */}
-        {!loading && walletRows.length > 0 && (
-          <dl className="mt-4 space-y-2 border-t border-outline pt-4">
-            {walletRows.map((row) => (
-              <div key={row.bucket} className="flex items-start justify-between gap-4">
-                <dt className="text-sm text-muted">
-                  {row.label}
-                  {row.note && <span className="mt-0.5 block text-xs">{row.note}</span>}
-                </dt>
-                <dd className="font-mono text-sm font-semibold text-on-background">
-                  {row.credits}
-                </dd>
-              </div>
-            ))}
-          </dl>
-        )}
-        <div className="mt-6">
-          <p className="mb-2 text-sm font-medium">Buy credits</p>
-          {loading ? (
-            <div className="flex flex-wrap gap-2">
-              {Array.from({ length: 3 }).map((_, i) => (
-                <Skeleton key={i} className="h-9 w-28" />
-              ))}
-            </div>
-          ) : (
-            <div className="flex flex-wrap gap-2">
-              {pricing.map((p) => (
-                <button
-                  key={p.credits}
-                  onClick={() => buy(p.credits)}
-                  className="rounded-lg border border-outline-strong px-4 py-2 text-sm hover:bg-surface-variant"
-                >
-                  <span className="font-semibold">{p.credits}</span>{" "}
-                  <span className="text-muted">· ${p.price_usd}</span>
-                </button>
-              ))}
-            </div>
-          )}
+      )}
+
+      {/* 5 — Credits: the wallet, then the packs. */}
+      <CreditsCard
+        loading={loading}
+        credit={data.credit}
+        pricing={data.pricing}
+        onBuy={(amount) => void buy(amount)}
+      />
+
+      {/* 6 — Payment method. Quiet and late; its own logic is untouched. */}
+      {!loading && (
+        <div ref={paymentRef} id="payment-method" className="scroll-mt-6">
+          <PaymentMethodSection hasSubscription={hasSubscription} />
         </div>
-      </Card>
+      )}
 
-      {/* Payment method — deliberately quiet and near the bottom: changing the
-          plan is the primary action on this page. */}
-      {!loading && <PaymentMethodSection hasSubscription={hasSubscription} />}
+      {/* 7 — Billing history: invoices first, credit activity behind a disclosure. */}
+      <BillingHistoryCard
+        loading={loading}
+        invoices={data.invoices}
+        invoicesFailure={data.invoicesFailure}
+        history={data.history}
+      />
 
-      {/* Transaction history */}
-      <Card className="overflow-hidden">
-        <div className="border-b border-outline px-5 py-4">
-          <h2 className="font-display text-lg font-semibold">Transactions</h2>
-        </div>
-        {loading ? (
-          <div className="space-y-3 px-5 py-4">
-            {Array.from({ length: 3 }).map((_, i) => (
-              <div key={i} className="flex items-center justify-between gap-4">
-                <SkeletonText lines={2} />
-                <Skeleton className="h-4 w-16" />
-              </div>
-            ))}
-          </div>
-        ) : history.length === 0 ? (
-          <p className="px-5 py-10 text-center text-sm text-muted">No transactions yet.</p>
-        ) : (
-          <ul className="divide-y divide-outline">
-            {history.map((t) => (
-              <li key={t.id} className="grid grid-cols-[1fr_auto_auto] items-center gap-4 px-5 py-3">
-                <div>
-                  <p className="text-sm text-on-background capitalize">{t.transaction_type}</p>
-                  <p className="font-mono text-xs text-muted">{t.reference_id}</p>
-                </div>
-                <span className="font-mono text-sm text-on-background">
-                  {t.amount > 0 ? `+${t.amount}` : t.amount}
-                </span>
-                <span className="font-mono text-xs text-muted">{formatDate(t.created_at)}</span>
-              </li>
-            ))}
-          </ul>
-        )}
-      </Card>
+      {/* 8 — Cancel, deliberately the last and quietest thing on the page. */}
+      {showCancelCard && <CancelPlanCard onOpen={() => setCancelOpen(true)} />}
 
-      {/* Cancel subscription confirmation */}
-      <Modal
+      {/* 9 — The retention wizard. */}
+      <CancelRetentionModal
         open={cancelOpen}
-        onClose={() => {
-          if (!cancelling) setCancelOpen(false);
-        }}
-        title="Cancel subscription?"
-        maxWidth="max-w-sm"
-      >
-        <p className="text-sm text-on-background">
-          You'll keep your current tier until the period ends.
-        </p>
-        <div className="mt-6 flex justify-end gap-2">
-          <Button variant="ghost" onClick={() => setCancelOpen(false)} disabled={cancelling}>
-            Cancel
-          </Button>
-          <Button variant="destructive" onClick={cancel} disabled={cancelling}>
-            {cancelling ? "Cancelling…" : "Cancel subscription"}
-          </Button>
-        </div>
-      </Modal>
+        onClose={() => setCancelOpen(false)}
+        plan={plan}
+        credit={data.credit}
+        plans={data.plans}
+        onChanged={() => void refreshBilling()}
+      />
     </div>
   );
 }

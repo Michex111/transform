@@ -105,6 +105,7 @@ class TestResolveUiMode:
     def test_defaults_to_what_the_client_asked_for(self, stripe: Any) -> None:
         service, _ = stripe
         assert service._resolve_ui_mode("embedded") is CheckoutUiMode.EMBEDDED
+        assert service._resolve_ui_mode("elements") is CheckoutUiMode.ELEMENTS
         assert service._resolve_ui_mode("hosted") is CheckoutUiMode.HOSTED
 
     def test_an_unknown_request_falls_back_to_hosted(self, stripe: Any) -> None:
@@ -123,6 +124,8 @@ class TestResolveUiMode:
         [
             ("hosted", "embedded", CheckoutUiMode.HOSTED),
             ("embedded", "hosted", CheckoutUiMode.EMBEDDED),
+            ("elements", "hosted", CheckoutUiMode.ELEMENTS),
+            ("embedded", "elements", CheckoutUiMode.EMBEDDED),
         ],
     )
     def test_a_configured_mode_overrides_the_client(
@@ -188,23 +191,51 @@ class TestEmbeddedSessionParams:
             "url": "https://transform-to.com/apple-touch-icon.png",
         }
 
-    def test_hosted_session_is_byte_for_byte_unchanged(self, stripe: Any) -> None:
-        # The default path must not regress: this is what every deployed SPA
-        # still uses while the embedded page rolls out.
+class TestElementsSessionParams:
+    """`ui_mode: elements` — the in-page mode that CAN be themed dark.
+
+    Embedded Checkout exposes only background/button/font/shape, rejects a
+    `theme` parameter outright, and paints its payment sheet white whatever
+    `background_color` says (all verified against the live account). The
+    Payment Element is themed with the Appearance API instead, so this mode is
+    the one whose appearance the SPA actually controls.
+    """
+
+    def test_elements_session_omits_the_urls_stripe_rejects(self, stripe: Any) -> None:
         service, sessions = stripe
-        handle = _create_subscription(service)
+        handle = _create_subscription(service, ui_mode="elements")
 
         params = sessions.calls[0]
-        assert params["success_url"] == _SUCCESS_URL
-        assert params["cancel_url"] == _CANCEL_URL
-        assert "ui_mode" not in params
-        assert "return_url" not in params
-        assert "branding_settings" not in params
+        assert params["ui_mode"] == "elements"
+        assert params["return_url"] == _SUCCESS_URL
+        assert "success_url" not in params
+        assert "cancel_url" not in params
         assert handle is not None
-        assert handle.url == _SESSION.url
-        assert handle.client_secret is None
+        assert handle.client_secret == _SESSION.client_secret
+        assert handle.url is None
 
-    def test_credit_packs_support_the_embedded_mode(self, stripe: Any) -> None:
+    def test_elements_session_never_sends_branding_settings(self, stripe: Any) -> None:
+        """Stripe rejects the pair: `branding_settings` is not supported with
+        `ui_mode: elements`. Sending it would fail session creation — i.e. break
+        checkout entirely — so this is the guard that a future edit cannot make
+        the two modes' params converge."""
+        service, sessions = stripe
+        _create_subscription(service, ui_mode="elements")
+
+        params = sessions.calls[0]
+        assert "branding_settings" not in params
+
+    def test_elements_session_omits_the_embedded_only_params(self, stripe: Any) -> None:
+        service, sessions = stripe
+        _create_subscription(service, ui_mode="elements")
+
+        params = sessions.calls[0]
+        # Both are rejected for this mode; the redirect is decided by
+        # `checkout.confirm()` in the browser instead.
+        assert "redirect_on_completion" not in params
+        assert "origin_context" not in params
+
+    def test_credit_packs_support_the_elements_mode(self, stripe: Any) -> None:
         service, sessions = stripe
         handle = asyncio.run(
             service.create_credit_purchase_session(
@@ -214,16 +245,54 @@ class TestEmbeddedSessionParams:
                 amount_usd=10.0,
                 success_url=_SUCCESS_URL,
                 cancel_url=_CANCEL_URL,
-                ui_mode="embedded",
+                ui_mode="elements",
             )
         )
 
         params = sessions.calls[0]
         assert params["mode"] == "payment"
-        assert params["ui_mode"] == "embedded_page"
-        assert params["line_items"][0]["price_data"]["unit_amount"] == 1000
-        assert "success_url" not in params
+        assert params["ui_mode"] == "elements"
+        assert "branding_settings" not in params
         assert handle is not None and handle.client_secret
+
+
+def test_hosted_session_is_byte_for_byte_unchanged(stripe: Any) -> None:
+    # The default path must not regress: this is what every deployed SPA still
+    # uses while the in-page modes roll out.
+    service, sessions = stripe
+    handle = _create_subscription(service)
+
+    params = sessions.calls[0]
+    assert params["success_url"] == _SUCCESS_URL
+    assert params["cancel_url"] == _CANCEL_URL
+    assert "ui_mode" not in params
+    assert "return_url" not in params
+    assert "branding_settings" not in params
+    assert handle is not None
+    assert handle.url == _SESSION.url
+    assert handle.client_secret is None
+
+
+def test_credit_packs_support_the_embedded_mode(stripe: Any) -> None:
+    service, sessions = stripe
+    handle = asyncio.run(
+        service.create_credit_purchase_session(
+            user_id="7",
+            email="buyer@example.com",
+            credits=100,
+            amount_usd=10.0,
+            success_url=_SUCCESS_URL,
+            cancel_url=_CANCEL_URL,
+            ui_mode="embedded",
+        )
+    )
+
+    params = sessions.calls[0]
+    assert params["mode"] == "payment"
+    assert params["ui_mode"] == "embedded_page"
+    assert params["line_items"][0]["price_data"]["unit_amount"] == 1000
+    assert "success_url" not in params
+    assert handle is not None and handle.client_secret
 
 
 # ---------------------------------------------------------------------------
@@ -275,6 +344,8 @@ class TestCheckoutLogo:
     [
         (CheckoutUiMode.HOSTED, CheckoutSessionHandle(url=_SESSION.url, client_secret=None)),
         (CheckoutUiMode.EMBEDDED, CheckoutSessionHandle(client_secret=_SESSION.client_secret)),
+        # `elements` mounts the Payment Element, which needs the secret too.
+        (CheckoutUiMode.ELEMENTS, CheckoutSessionHandle(client_secret=_SESSION.client_secret)),
     ],
 )
 def test_exactly_one_credential_is_handed_to_the_browser(

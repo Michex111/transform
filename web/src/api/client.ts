@@ -36,6 +36,7 @@ import {
   normalizeFolderList,
   normalizeForgotPassword,
   normalizeGuestJob,
+  normalizeInvoices,
   normalizePhoneStatus,
   normalizePaymentMethodList,
   normalizePaymentMethodSession,
@@ -43,6 +44,7 @@ import {
   normalizePresignedUrls,
   normalizeResendVerification,
   normalizeResetPassword,
+  normalizeResumeSubscription,
   normalizeSubscriptionPlans,
   normalizeSubscriptionStatus,
   normalizeSupportedConversions,
@@ -1325,7 +1327,7 @@ export class ApiClient {
    * an embedded form produces byte-identical requests to the ones this app made
    * before embedded checkout existed.
    */
-  purchaseCredits = (amount: number, uiMode?: 'embedded') =>
+  purchaseCredits = (amount: number, uiMode?: 'embedded' | 'elements') =>
     this.request<unknown>('/v1/credits/purchase', {
       method: 'POST',
       body: JSON.stringify({
@@ -1345,7 +1347,7 @@ export class ApiClient {
   /** Open a Stripe Customer Portal session for self-service billing management. */
   createPortalSession = () =>
     this.request<unknown>('/v1/subscription/portal', { method: 'POST' }).then(normalizePortal)
-  checkout = (tier: string, uiMode?: 'embedded') =>
+  checkout = (tier: string, uiMode?: 'embedded' | 'elements') =>
     this.request<unknown>('/v1/subscription/checkout', {
       method: 'POST',
       body: JSON.stringify({ tier, ...(uiMode ? { ui_mode: uiMode } : {}) }),
@@ -1354,6 +1356,26 @@ export class ApiClient {
     this.request<unknown>('/v1/subscription/cancel', { method: 'POST' }).then(
       normalizeCancelSubscription,
     )
+  /**
+   * Undo a scheduled cancellation, so the subscription renews again.
+   *
+   * Only meaningful while `cancel_at_period_end` is true; the API answers 400
+   * for a subscription that is not scheduled to end, which the caller shows as
+   * a plain failure.
+   */
+  resumeSubscription = () =>
+    this.request<unknown>('/v1/subscription/resume', { method: 'POST' }).then(
+      normalizeResumeSubscription,
+    )
+  /**
+   * The account's invoices, for the billing-history table.
+   *
+   * Deliberately **uncached**: an invoice is created by Stripe on a payment
+   * that happens outside this tab, so a remembered list would keep showing a
+   * pre-payment state for its whole TTL with nothing to invalidate it.
+   */
+  listInvoices = () =>
+    this.request<unknown>('/v1/subscription/invoices').then(normalizeInvoices)
   /**
    * Move an existing paid subscription to another self-serve tier.
    *

@@ -654,7 +654,7 @@ export interface CreditTransactionResponse {
 export interface CreditPurchaseRequest {
   amount: number
   /** See `CheckoutResponse.client_secret`. Omitted entirely when hosted. */
-  ui_mode?: 'embedded'
+  ui_mode?: 'embedded' | 'elements'
 }
 
 /** The user-controlled credit spend order (`PATCH /v1/credits/preference`). */
@@ -712,6 +712,20 @@ export interface SubscriptionPlanResponse {
    * as no AI group — never as a plan with zero of everything.
    */
   ai?: AiEntitlement | null
+
+  // ---- Structured entitlements for the comparison table (additive) ----
+  //
+  // The three fields below are the machine-readable counterparts of facts that
+  // previously existed only inside the prose `features` strings. A comparison
+  // table cannot honestly parse prose, so the API reports them as values.
+  // They are optional on the same independent-deploy rule as `ai`: an older API
+  // omits them, and the table omits the row rather than printing a guess.
+  /** API calls allowed per month; `null`/absent means unlimited or unstated. */
+  api_calls_month?: number | null
+  /** Whether conversions on this plan get priority queue treatment. */
+  priority_processing?: boolean | null
+  /** The support tier's display name, e.g. `"Priority"`. */
+  support_level?: string | null
 }
 
 export interface SubscriptionStatusResponse {
@@ -720,6 +734,14 @@ export interface SubscriptionStatusResponse {
   current_period_start: string | null
   current_period_end: string | null
   stripe_subscription_id: string | null
+  /**
+   * Whether the subscription is set to end at the current period end.
+   *
+   * Additive: an older API omits it, and `null` means "the API did not say" —
+   * never render a resume affordance on a subscription we cannot confirm is
+   * ending. `true` is what makes the "your plan ends on …" banner honest.
+   */
+  cancel_at_period_end?: boolean | null
 }
 
 export interface CheckoutResponse {
@@ -753,6 +775,58 @@ export interface PortalResponse {
 export interface CancelSubscriptionResponse {
   message: string
   tier_after_cancel: string
+}
+
+/**
+ * The result of undoing a scheduled cancellation.
+ *
+ * `cancel_at_period_end` is echoed rather than assumed: the page re-reads the
+ * subscription status afterwards, but the response is what confirms the call
+ * landed, and `false` is the only value that means "renewing again".
+ */
+export interface ResumeSubscriptionResponse {
+  message: string
+  tier: string
+  cancel_at_period_end: boolean
+}
+
+/**
+ * One line of the account's billing history, projected from a Stripe invoice.
+ *
+ * Only the fields the table renders plus the two download links. Amounts are in
+ * the currency's minor unit (cents for USD), exactly as Stripe reports them, so
+ * the client does the formatting in one place (`lib/invoices`).
+ */
+export interface InvoiceResponse {
+  id: string
+  /** The human-facing invoice number, or `null` while it is still a draft. */
+  number: string | null
+  /** `paid` | `open` | `void` | `draft` | `uncollectible`. */
+  status: string
+  amount_paid: number
+  amount_due: number
+  /** ISO-4217, lowercase (Stripe's convention). */
+  currency: string
+  created_at: string
+  period_start: string | null
+  period_end: string | null
+  /** Stripe-hosted PDF, or `null` when the invoice is not finalized. */
+  invoice_pdf: string | null
+  /** Stripe-hosted receipt page, or `null`. */
+  hosted_invoice_url: string | null
+}
+
+/**
+ * The account's invoices.
+ *
+ * `enabled: false` is an ordinary state, not an error: Stripe is unconfigured
+ * or the account has no customer yet (a Free user has none until checkout).
+ * Mirrors `PaymentMethodListResponse` so the page can show an explanatory line
+ * rather than an empty table.
+ */
+export interface InvoiceListResponse {
+  enabled: boolean
+  invoices: InvoiceResponse[]
 }
 
 /** Body of `POST /v1/subscription/change-plan`. */
@@ -796,6 +870,14 @@ export interface ChangePlanResponse {
  */
 export interface PaymentMethodSessionResponse {
   client_secret: string | null
+  /**
+   * The SetupIntent the new card is attached to.
+   *
+   * Optional per the independent-deploy rule: an older API omits it, and the
+   * section then mounts the Payment Element in its deferred mode (Stripe
+   * creates the intent at confirmation time) rather than failing.
+   */
+  setup_intent_client_secret?: string | null
   enabled: boolean
 }
 
@@ -813,6 +895,12 @@ export interface SavedPaymentMethodResponse {
   exp_month: number
   exp_year: number
   is_default: boolean
+  /**
+   * `"apple_pay" | "google_pay" | "link"` when the card was tokenised through
+   * a wallet; `null` for a hand-keyed card. Optional so a build talking to an
+   * older API simply shows no wallet hint.
+   */
+  wallet?: string | null
 }
 
 /**

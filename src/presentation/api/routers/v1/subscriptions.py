@@ -2,7 +2,7 @@
 
 import uuid
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
@@ -36,9 +36,12 @@ from src.presentation.schemas.subscription import (
     ChangePlanResponse,
     CheckoutRequest,
     CheckoutResponse,
+    InvoiceListResponse,
+    InvoiceResponse,
     PaymentMethodListResponse,
     PaymentMethodSessionResponse,
     PortalResponse,
+    ResumeSubscriptionResponse,
     SavedPaymentMethodResponse,
     SubscriptionPlanResponse,
     SubscriptionStatus,
@@ -91,6 +94,10 @@ _PLANS = [
         monthly_credits=50,
         features=["5 GB storage", "50 conversions/month", "10 API calls/month", "Community support"],
         ai=_ai_entitlement(DomainTier.FREE),
+        # Structured mirrors of the prose above; the two must agree verbatim.
+        api_calls_month=10,
+        priority_processing=False,
+        support_level="Community",
     ),
     SubscriptionPlanResponse(
         tier=SubscriptionTier.PRO,
@@ -100,6 +107,9 @@ _PLANS = [
         monthly_credits=500,
         features=["50 GB storage", "500 conversions/month", "100 API calls/month", "Priority support"],
         ai=_ai_entitlement(DomainTier.PRO),
+        api_calls_month=100,
+        priority_processing=False,
+        support_level="Priority",
     ),
     SubscriptionPlanResponse(
         tier=SubscriptionTier.PRO_PLUS,
@@ -109,6 +119,9 @@ _PLANS = [
         monthly_credits=2000,
         features=["100 GB storage", "2000 conversions/month", "1000 API calls/month", "Priority processing", "24/7 support"],
         ai=_ai_entitlement(DomainTier.PRO_PLUS),
+        api_calls_month=1000,
+        priority_processing=True,
+        support_level="24/7",
     ),
     SubscriptionPlanResponse(
         tier=SubscriptionTier.ENTERPRISE,
@@ -118,6 +131,11 @@ _PLANS = [
         monthly_credits=None,
         features=["Custom storage", "Unlimited conversions", "Unlimited API access", "Dedicated support", "SLA guarantee", "Custom integrations"],
         ai=_ai_entitlement(DomainTier.ENTERPRISE),
+        # ``api_calls_month=None`` matches the prose "Unlimited API access":
+        # unlimited has no integer representation, so None means uncapped.
+        api_calls_month=None,
+        priority_processing=True,
+        support_level="Dedicated",
     ),
 ]
 
@@ -410,7 +428,16 @@ async def create_payment_method_session(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Payment method session could not be created",
         )
-    return PaymentMethodSessionResponse(client_secret=client_secret, enabled=True)
+    # Best-effort. A server-created SetupIntent is Stripe's documented shape for
+    # saving a card without a payment, but the Payment Element can also create
+    # its own at confirmation time — so a failure here degrades to that mode
+    # rather than blocking card management entirely.
+    setup_intent_client_secret = await stripe_service.create_setup_intent(customer_id)
+    return PaymentMethodSessionResponse(
+        client_secret=client_secret,
+        setup_intent_client_secret=setup_intent_client_secret,
+        enabled=True,
+    )
 
 
 def _payment_methods_response(
@@ -426,6 +453,7 @@ def _payment_methods_response(
                 exp_month=method.exp_month,
                 exp_year=method.exp_year,
                 is_default=method.is_default,
+                wallet=method.wallet,
             )
             for method in methods
         ],
@@ -436,6 +464,30 @@ def _payment_methods_response(
 async def _customer_id_for(subscription_repo: SQLSubscriptionRepository, user_id: int) -> str | None:
     row = await subscription_repo.get_subscription_row(user_id)
     return row.stripe_customer_id if row else None
+
+
+async def _default_payment_methods(
+    subscription_repo: SQLSubscriptionRepository,
+    stripe_service: StripeService,
+    user_id: int,
+) -> PaymentMethodListResponse:
+    """The caller's cards, with the one a renewal will charge flagged.
+
+    The subscription id is passed through so the service can source
+    ``is_default`` from the subscription's own default rather than only the
+    customer's: the two can disagree, and a wrong badge here tells the customer
+    their next invoice will use a card it will not. Every list-returning
+    handler goes through this so all three agree on which card is the default.
+    """
+    row = await subscription_repo.get_subscription_row(user_id)
+    # Written as one guard so the row is narrowed for the attributes read below
+    # rather than relying on a truthiness check on a value derived from it.
+    if row is None or not row.stripe_customer_id:
+        return _payment_methods_response([], enabled=False)
+    methods = await stripe_service.list_payment_methods(
+        row.stripe_customer_id, subscription_id=row.stripe_subscription_id
+    )
+    return _payment_methods_response(methods)
 
 
 @router.get("/payment-methods", response_model=PaymentMethodListResponse)
@@ -452,10 +504,7 @@ async def list_payment_methods(
     """
     if not stripe_service.enabled:
         return _payment_methods_response([], enabled=False)
-    customer_id = await _customer_id_for(subscription_repo, current_user.id)
-    if not customer_id:
-        return _payment_methods_response([], enabled=False)
-    return _payment_methods_response(await stripe_service.list_payment_methods(customer_id))
+    return await _default_payment_methods(subscription_repo, stripe_service, current_user.id)
 
 
 async def _require_owned_payment_method(
@@ -521,7 +570,7 @@ async def set_default_payment_method(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Default payment method could not be updated",
         )
-    return _payment_methods_response(await stripe_service.list_payment_methods(customer_id))
+    return await _default_payment_methods(subscription_repo, stripe_service, current_user.id)
 
 
 @router.delete(
@@ -541,7 +590,7 @@ async def remove_payment_method(
     breaks that subscription, because it removes the customer default a renewal
     falls back to. The user must choose a different default card first.
     """
-    customer_id, methods = await _require_owned_payment_method(
+    _, methods = await _require_owned_payment_method(
         current_user_id=current_user.id,
         payment_method_id=payment_method_id,
         subscription_repo=subscription_repo,
@@ -563,7 +612,7 @@ async def remove_payment_method(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="Payment method could not be removed",
         )
-    return _payment_methods_response(await stripe_service.list_payment_methods(customer_id))
+    return await _default_payment_methods(subscription_repo, stripe_service, current_user.id)
 
 
 @router.get("/status", response_model=SubscriptionStatusResponse)
@@ -578,10 +627,12 @@ async def get_subscription_status(
         return SubscriptionStatusResponse(
             tier=SubscriptionTier.FREE,
             status=SubscriptionStatus.ACTIVE,
+            cancel_at_period_end=False,
         )
 
     current_period_start: datetime | None = None
     current_period_end: datetime | None = None
+    cancel_at_period_end = False
     if row.stripe_subscription_id:
         remote = await stripe_service.get_subscription(row.stripe_subscription_id)
         if remote:
@@ -593,11 +644,16 @@ async def get_subscription_status(
                 current_period_start = datetime.fromtimestamp(period_start_ts, tz=UTC)
             if period_end_ts is not None:
                 current_period_end = datetime.fromtimestamp(period_end_ts, tz=UTC)
+            # A scheduled (not yet effective) cancellation: the subscription is
+            # still active but will lapse at the period end. Reading it from the
+            # remote subscription keeps Stripe the source of truth.
+            cancel_at_period_end = bool(remote.get("cancel_at_period_end", False))
             if remote.get("status") == "canceled":
                 return SubscriptionStatusResponse(
                     tier=domain_tier_to_api(row.tier),
                     status=SubscriptionStatus.CANCELLED,
                     stripe_subscription_id=row.stripe_subscription_id,
+                    cancel_at_period_end=cancel_at_period_end,
                 )
 
     return SubscriptionStatusResponse(
@@ -606,6 +662,7 @@ async def get_subscription_status(
         current_period_start=current_period_start,
         current_period_end=current_period_end,
         stripe_subscription_id=row.stripe_subscription_id,
+        cancel_at_period_end=cancel_at_period_end,
     )
 
 
@@ -635,5 +692,94 @@ async def cancel_subscription(
     return CancelSubscriptionResponse(
         message="Subscription will be cancelled at the end of the current billing period.",
         tier_after_cancel="FREE",
+    )
+
+
+@router.post("/resume", response_model=ResumeSubscriptionResponse)
+async def resume_subscription(
+    current_user: CurrentUser,
+    subscription_repo: Annotated[SQLSubscriptionRepository, Depends(get_subscription_repository)],
+    stripe_service: Annotated[StripeService, Depends(get_stripe_service)],
+) -> ResumeSubscriptionResponse:
+    """Undo a scheduled cancellation so the subscription renews again.
+
+    Only clears Stripe's ``cancel_at_period_end`` flag. The local ``tier`` is
+    deliberately left alone: the ``customer.subscription.updated`` webhook is
+    the single writer for tier, so writing it here could race the webhook and
+    leave the two out of step.
+    """
+    row = await subscription_repo.get_subscription_row(current_user.id)
+    if row is None or row.tier == DomainTier.FREE or not row.stripe_subscription_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No active subscription to resume",
+        )
+
+    resumed = await stripe_service.resume_subscription(row.stripe_subscription_id)
+    if not resumed:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Stripe subscription could not be resumed",
+        )
+
+    return ResumeSubscriptionResponse(
+        message="Your subscription will renew again at the end of the current billing period.",
+        tier=domain_tier_to_api(row.tier),
+        cancel_at_period_end=False,
+    )
+
+
+def _invoice_response(invoice: dict[str, Any]) -> InvoiceResponse:
+    """Map one service-side invoice dict onto the API schema.
+
+    The service hands back raw unix seconds; this is the single place they are
+    converted to aware UTC datetimes (and to None when the field is absent).
+    """
+    return InvoiceResponse(
+        id=invoice["id"],
+        number=invoice.get("number"),
+        status=invoice["status"],
+        amount_paid=invoice.get("amount_paid") or 0,
+        amount_due=invoice.get("amount_due") or 0,
+        currency=invoice.get("currency") or "usd",
+        created_at=datetime.fromtimestamp(invoice["created"], tz=UTC),
+        period_start=(
+            datetime.fromtimestamp(invoice["period_start"], tz=UTC)
+            if invoice.get("period_start") is not None
+            else None
+        ),
+        period_end=(
+            datetime.fromtimestamp(invoice["period_end"], tz=UTC)
+            if invoice.get("period_end") is not None
+            else None
+        ),
+        invoice_pdf=invoice.get("invoice_pdf"),
+        hosted_invoice_url=invoice.get("hosted_invoice_url"),
+    )
+
+
+@router.get("/invoices", response_model=InvoiceListResponse)
+async def list_invoices(
+    current_user: CurrentUser,
+    subscription_repo: Annotated[SQLSubscriptionRepository, Depends(get_subscription_repository)],
+    stripe_service: Annotated[StripeService, Depends(get_stripe_service)],
+) -> InvoiceListResponse:
+    """List the caller's most recent invoices for the billing history screen.
+
+    Mirrors ``/payment-methods``: unconfigured Stripe and "no customer yet" are
+    ordinary states, reported as ``enabled=False`` rather than raised, because a
+    Free user has no customer until their first checkout.
+    """
+    if not stripe_service.enabled:
+        return InvoiceListResponse(enabled=False, invoices=[])
+
+    customer_id = await _customer_id_for(subscription_repo, current_user.id)
+    if not customer_id:
+        return InvoiceListResponse(enabled=False, invoices=[])
+
+    invoices = await stripe_service.list_invoices(customer_id)
+    return InvoiceListResponse(
+        enabled=True,
+        invoices=[_invoice_response(invoice) for invoice in invoices],
     )
 

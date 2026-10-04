@@ -8,6 +8,17 @@ has one for a second, concurrent subscription. A plan change must go through
 The second hazard is ordering: an immediate upgrade moves
 ``current_period_end``, so the OLD value must be captured *before* the update —
 that value is the carryover's expiry.
+
+The third hazard is **container shape**, and it is the one that reached
+production. Stripe's SDK is not uniform: ``subscription.items`` is a
+``ListObject`` (a ``{data: [...]}`` envelope) but a subscription *schedule*'s
+``phases`` and a phase's ``items`` are plain Python lists. This double returns an
+envelope for the former and plain lists for the latter, exactly as the SDK does,
+because an earlier version returned an envelope for everything and therefore
+could not see the downgrade path raising "schedule has no phases" against real
+Stripe. For the same reason the phase item's ``price`` is exercised in both
+shapes — a plain id string (what a schedule carries) and an expanded object
+(what ``subscription.items`` carries).
 """
 
 from __future__ import annotations
@@ -27,6 +38,9 @@ _NEW_PERIOD_END = 1_900_000_000
 
 
 def _subscription(*, period_end: int = _OLD_PERIOD_END, schedule: str | None = None) -> Any:
+    # ``items`` is an envelope here on purpose: ``subscriptions.retrieve`` really
+    # returns a ``ListObject``, which is what ``_first_subscription_item_id``
+    # targets. (A schedule's ``phases`` is a plain list — see below.)
     return SimpleNamespace(
         id="sub_1",
         current_period_end=period_end,
@@ -65,22 +79,22 @@ class _RecordingSessions:
 
 
 class _RecordingSchedules:
-    def __init__(self, end_date: int = _OLD_PERIOD_END) -> None:
+    def __init__(self, end_date: int = _OLD_PERIOD_END, price: Any = "price_pro") -> None:
         self.creates: list[dict[str, Any]] = []
         self.updates: list[tuple[str, dict[str, Any]]] = []
+        # ``phases`` and each phase's ``items`` are PLAIN LISTS, matching the
+        # SDK. Returning ``SimpleNamespace(data=[...])`` here is what previously
+        # hid a production failure: the service read ``.data`` off these lists,
+        # got nothing, and raised "schedule has no phases".
         self._schedule = SimpleNamespace(
             id="sub_sched_1",
-            phases=SimpleNamespace(
-                data=[
-                    SimpleNamespace(
-                        start_date=1_700_000_000,
-                        end_date=end_date,
-                        items=SimpleNamespace(
-                            data=[SimpleNamespace(price="price_pro", quantity=1)]
-                        ),
-                    )
-                ]
-            ),
+            phases=[
+                SimpleNamespace(
+                    start_date=1_700_000_000,
+                    end_date=end_date,
+                    items=[SimpleNamespace(price=price, quantity=1)],
+                )
+            ],
         )
 
     def create(self, params: dict[str, Any]) -> Any:
@@ -212,3 +226,98 @@ def test_change_plan_returns_none_when_stripe_is_not_configured() -> None:
         )
     )
     assert result is None
+
+
+def test_downgrade_re_reads_the_schedule_phases_as_a_plain_list() -> None:
+    """Regression: a schedule's ``phases`` is a list, NOT a ``{data: []}`` envelope.
+
+    Reading ``.data`` off it produced an empty list and the downgrade died with
+    "Stripe subscription schedule has no phases" — a 500 on every attempt to
+    move down a tier, while this file's double, which returned an envelope for
+    every container, kept the suite green.
+    """
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_unit")
+    monkeypatch.setenv("STRIPE_PRICE_PRO", "price_pro")
+    monkeypatch.setenv("STRIPE_PRICE_PRO_PLUS", "price_pro_plus")
+    get_settings.cache_clear()
+    try:
+        service = StripeService()
+        schedules = _RecordingSchedules()
+        service._client = SimpleNamespace(
+            v1=SimpleNamespace(
+                subscriptions=_RecordingSubscriptions(_subscription()),
+                checkout=SimpleNamespace(sessions=_RecordingSessions()),
+                subscription_schedules=schedules,
+            )
+        )
+
+        result = asyncio.run(
+            service.change_subscription_plan(
+                "sub_1",
+                new_price_id="price_pro",
+                user_id="7",
+                tier="pro",
+                is_upgrade=False,
+            )
+        )
+    finally:
+        monkeypatch.undo()
+        get_settings.cache_clear()
+
+    assert result is not None
+    _, params = schedules.updates[0]
+    # The current phase was re-declared with the subscription's real item — not
+    # stripped to an empty list, which is what reading `.data` produced.
+    assert params["phases"][0]["items"] == [{"price": "price_pro", "quantity": 1}]
+    assert params["phases"][0]["start_date"] == 1_700_000_000
+    assert params["phases"][0]["end_date"] == _OLD_PERIOD_END
+
+
+def test_downgrade_sends_the_price_id_when_stripe_expands_the_price_object() -> None:
+    """Regression: the phase item's price must go on the wire as an id string.
+
+    ``SubscriptionScheduleUpdateParamsPhaseItem.price`` is declared ``str``
+    ("The ID of the price object"). A schedule's phase happens to carry a plain
+    id today, but the same field arrives **expanded** as a ``Price`` object on
+    ``subscription.items`` — so passing whatever the object holds straight
+    through would serialize the whole Price, read-only fields and all, and
+    Stripe would reject the request.
+    """
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setenv("STRIPE_SECRET_KEY", "sk_test_unit")
+    monkeypatch.setenv("STRIPE_PRICE_PRO", "price_pro")
+    monkeypatch.setenv("STRIPE_PRICE_PRO_PLUS", "price_pro_plus")
+    get_settings.cache_clear()
+    try:
+        service = StripeService()
+        # `stripe`'s Price deserialises as an object with an ``id``; a
+        # SimpleNamespace carries the same salient shape for this decision.
+        expanded = SimpleNamespace(id="price_pro", object="price", active=True)
+        schedules = _RecordingSchedules(price=expanded)
+        service._client = SimpleNamespace(
+            v1=SimpleNamespace(
+                subscriptions=_RecordingSubscriptions(_subscription()),
+                checkout=SimpleNamespace(sessions=_RecordingSessions()),
+                subscription_schedules=schedules,
+            )
+        )
+
+        asyncio.run(
+            service.change_subscription_plan(
+                "sub_1",
+                new_price_id="price_pro",
+                user_id="7",
+                tier="pro",
+                is_upgrade=False,
+            )
+        )
+    finally:
+        monkeypatch.undo()
+        get_settings.cache_clear()
+
+    _, params = schedules.updates[0]
+    sent = params["phases"][0]["items"][0]["price"]
+    assert sent == "price_pro"
+    # Not the object: sending it would let the SDK encode every read-only field.
+    assert not hasattr(sent, "id")

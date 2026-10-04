@@ -64,6 +64,8 @@ import type {
   ForgotPasswordResponse,
   GuestJobResponse,
   HistoryDeleteRange,
+  InvoiceListResponse,
+  InvoiceResponse,
   PaymentMethodListResponse,
   PaymentMethodSessionResponse,
   PhoneVerificationStatusResponse,
@@ -71,6 +73,7 @@ import type {
   PresignedUrlResponse,
   ResendVerificationResponse,
   ResetPasswordResponse,
+  ResumeSubscriptionResponse,
   StorageBreakdownEntry,
   StorageStats,
   SubscriptionPlanResponse,
@@ -639,6 +642,11 @@ export function normalizeSubscriptionPlan(value: unknown): SubscriptionPlanRespo
     // pricing page branches on, and an API that never sends `ai` degrades to
     // exactly the same rendering as a plan that genuinely has none.
     ai: normalizeAiEntitlement(o.ai),
+    // Structured comparison-table entitlements. Left `null` when the API did
+    // not send them, so the table omits the row instead of inventing a limit.
+    api_calls_month: asNullableNumber(o.api_calls_month),
+    priority_processing: asNullableBoolean(o.priority_processing),
+    support_level: asNullableString(o.support_level),
   }
 }
 
@@ -682,6 +690,56 @@ export function normalizeSubscriptionStatus(value: unknown): SubscriptionStatusR
     current_period_start: asNullableString(o.current_period_start),
     current_period_end: asNullableString(o.current_period_end),
     stripe_subscription_id: asNullableString(o.stripe_subscription_id),
+    // Tri-state on purpose: `null` means an older API that did not say, and the
+    // page must not offer to "resume" a renewal it cannot confirm is stopping.
+    cancel_at_period_end: asNullableBoolean(o.cancel_at_period_end),
+  }
+}
+
+/**
+ * The account's invoices (`GET /v1/subscription/invoices`).
+ *
+ * `enabled` defaults to **false** for the same reason as the payment-method
+ * list: a malformed body has no usable invoices, and "not enabled" renders the
+ * honest explanatory line instead of an empty table that reads as "you have
+ * never been billed".
+ */
+export function normalizeInvoices(value: unknown): InvoiceListResponse {
+  const o = asObject(value)
+  return {
+    enabled: asBoolean(o.enabled),
+    invoices: asArray<unknown>(o.invoices).map((row): InvoiceResponse => {
+      const r = asObject(row)
+      return {
+        id: asString(r.id),
+        number: asNullableString(r.number),
+        status: asString(r.status),
+        amount_paid: asNumber(r.amount_paid),
+        amount_due: asNumber(r.amount_due),
+        currency: asString(r.currency, "usd"),
+        created_at: asString(r.created_at),
+        period_start: asNullableString(r.period_start),
+        period_end: asNullableString(r.period_end),
+        invoice_pdf: asNullableString(r.invoice_pdf),
+        hosted_invoice_url: asNullableString(r.hosted_invoice_url),
+      }
+    }),
+  }
+}
+
+/**
+ * The result of undoing a scheduled cancellation.
+ *
+ * `cancel_at_period_end` defaults to **false** because it is the value the call
+ * exists to produce; the page re-reads the status afterwards, so a malformed
+ * body cannot leave the UI claiming a renewal that is not happening.
+ */
+export function normalizeResumeSubscription(value: unknown): ResumeSubscriptionResponse {
+  const o = asObject(value)
+  return {
+    message: asString(o.message),
+    tier: asString(o.tier),
+    cancel_at_period_end: asBoolean(o.cancel_at_period_end),
   }
 }
 
@@ -800,6 +858,7 @@ export function normalizePaymentMethodSession(value: unknown): PaymentMethodSess
   const o = asObject(value)
   return {
     client_secret: asNullableString(o.client_secret),
+    setup_intent_client_secret: asNullableString(o.setup_intent_client_secret),
     enabled: asBoolean(o.enabled, false),
   }
 }
@@ -829,6 +888,7 @@ export function normalizePaymentMethodList(value: unknown): PaymentMethodListRes
         exp_month: asNumber(r.exp_month),
         exp_year: asNumber(r.exp_year),
         is_default: asBoolean(r.is_default, false),
+        wallet: asNullableString(r.wallet),
       }
     }),
     enabled: asBoolean(o.enabled, false),

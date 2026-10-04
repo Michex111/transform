@@ -26,12 +26,22 @@ class CheckoutUiMode(StrEnum):
     """Which checkout surface the client wants the session for.
 
     ``HOSTED`` keeps Stripe's own page (the historical behaviour and the
-    default); ``EMBEDDED`` asks for a session the SPA can mount itself. The
-    server may override either via ``STRIPE_CHECKOUT_UI_MODE``.
+    default); ``EMBEDDED`` asks for a session the SPA mounts with Stripe's
+    embedded-Checkout entry point; ``ELEMENTS`` asks for one the SPA mounts
+    with the Payment Element instead.
+
+    ``ELEMENTS`` exists because embedded Checkout **cannot be themed dark**:
+    its ``branding_settings`` covers only background, button, font and shape,
+    Stripe rejects a ``theme``/``color_mode`` parameter outright (verified
+    against the live account), and its payment sheet renders white regardless
+    of ``background_color``. The Payment Element is themed through the
+    Appearance API, which does support a dark theme — and the Checkout Session
+    behind it is unchanged, so webhooks and fulfilment behave identically.
     """
 
     HOSTED = "hosted"
     EMBEDDED = "embedded"
+    ELEMENTS = "elements"
 
 
 def api_tier_to_domain(tier: SubscriptionTier) -> DomainTier:
@@ -83,6 +93,13 @@ class SubscriptionPlanResponse(BaseModel):
     monthly_credits: int | None = None
     features: list[str]
     ai: AiEntitlementResponse | None = None
+    # Structured mirrors of the prose ``features`` strings above. All optional
+    # with a None default so a previously-deployed SPA (which only read the
+    # prose) keeps working, and so the API and SPA can be rolled out in either
+    # order without a window where a plan is unrenderable.
+    api_calls_month: int | None = None
+    priority_processing: bool | None = None
+    support_level: str | None = None
 
 
 class CheckoutRequest(BaseModel):
@@ -111,14 +128,22 @@ class PortalResponse(BaseModel):
 
 
 class PaymentMethodSessionResponse(BaseModel):
-    """A Stripe Customer Session for managing payment methods in our own UI.
+    """What the SPA needs to render the card form for this customer.
 
-    Exactly one field is populated: a ``client_secret`` when Stripe is
-    configured, or ``enabled = False`` when it is not, so the SPA can hide the
-    card-management section instead of rendering an empty Payment Element.
+    Two secrets, and the browser needs both: ``client_secret`` is the Customer
+    Session (which saved methods to display, and consent to save a new one) and
+    ``setup_intent_client_secret`` is the SetupIntent the new card is attached
+    to. ``enabled = False`` when Stripe is unconfigured or the account has no
+    customer yet, so the SPA hides the section instead of mounting an element
+    that cannot work.
     """
 
     client_secret: str | None = None
+    #: The SetupIntent's client secret. Optional per the independent-deploy
+    #: rule: an older API omits it, and the SPA then mounts the Payment Element
+    #: in its deferred mode (which creates the intent at confirmation time)
+    #: instead of failing.
+    setup_intent_client_secret: str | None = None
     enabled: bool = True
 
 
@@ -126,8 +151,9 @@ class SavedPaymentMethodResponse(BaseModel):
     """One saved card, for the in-app billing screen.
 
     Only what the card list renders plus the flag it acts on. ``is_default`` is
-    computed by the server from the customer's invoice settings, so the client
-    never has to guess which card a renewal will charge.
+    computed by the server from the subscription's own default (falling back to
+    the customer's invoice settings), so the client never has to guess which
+    card a renewal will charge.
     """
 
     id: str
@@ -136,6 +162,10 @@ class SavedPaymentMethodResponse(BaseModel):
     exp_month: int
     exp_year: int
     is_default: bool = False
+    #: `"apple_pay"` / `"google_pay"` / `"link"` when the card was tokenised
+    #: through a wallet, else None. Optional, so a client that predates the
+    #: field is unaffected.
+    wallet: str | None = None
 
 
 class PaymentMethodListResponse(BaseModel):
@@ -157,11 +187,64 @@ class SubscriptionStatusResponse(BaseModel):
     current_period_start: datetime | None = None
     current_period_end: datetime | None = None
     stripe_subscription_id: str | None = None
+    # Defaults to False so older clients that never read it — and every state
+    # where no cancellation is scheduled — see the pre-existing meaning: the
+    # subscription renews.
+    cancel_at_period_end: bool = False
 
 
 class CancelSubscriptionResponse(BaseModel):
     message: str
     tier_after_cancel: str = "FREE"
+
+
+class ResumeSubscriptionResponse(BaseModel):
+    """Acknowledges an undone cancellation.
+
+    ``cancel_at_period_end`` is always False here: resuming means exactly that
+    the subscription renews again. ``tier`` is deliberately *unchanged* — no
+    local tier write happens on resume, because the
+    ``customer.subscription.updated`` webhook remains the single writer.
+    """
+
+    message: str
+    tier: SubscriptionTier
+    cancel_at_period_end: bool = False
+
+
+class InvoiceResponse(BaseModel):
+    """One billing-history row, mapped from a Stripe Invoice.
+
+    ``created_at``/``period_start``/``period_end`` are already-tz-aware UTC
+    datetimes by the time they reach here: the service returns raw unix ints
+    and the router performs the single conversion, so the same timestamp has
+    exactly one representation in the API.
+    """
+
+    id: str
+    number: str | None = None
+    status: str
+    amount_paid: int = 0
+    amount_due: int = 0
+    currency: str = "usd"
+    created_at: datetime
+    period_start: datetime | None = None
+    period_end: datetime | None = None
+    invoice_pdf: str | None = None
+    hosted_invoice_url: str | None = None
+
+
+class InvoiceListResponse(BaseModel):
+    """The caller's invoices, or a signal to hide the section.
+
+    ``enabled = False`` when Stripe is unconfigured or the user has no customer
+    yet — both ordinary states (a Free user has no customer until checkout) —
+    mirroring ``/payment-methods``. Invoices are a read-only convenience and
+    are never a reason to fail the request.
+    """
+
+    enabled: bool = True
+    invoices: list[InvoiceResponse] = Field(default_factory=list)
 
 
 class ChangePlanRequest(BaseModel):

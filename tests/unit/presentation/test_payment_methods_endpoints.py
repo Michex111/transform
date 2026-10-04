@@ -23,7 +23,7 @@ from src.presentation.api.routers.v1.subscriptions import (
 from src.presentation.schemas.subscription import PaymentMethodListResponse
 
 
-def _card(method_id: str, *, is_default: bool = False) -> SavedPaymentMethod:
+def _card(method_id: str, *, is_default: bool = False, wallet: str | None = None) -> SavedPaymentMethod:
     return SavedPaymentMethod(
         id=method_id,
         brand="visa",
@@ -31,6 +31,7 @@ def _card(method_id: str, *, is_default: bool = False) -> SavedPaymentMethod:
         exp_month=12,
         exp_year=2030,
         is_default=is_default,
+        wallet=wallet,
     )
 
 
@@ -48,11 +49,18 @@ class _FakeStripeService:
         self.set_default_ok = set_default_ok
         self.detach_ok = detach_ok
         self.listed_for: list[str] = []
+        #: The `subscription_id` each list call was given, so a test can pin
+        #: that the badge is sourced from the subscription and not only the
+        #: customer.
+        self.listed_subscriptions: list[str | None] = []
         self.default_calls: list[tuple[str, str, str | None]] = []
         self.detach_calls: list[str] = []
 
-    async def list_payment_methods(self, customer_id: str) -> list[SavedPaymentMethod]:
+    async def list_payment_methods(
+        self, customer_id: str, *, subscription_id: str | None = None
+    ) -> list[SavedPaymentMethod]:
         self.listed_for.append(customer_id)
+        self.listed_subscriptions.append(subscription_id)
         return list(self._methods)
 
     async def set_default_payment_method(
@@ -143,6 +151,36 @@ def test_list_returns_the_customers_cards_with_the_default_flagged() -> None:
     assert [method.id for method in response.methods] == ["pm_1", "pm_2"]
     assert response.methods[0].is_default is True
     assert stripe.listed_for == ["cus_1"]
+
+
+def test_list_tells_stripe_which_subscription_to_read_the_default_from() -> None:
+    """A renewal charges the *subscription's* default, which can differ from
+    the customer's. Passing the id through is what makes the badge truthful."""
+    stripe = _FakeStripeService(methods=[_card("pm_1")])
+
+    _list(stripe, _FakeSubscriptionRepo("cus_1", subscription_id="sub_1"))
+
+    assert stripe.listed_subscriptions == ["sub_1"]
+
+
+def test_list_sends_no_subscription_when_the_account_has_none() -> None:
+    stripe = _FakeStripeService(methods=[_card("pm_1")])
+
+    _list(stripe, _FakeSubscriptionRepo("cus_1"))
+
+    assert stripe.listed_subscriptions == [None]
+
+
+def test_list_exposes_the_wallet_a_card_came_from() -> None:
+    stripe = _FakeStripeService(
+        methods=[_card("pm_1", wallet="apple_pay"), _card("pm_2")]
+    )
+
+    response = _list(stripe, _FakeSubscriptionRepo("cus_1"))
+
+    assert response.methods[0].wallet == "apple_pay"
+    # A hand-keyed card has no wallet, and that must stay None rather than "".
+    assert response.methods[1].wallet is None
 
 
 # --- set default --------------------------------------------------------

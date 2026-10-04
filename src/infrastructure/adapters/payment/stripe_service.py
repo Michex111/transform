@@ -62,15 +62,56 @@ def _unix_to_datetime(value: Any) -> datetime | None:
         return None
 
 
+def _stripe_list(obj: Any) -> list[Any]:
+    """The entries of a Stripe "list" field, whichever shape it arrives in.
+
+    The SDK is NOT uniform here, and the difference is invisible to a
+    hand-written test double: ``subscription.items`` is a ``ListObject``
+    (a ``{data: [...]}`` envelope), while a subscription *schedule*'s
+    ``phases`` and a phase's ``items`` are plain Python lists.
+
+    Reading ``.data`` off a plain list yields nothing at all — which is
+    precisely how the downgrade path raised "schedule has no phases" against
+    real Stripe while the unit test, whose double returned an envelope for
+    *every* container, stayed green.
+    """
+    if obj is None:
+        return []
+    if isinstance(obj, list):
+        return list(obj)
+    data = _stripe_get(obj, "data")
+    return list(data) if isinstance(data, list) else []
+
+
+def _price_id(price: Any) -> str | None:
+    """The **id** of a price, whether Stripe sent the id or the expanded object.
+
+    ``SubscriptionScheduleUpdateParamsPhaseItem.price`` is declared ``str``
+    ("The ID of the price object"), but the same field legitimately arrives
+    expanded as a whole ``Price`` on ``subscription.items[].price``. Handing the
+    object back to a request would make the SDK serialize every read-only field
+    of it and Stripe would reject the call, so callers must pass the id through
+    here first. Returns ``None`` when there is no id to send.
+
+    The same id-or-expanded-object problem as ``_payment_method_id`` below, for
+    the other field that Stripe expands in some payloads and not others.
+    """
+    if isinstance(price, str):
+        return price or None
+    price_id = _stripe_get(price, "id")
+    return str(price_id) if price_id else None
+
+
 @dataclass(frozen=True, slots=True)
 class SavedPaymentMethod:
     """One saved card, in the shape the SPA's billing page needs.
 
     Deliberately a narrow projection of the Stripe object: only the fields the
     card list renders and the single flag it acts on. ``is_default`` is derived
-    from the **customer's** ``invoice_settings.default_payment_method`` rather
-    than from the card itself, so this list is the single source of truth for
-    which card a future charge will use.
+    from the **subscription's** ``default_payment_method`` when there is one
+    (falling back to the customer's ``invoice_settings``), because that is the
+    value a renewal actually charges — reading only the customer side made the
+    "Default" badge point at a card the next invoice would not use.
     """
 
     id: str
@@ -79,6 +120,10 @@ class SavedPaymentMethod:
     exp_month: int
     exp_year: int
     is_default: bool
+    #: `"apple_pay"` / `"google_pay"` / `"link"` when the card was tokenised
+    #: through a wallet, else None. Appended last so positional construction in
+    #: existing callers stays valid.
+    wallet: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,12 +147,22 @@ class CheckoutUiMode(StrEnum):
     """Where the payment form is rendered.
 
     ``HOSTED`` sends the browser to Stripe's own page (the original behaviour);
-    ``EMBEDDED`` renders the same Stripe-hosted form inside our SPA via
-    Stripe.js, so the surrounding page is ours.
+    ``EMBEDDED`` renders Stripe's embedded Checkout page inside our SPA via
+    Stripe.js; ``ELEMENTS`` renders the **Payment Element** inside our SPA
+    against the same Checkout Session.
+
+    ``ELEMENTS`` is the one that can carry our dark theme. Embedded Checkout
+    exposes only background/button/font/shape through ``branding_settings`` —
+    it rejects a ``theme`` parameter (verified live) and paints its payment
+    sheet white whatever ``background_color`` says — whereas the Payment
+    Element is themed with the Appearance API, exactly like the Billing page's
+    card form already is. The underlying Checkout Session, and therefore every
+    webhook and fulfilment path, is identical.
     """
 
     HOSTED = "hosted"
     EMBEDDED = "embedded"
+    ELEMENTS = "elements"
 
 
 @dataclass(frozen=True, slots=True)
@@ -274,15 +329,15 @@ class StripeService:
     ) -> None:
         """Add the redirect and appearance parameters that depend on the mode.
 
-        The two modes are mutually exclusive at the API level — Stripe rejects
-        ``success_url``/``cancel_url`` on an embedded session and requires
+        The modes are mutually exclusive at the API level — Stripe rejects
+        ``success_url``/``cancel_url`` on a non-hosted session and requires
         ``return_url`` instead — so keeping the branch in one place means no
         caller can assemble a session Stripe will refuse.
 
-        For an embedded session the success destination **is** the hosted
+        For both in-page modes the success destination **is** the hosted
         session's ``success_url``. Reusing it is what keeps the return redirect,
         and therefore the SPA's existing ``?checkout=success`` handling,
-        identical between the two modes.
+        identical across every mode.
         """
         if ui_mode is CheckoutUiMode.EMBEDDED:
             params["ui_mode"] = "embedded_page"
@@ -292,6 +347,16 @@ class StripeService:
             params["redirect_on_completion"] = "always"
             params["origin_context"] = "web"
             params["branding_settings"] = self._branding_settings()
+        elif ui_mode is CheckoutUiMode.ELEMENTS:
+            params["ui_mode"] = "elements"
+            params["return_url"] = success_url
+            # Deliberately NO `branding_settings`: Stripe answers
+            # "`branding_settings` is not supported with `ui_mode: elements`"
+            # because the Payment Element is themed client-side instead — which
+            # is the entire point, since only that path supports a dark theme.
+            # `redirect_on_completion` and `origin_context` are likewise
+            # rejected for this mode (both verified against the live API): the
+            # redirect is decided by `checkout.confirm()` in the browser.
         else:
             params["success_url"] = success_url
             params["cancel_url"] = cancel_url
@@ -313,11 +378,13 @@ class StripeService:
             user_id: The user's internal ID.
             email: The user's email address.
             tier: The target subscription tier.
-            success_url: Where to land on success. For an embedded session this
-                is used as ``return_url`` (Stripe rejects ``success_url``).
+            success_url: Where to land on success. For an in-page mode this is
+                used as ``return_url`` (Stripe rejects ``success_url``).
             cancel_url: Where to land on cancellation. Hosted mode only.
             customer_id: Optional existing Stripe customer ID.
-            ui_mode: ``hosted`` (Stripe's page) or ``embedded`` (our page).
+            ui_mode: ``hosted`` (Stripe's page), ``embedded`` (Stripe's embedded
+                Checkout on our page) or ``elements`` (the Payment Element on
+                our page, which is the one that can be themed dark).
 
         Returns:
             A handle carrying either the redirect URL or the client secret, or
@@ -390,8 +457,12 @@ class StripeService:
         ``client_secret``, but it is useless once the session is hosted, and
         handing the browser a credential it has no use for is exactly the kind
         of thing that ends up in a log line.
+
+        Both in-page modes need the secret: ``embedded_page`` mounts Stripe's
+        embedded Checkout with it, ``elements`` mounts the Payment Element with
+        it. Only a hosted session needs a URL to navigate to.
         """
-        if ui_mode is CheckoutUiMode.EMBEDDED:
+        if ui_mode in (CheckoutUiMode.EMBEDDED, CheckoutUiMode.ELEMENTS):
             return CheckoutSessionHandle(client_secret=session.client_secret)
         return CheckoutSessionHandle(url=session.url)
 
@@ -414,11 +485,13 @@ class StripeService:
             email: The user's email address.
             credits: Number of credits being purchased.
             amount_usd: Pre-computed USD price for the credit pack (in dollars).
-            success_url: Where to land on success (used as ``return_url`` when
-                embedded, since Stripe rejects ``success_url`` there).
+            success_url: Where to land on success (used as ``return_url`` for an
+                in-page mode, since Stripe rejects ``success_url`` there).
             cancel_url: Where to land on cancellation. Hosted mode only.
             customer_id: Optional existing Stripe customer ID.
-            ui_mode: ``hosted`` (Stripe's page) or ``embedded`` (our page).
+            ui_mode: ``hosted`` (Stripe's page), ``embedded`` (Stripe's embedded
+                Checkout on our page) or ``elements`` (the Payment Element on
+                our page, which is the one that can be themed dark).
 
         Returns:
             A handle carrying either the redirect URL or the client secret, or
@@ -506,6 +579,37 @@ class StripeService:
 
         except Exception as e:
             logger.error("Failed to cancel subscription: %s", e, exc_info=True)
+            return False
+
+    async def resume_subscription(self, subscription_id: str) -> bool:
+        """
+        Undo a scheduled cancellation so the subscription renews again.
+
+        Mirrors :meth:`cancel_subscription`: it only clears the flag on Stripe,
+        leaving the tier untouched. The ``customer.subscription.updated``
+        webhook stays the single writer for the local tier.
+
+        Args:
+            subscription_id: The Stripe subscription ID.
+
+        Returns:
+            True if successful, False otherwise.
+        """
+        if not self._enabled:
+            return False
+
+        try:
+            client = self._get_client()
+            await asyncio.to_thread(
+                client.v1.subscriptions.update,
+                subscription_id,
+                {"cancel_at_period_end": False},
+            )
+            logger.info("Resumed subscription at period end", extra={"subscription_id": subscription_id})
+            return True
+
+        except Exception as e:
+            logger.error("Failed to resume subscription: %s", e, exc_info=True)
             return False
 
     async def change_subscription_plan(
@@ -605,8 +709,10 @@ class StripeService:
     @staticmethod
     def _first_subscription_item_id(subscription: Any) -> str:
         """The id of a subscription's (single) item, which the update targets."""
-        items_obj = _stripe_get(subscription, "items")
-        items = _stripe_get(items_obj, "data", []) or []
+        # ``_stripe_list``, not ``.data``: subscriptions return an envelope
+        # today, but the container shape is not something this method should
+        # depend on for the wrong reason.
+        items = _stripe_list(_stripe_get(subscription, "items"))
         if not items:
             raise ValueError("Stripe subscription has no items to update")
         item_id = _stripe_get(items[0], "id")
@@ -639,6 +745,10 @@ class StripeService:
         The new phase carries ``metadata`` because the webhook that fires when
         the phase starts reads ``subscription.metadata.tier`` — without it the
         downgraded tier would never activate.
+
+        Both containers here are plain lists on a schedule (``phases``, and each
+        phase's ``items``), unlike the envelopes elsewhere in the API, so they
+        are unwrapped with ``_stripe_list`` rather than read as ``.data``.
         """
         schedule_id = _stripe_get(subscription, "schedule")
         if schedule_id:
@@ -653,18 +763,28 @@ class StripeService:
                 client.v1.subscription_schedules.create, create_params
             )
 
-        phases_obj = _stripe_get(schedule, "phases")
-        phases = _stripe_get(phases_obj, "data", []) or []
+        phases = _stripe_list(_stripe_get(schedule, "phases"))
         if not phases:
             raise ValueError("Stripe subscription schedule has no phases")
         current_phase = phases[0]
 
-        current_items_obj = _stripe_get(current_phase, "items")
-        current_items = _stripe_get(current_items_obj, "data", []) or []
-        phase_items: list[Any] = [
-            {"price": _stripe_get(item, "price"), "quantity": _stripe_get(item, "quantity", 1)}
-            for item in current_items
-        ]
+        current_items = _stripe_list(_stripe_get(current_phase, "items"))
+        if not current_items:
+            # Re-declaring the current phase with no items would STRIP the
+            # subscription's price once the schedule applies, so refuse instead
+            # of sending an empty phase.
+            raise ValueError("Stripe subscription schedule phase has no items")
+        phase_items: list[Any] = []
+        for item in current_items:
+            price_id = _price_id(_stripe_get(item, "price"))
+            if not price_id:
+                # Without an id the SDK would serialize the expanded Price
+                # object (every read-only field of it) and Stripe would reject
+                # the whole request.
+                raise ValueError("Stripe subscription schedule item has no price id")
+            phase_items.append(
+                {"price": price_id, "quantity": _stripe_get(item, "quantity", 1)}
+            )
         current_start = _stripe_get(current_phase, "start_date")
         current_end = _stripe_get(current_phase, "end_date")
 
@@ -772,6 +892,49 @@ class StripeService:
             logger.error("Failed to create portal session: %s", e, exc_info=True)
             return None
 
+    async def list_invoices(self, customer_id: str, *, limit: int = 12) -> list[dict[str, Any]]:
+        """List a customer's most recent invoices for the billing history screen.
+
+        Returns an empty list (never raises) when Stripe is unconfigured or the
+        call fails: invoices are a read-only convenience, so a Stripe hiccup must
+        not turn the billing page into a 500.
+
+        The returned dicts carry the raw unix timestamps (``created``,
+        ``period_start``, ``period_end``) rather than datetimes so the mapping to
+        the API schema — and the timezone conversion — happens in exactly one
+        place, the router.
+        """
+        if not self._enabled:
+            return []
+
+        try:
+            client = self._get_client()
+            result = await asyncio.to_thread(
+                client.v1.invoices.list,
+                {"customer": customer_id, "limit": limit},
+            )
+            data = _stripe_list(result)
+        except Exception as e:
+            logger.warning("Failed to list invoices: %s", e, exc_info=True)
+            return []
+
+        return [
+            {
+                "id": _stripe_get(invoice, "id"),
+                "number": _stripe_get(invoice, "number"),
+                "status": _stripe_get(invoice, "status"),
+                "amount_paid": _stripe_get(invoice, "amount_paid", 0),
+                "amount_due": _stripe_get(invoice, "amount_due", 0),
+                "currency": _stripe_get(invoice, "currency", "usd"),
+                "created": _stripe_get(invoice, "created"),
+                "period_start": _stripe_get(invoice, "period_start"),
+                "period_end": _stripe_get(invoice, "period_end"),
+                "invoice_pdf": _stripe_get(invoice, "invoice_pdf"),
+                "hosted_invoice_url": _stripe_get(invoice, "hosted_invoice_url"),
+            }
+            for invoice in data
+        ]
+
     async def create_customer_session(self, customer_id: str) -> str | None:
         """Create a Customer Session for managing payment methods in our own UI.
 
@@ -812,6 +975,16 @@ class StripeService:
                                 # i.e. the screen would look empty and broken.
                                 "payment_method_redisplay": "enabled",
                                 "payment_method_save": "enabled",
+                                # `off_session` is the correct save usage for
+                                # this product: the card is kept so Stripe can
+                                # charge the monthly renewal without the
+                                # customer present. Leaving it unset would save
+                                # the method with the default (on-session)
+                                # usage, which is not what a subscription does.
+                                # Deliberately NOT `setup_future_usage` as well:
+                                # Stripe rejects the pair as an integration
+                                # error.
+                                "payment_method_save_usage": "off_session",
                                 # `payment_method_remove` is deliberately left
                                 # at its default. Removing a payment method
                                 # detaches it from the customer, which breaks
@@ -842,6 +1015,58 @@ class StripeService:
     # everywhere: the Payment Element can also save SEPA/Link methods, but this
     # screen can only render cards, so list and act on cards alone.
 
+    async def create_setup_intent(self, customer_id: str) -> str | None:
+        """Create a SetupIntent so the browser can save a card for later use.
+
+        Stripe's documented shape for saving a method without taking a payment
+        is a server-created SetupIntent plus a Customer Session, both handed to
+        the Payment Element. The Element *can* create its own intent at
+        confirmation time (the "deferred" mode), which is what this app used
+        before; creating it here makes the intent explicit up front and means a
+        failure to set up surfaces before the customer has typed a card number
+        rather than after.
+
+        **``payment_method_types`` is pinned to ``card`` on purpose.** The
+        Dashboard configuration advertises every method the account accepts
+        (verified live: card, bancontact, klarna, link, blik, pix, satispay),
+        and ``automatic_payment_methods`` would offer all of them. But this
+        screen lists and manages **cards only** (``type="card"`` on every
+        read), so a customer who saved a Klarna or Pix method here would watch
+        it vanish from the list immediately afterwards — a save that appears to
+        fail. Pinning the type keeps the form and the list describing the same
+        set. Apple Pay, Google Pay and Link all ride on the ``card`` type, so
+        wallet support is unaffected (confirmed in a browser: the Element
+        mounts with the wallet buttons available).
+
+        Returns None on any failure — including Stripe being unconfigured — so
+        the caller can fall back to the deferred mode instead of failing the
+        whole section.
+        """
+        if not self._enabled:
+            return None
+
+        try:
+            client = self._get_client()
+            intent = await asyncio.to_thread(
+                client.v1.setup_intents.create,
+                {
+                    "customer": customer_id,
+                    # Cards only — see the docstring. The client secret is
+                    # designed for the browser and is never logged.
+                    "payment_method_types": ["card"],
+                },
+            )
+            secret = _stripe_get(intent, "client_secret")
+            logger.info(
+                "Created SetupIntent for payment method management",
+                extra={"customer_id": customer_id},
+            )
+            return str(secret) if secret else None
+
+        except Exception as e:
+            logger.error("Failed to create setup intent: %s", e, exc_info=True)
+            return None
+
     @staticmethod
     def _payment_method_id(value: Any) -> str | None:
         """The id from a ``default_payment_method`` that may be id or expanded."""
@@ -854,6 +1079,9 @@ class StripeService:
         """Project a Stripe PaymentMethod onto the fields the UI shows."""
         card = _stripe_get(method, "card")
         method_id = _stripe_get(method, "id")
+        # Absent for a card keyed in by hand; `card.wallet` is only populated
+        # when the details came from Apple Pay, Google Pay or Link.
+        wallet = _stripe_get(_stripe_get(card, "wallet"), "type")
         return SavedPaymentMethod(
             id=str(method_id) if method_id else "",
             brand=str(_stripe_get(card, "brand", "unknown")),
@@ -861,16 +1089,25 @@ class StripeService:
             exp_month=int(_stripe_get(card, "exp_month", 0) or 0),
             exp_year=int(_stripe_get(card, "exp_year", 0) or 0),
             is_default=bool(method_id) and method_id == default_id,
+            wallet=str(wallet) if wallet else None,
         )
 
-    async def list_payment_methods(self, customer_id: str) -> list[SavedPaymentMethod]:
+    async def list_payment_methods(
+        self, customer_id: str, *, subscription_id: str | None = None
+    ) -> list[SavedPaymentMethod]:
         """List the customer's saved cards, marking the default one.
 
         Returns an empty list (not an error) when Stripe is unconfigured or the
         call fails, so the billing page can render an empty section rather than
-        a 500. ``is_default`` comes from the customer's invoice settings, which
-        is the value Stripe actually consults when no subscription-level
-        override exists.
+        a 500.
+
+        ``is_default`` prefers the **subscription's** ``default_payment_method``
+        and falls back to the customer's ``invoice_settings``.
+        ``set_default_payment_method`` writes both precisely because they can
+        disagree; a subscription created in the Dashboard may already pin its
+        own card, and reading only the customer side would then badge a card
+        that the next renewal will not charge. A failure to read the
+        subscription is tolerated — the customer default is still a real answer.
         """
         if not self._enabled:
             return []
@@ -883,16 +1120,47 @@ class StripeService:
             default_id = self._payment_method_id(
                 _stripe_get(_stripe_get(customer, "invoice_settings"), "default_payment_method")
             )
+            if subscription_id:
+                subscription_default_id = await self._subscription_default_payment_method(
+                    client, subscription_id
+                )
+                if subscription_default_id:
+                    default_id = subscription_default_id
             methods = await asyncio.to_thread(
                 client.v1.payment_methods.list,
                 {"customer": customer_id, "type": "card"},
             )
-            data = _stripe_get(methods, "data", []) or []
+            data = _stripe_list(methods)
         except Exception as e:
             logger.error("Failed to list payment methods: %s", e, exc_info=True)
             return []
 
         return [self._to_saved_payment_method(method, default_id) for method in data]
+
+    @staticmethod
+    async def _subscription_default_payment_method(
+        client: Any, subscription_id: str
+    ) -> str | None:
+        """The card a renewal would charge, or None when Stripe cannot say.
+
+        Swallows its own errors: this only refines which card gets the
+        "Default" badge, so a transient failure must not take the whole card
+        list down with it.
+        """
+        try:
+            subscription = await asyncio.to_thread(
+                client.v1.subscriptions.retrieve, subscription_id
+            )
+        except Exception as e:
+            logger.warning(
+                "Could not read the subscription's default payment method: %s",
+                e,
+                extra={"subscription_id": subscription_id},
+            )
+            return None
+        return StripeService._payment_method_id(
+            _stripe_get(subscription, "default_payment_method")
+        )
 
     async def set_default_payment_method(
         self,

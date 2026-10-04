@@ -27,20 +27,38 @@ export function publishableKey(): string {
 }
 
 /**
- * Whether this build is able to mount an embedded checkout.
+ * Whether this build can mount an in-page Stripe surface at all.
  *
  * A real publishable key is required. Handing `loadStripe` a missing or
  * malformed key throws deep inside Stripe.js, which would turn a click on
  * "Upgrade" into a blank page — a far worse failure than quietly using the
  * hosted page the app has always used.
+ *
+ * This gates both in-page surfaces: the checkout page's Payment Element and
+ * the Billing page's card form. When it is false the app asks for a **hosted**
+ * session and redirects, which is the behaviour that shipped before any of this
+ * existed.
  */
 export function embeddedCheckoutEnabled(): boolean {
   return publishableKey().startsWith("pk_");
 }
 
-/** The `ui_mode` to ask the API for, given what this build can render. */
-export function requestedUiMode(): "embedded" | "hosted" {
-  return embeddedCheckoutEnabled() ? "embedded" : "hosted";
+/**
+ * The `ui_mode` to ask the API for, given what this build can render.
+ *
+ * `elements`, not `embedded`: embedded Checkout **cannot be themed dark**. Its
+ * `branding_settings` covers only background, button, font and shape, Stripe
+ * rejects a `theme` parameter outright (verified against the live account),
+ * and its payment sheet renders white whatever `background_color` says — the
+ * session happily stored `#121417` and still painted a white form.
+ *
+ * The Payment Element is themed through the Appearance API, which does support
+ * a dark theme and is already how the Billing page's card form is styled. Both
+ * modes are backed by the *same* Checkout Session, so line items, taxes,
+ * metadata and every webhook are unaffected by the choice.
+ */
+export function requestedUiMode(): "elements" | "hosted" {
+  return embeddedCheckoutEnabled() ? "elements" : "hosted";
 }
 
 /**
