@@ -19,9 +19,15 @@ import type {
   DeleteHistoryRangeResponse,
   HistoryDeleteRange,
 } from "@/api/types";
-import { SUPPORT_LINKS } from "@/components/navItems";
+import { DASHBOARD_LINK, SUPPORT_LINKS } from "@/components/navItems";
 
-export type ProfileMenuAction = "settings" | "billing" | "support" | "clear-history" | "logout";
+export type ProfileMenuAction =
+  | "dashboard"
+  | "settings"
+  | "billing"
+  | "support"
+  | "clear-history"
+  | "logout";
 
 export interface ProfileMenuItem {
   id: ProfileMenuAction;
@@ -49,6 +55,18 @@ export interface ProfileMenuOptions {
   showLogout: boolean;
   /** The public header passes false: purging history is not a marketing-page action. */
   allowHistoryDelete: boolean;
+  /**
+   * Whether the dropdown leads with a link back into the app's dashboard.
+   *
+   * True only for the public header. On an in-app placement the dashboard is one
+   * step away in the rail (desktop) or the bottom bar (phone), so the entry would
+   * be a worse copy of the navigation sitting inches away; on a marketing page
+   * the header is the *only* navigation, and a signed-in visitor who drifted
+   * there otherwise has no way back into their account but the address bar. Kept
+   * as a prop rather than inferred from the placement, so "does this header lead
+   * into the app?" is one readable decision, pinned by `profileMenu.test.ts`.
+   */
+  showDashboard: boolean;
   /**
    * Include the app destinations that the desktop sidebar's own rail already
    * lists (Billing, Support).
@@ -99,6 +117,7 @@ const APP_LINK_ACTIONS: ReadonlySet<ProfileMenuAction> = new Set<ProfileMenuActi
 export const SIDEBAR_MENU: ProfileMenuOptions = {
   showLogout: true,
   allowHistoryDelete: true,
+  showDashboard: false,
   includeAppLinks: false,
 };
 
@@ -106,13 +125,22 @@ export const SIDEBAR_MENU: ProfileMenuOptions = {
 export const PHONE_MENU: ProfileMenuOptions = {
   showLogout: true,
   allowHistoryDelete: true,
+  showDashboard: false,
   includeAppLinks: true,
 };
 
-/** Public header: an account shortcut on a marketing page — no app-destructive actions. */
+/**
+ * Public header: an account shortcut on a marketing page — no app-destructive
+ * actions, but a way back into the app.
+ *
+ * `showDashboard: true` is the one thing this placement keeps that the in-app
+ * ones drop: nothing on a marketing page navigates into the signed-in app, so
+ * this entry is the visitor's only route back to their own dashboard.
+ */
 export const PUBLIC_HEADER_MENU: ProfileMenuOptions = {
   showLogout: true,
   allowHistoryDelete: false,
+  showDashboard: true,
   includeAppLinks: true,
 };
 
@@ -151,16 +179,33 @@ const MENU_LABEL_OVERRIDES: Partial<Record<ProfileMenuAction, string>> = {
  * renaming "Settings" in the navigation model cannot leave the menu behind.
  */
 export function profileMenuItems({
+  showDashboard,
   showLogout,
   allowHistoryDelete,
   includeAppLinks,
 }: ProfileMenuOptions): ProfileMenuItem[] {
-  const items: ProfileMenuItem[] = SUPPORT_LINKS.filter(
-    ({ to }) => includeAppLinks || !APP_LINK_ACTIONS.has(actionForRoute(to)),
-  ).map(({ to, label, icon }) => {
-    const id = actionForRoute(to);
-    return { id, label: MENU_LABEL_OVERRIDES[id] ?? label, to, icon };
-  });
+  const items: ProfileMenuItem[] = [];
+
+  if (showDashboard) {
+    // Ahead of the account links: on the one placement that sets this, leaving
+    // the marketing page for the app is the reason to open the menu at all. The
+    // label and icon come from `NAV` so they cannot drift from the rail's.
+    items.push({
+      id: "dashboard",
+      label: DASHBOARD_LINK.label,
+      to: DASHBOARD_LINK.to,
+      icon: DASHBOARD_LINK.icon,
+    });
+  }
+
+  items.push(
+    ...SUPPORT_LINKS.filter(
+      ({ to }) => includeAppLinks || !APP_LINK_ACTIONS.has(actionForRoute(to)),
+    ).map(({ to, label, icon }) => {
+      const id = actionForRoute(to);
+      return { id, label: MENU_LABEL_OVERRIDES[id] ?? label, to, icon };
+    }),
+  );
 
   if (allowHistoryDelete) {
     items.push({

@@ -283,11 +283,27 @@ export function AssistantPage() {
   const isEmpty = chat.messages.length === 0 && !chat.streaming && !historyLoading;
 
   return (
-    // The `100dvh - …` height fills the shell's content area, so the subtracted
-    // amount tracks `main`'s vertical padding (AppShell). It is `py-5` now, so
-    // the old `11rem`/`6rem` (which assumed `py-6`) would leave the card 8px
-    // short of the bottom.
-    <div className="mx-auto flex h-[calc(100dvh-10.5rem)] min-h-[24rem] max-w-5xl gap-4 lg:h-[calc(100dvh-5.5rem)]">
+    // Fill the shell's content area exactly, so the gutter below the card
+    // matches the gutter above it.
+    //
+    // The subtracted amount is the chrome `main` is given, and it is now
+    // derived rather than guessed:
+    //
+    //   below `lg`: header `h-14` (3.5rem) + `main`'s `py-5` (2.5rem) +
+    //               bottom nav (~4rem) = 10rem
+    //   at `lg`:    the header and the bottom nav are both `lg:hidden`, so
+    //               only `main`'s `py-5` remains = 2.5rem
+    //
+    // Both previous values were wrong in exactly one of those two directions.
+    // The old `lg` figure still reserved room for the phone header, which
+    // `lg:hidden` removes, so the card sat 48px high on desktop; below `lg` it
+    // assumed a 64px bottom nav where the real one measures 63.17px, leaving
+    // 9px. `env(safe-area-inset-bottom)` is subtracted too, because the shell
+    // adds it to the nav as padding, which makes the nav taller on iOS.
+    //
+    // These values must track `AppShell` (`main`'s padding, the header and the
+    // bottom nav). That is noted there as well, from the other side.
+    <div className="mx-auto flex h-[calc(100dvh-10rem-env(safe-area-inset-bottom))] min-h-[24rem] max-w-5xl gap-4 lg:h-[calc(100dvh-2.5rem)]">
       {/* Desktop rail */}
       <aside className="hidden w-64 shrink-0 overflow-hidden rounded-xl border border-outline bg-surface lg:flex">
         <ConversationList

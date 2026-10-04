@@ -93,9 +93,19 @@ export function AppShell() {
         </header>
 
         {/* The content container's own padding. Deliberately on the shared
-            shell so every page has the same gutter; the Assistant page
-            compensates in its height calc (`100dvh - 10.5rem` / `- 5.5rem`),
-            which assumes exactly this much vertical padding. */}
+            shell so every page has the same gutter.
+
+            This `py-5`, the phone header above (`h-14`, `lg:hidden`) and the
+            bottom nav below (`lg:hidden`) are the chrome the Assistant page's
+            height calc subtracts — 10rem below `lg`, and only this padding at
+            it. The coupling is spelled out here because it is otherwise
+            invisible, and it has already drifted twice: the most recent
+            constants left the Assistant card 48px short of the bottom on
+            desktop (the `lg` value assumed a header that is hidden there) and
+            9px short on a phone (the bottom nav is content-driven, and
+            measured 63.17px rather than the 64px the old value implied).
+
+            So: changing any of those three means changing that calc too. */}
         <main className="flex-1 px-4 py-5 sm:px-6 lg:px-7">
           {/* Animate each page in on mount. We deliberately do NOT use
               AnimatePresence mode="wait" here: when SSE job updates or the

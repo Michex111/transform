@@ -90,3 +90,16 @@ function navItemFor(to: string): NavItem {
 export const SUPPORT_LINKS: NavItem[] = ["/app/settings", "/app/billing", "/app/support"].map(
   navItemFor,
 );
+
+/**
+ * The one destination that leads a signed-in visitor from a public page back
+ * into the app.
+ *
+ * Separate from `SUPPORT_LINKS` because it answers a different question: the
+ * account destinations are offered by every placement, while the dashboard is
+ * only worth an entry where the page itself has no navigation into the app (see
+ * `showDashboard` in `lib/profileMenu.ts`). Looked up from `NAV` for the same
+ * reason as `SUPPORT_LINKS` — the label and icon are written once and cannot
+ * drift from the rail's.
+ */
+export const DASHBOARD_LINK: NavItem = navItemFor("/app/dashboard");

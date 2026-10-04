@@ -29,6 +29,7 @@ const FULL: ProfileMenuOptions = {
   showLogout: true,
   allowHistoryDelete: true,
   includeAppLinks: true,
+  showDashboard: false,
 };
 
 function ids(options: ProfileMenuOptions): string[] {
@@ -50,19 +51,46 @@ describe("profileMenuItems", () => {
     expect(ids(FULL)).toEqual(["settings", "billing", "support", "clear-history", "logout"]);
   });
 
+  it("leads with the dashboard only where the placement asks for it", () => {
+    // The public header's one extra entry. A marketing page has no navigation
+    // into the signed-in app, so this is a visitor's only route back to it; on
+    // every in-app placement the rail or bottom bar already carries it, so the
+    // entry stays off and the panel is not a second navigation.
+    expect(ids(FULL)).not.toContain("dashboard");
+    expect(ids({ ...FULL, showDashboard: true })).toEqual([
+      "dashboard",
+      "settings",
+      "billing",
+      "support",
+      "clear-history",
+      "logout",
+    ]);
+  });
+
+  it("gives the dashboard entry the app route and the navigation's own label", () => {
+    // Guards the pairing: the entry must open the dashboard and read as the same
+    // destination the rail lists, rather than a label or icon written a second
+    // time here and left to drift.
+    const dashboard = profileMenuItems({ ...FULL, showDashboard: true })[0];
+    expect(dashboard.id).toBe("dashboard");
+    expect(dashboard.to).toBe("/app/dashboard");
+    expect(dashboard.label).toBe("Dashboard");
+    expect(dashboard.destructive).toBeFalsy();
+  });
+
   it("omits logout when the caller does not offer it", () => {
     // No placement passes false today — the phone header, the public header and
     // the desktop sidebar all offer logout. The option is still pinned because
     // it is a placement decision the component exposes, and the desktop rail
     // previously relied on the false branch (that requirement was reversed, not
     // forgotten, so a future placement can still turn it off).
-    expect(ids({ showLogout: false, allowHistoryDelete: true, includeAppLinks: true })).not.toContain(
+    expect(ids({ showLogout: false, allowHistoryDelete: true, showDashboard: false, includeAppLinks: true })).not.toContain(
       "logout",
     );
   });
 
   it("renders exactly one logout entry, and it is last", () => {
-    const items = profileMenuItems({ showLogout: true, allowHistoryDelete: true, includeAppLinks: true });
+    const items = profileMenuItems({ showLogout: true, allowHistoryDelete: true, showDashboard: false, includeAppLinks: true });
     const logouts = items.filter((item) => item.id === "logout");
     expect(logouts).toHaveLength(1);
     expect(items[items.length - 1]).toBe(logouts[0]);
@@ -73,7 +101,7 @@ describe("profileMenuItems", () => {
     // away in the sidebar's own navigation, so repeating them in the account menu
     // makes it a worse copy of the rail beside it.
     expect(
-      ids({ showLogout: true, allowHistoryDelete: true, includeAppLinks: false }),
+      ids({ showLogout: true, allowHistoryDelete: true, showDashboard: false, includeAppLinks: false }),
     ).toEqual(["settings", "clear-history", "logout"]);
   });
 
@@ -81,15 +109,15 @@ describe("profileMenuItems", () => {
     // Not "hide every link" — opening your own account settings is the reason to
     // open this menu at all, even though the rail also lists it.
     expect(
-      ids({ showLogout: true, allowHistoryDelete: false, includeAppLinks: false }),
+      ids({ showLogout: true, allowHistoryDelete: false, showDashboard: false, includeAppLinks: false }),
     ).toEqual(["settings", "logout"]);
   });
 
   it("governs only the two app destinations, from both directions", () => {
     // Pins the membership of APP_LINK_ACTIONS: everything that disappears when
     // the option is off, and nothing else.
-    const withLinks = ids({ showLogout: true, allowHistoryDelete: true, includeAppLinks: true });
-    const withoutLinks = ids({ showLogout: true, allowHistoryDelete: true, includeAppLinks: false });
+    const withLinks = ids({ showLogout: true, allowHistoryDelete: true, showDashboard: false, includeAppLinks: true });
+    const withoutLinks = ids({ showLogout: true, allowHistoryDelete: true, showDashboard: false, includeAppLinks: false });
     expect(withLinks.filter((id) => !withoutLinks.includes(id))).toEqual(["billing", "support"]);
     // And the remaining entries keep their relative order.
     expect(withoutLinks).toEqual(withLinks.filter((id) => withoutLinks.includes(id)));
@@ -97,10 +125,10 @@ describe("profileMenuItems", () => {
 
   it("omits the history purge where it is not an app action", () => {
     expect(
-      ids({ showLogout: true, allowHistoryDelete: false, includeAppLinks: true }),
+      ids({ showLogout: true, allowHistoryDelete: false, showDashboard: false, includeAppLinks: true }),
     ).not.toContain("clear-history");
     expect(
-      ids({ showLogout: false, allowHistoryDelete: false, includeAppLinks: true }),
+      ids({ showLogout: false, allowHistoryDelete: false, showDashboard: false, includeAppLinks: true }),
     ).toEqual([
       "settings",
       "billing",
@@ -189,7 +217,14 @@ describe("placement configurations", () => {
 
   it("gives the public header the links and logout, but no history purge", () => {
     // A marketing page should not offer to delete a signed-in visitor's history.
-    expect(ids(PUBLIC_HEADER_MENU)).toEqual(["settings", "billing", "support", "logout"]);
+    // It does lead with the dashboard: nothing else on the page goes into the app.
+    expect(ids(PUBLIC_HEADER_MENU)).toEqual([
+      "dashboard",
+      "settings",
+      "billing",
+      "support",
+      "logout",
+    ]);
   });
 
   it("keeps the sidebar rule from leaking into the wider placements", () => {

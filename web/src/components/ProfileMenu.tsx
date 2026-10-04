@@ -45,6 +45,13 @@ interface ProfileMenuProps {
   /** The purge is an app-only action; the public header passes false. */
   allowHistoryDelete?: boolean;
   /**
+   * Lead the panel with a link back into the app's dashboard. The public header
+   * passes true (a marketing page has no other way into the app); an in-app
+   * placement leaves it off, because the rail or bottom bar already carries the
+   * destination. Defaults to false so a new placement opts in explicitly.
+   */
+  showDashboard?: boolean;
+  /**
    * Include the app destinations the desktop sidebar's rail already lists
    * (Billing, Support). Defaults to true; the sidebar passes false.
    */
@@ -69,6 +76,7 @@ export function ProfileMenu({
   showLogout = false,
   allowHistoryDelete = false,
   includeAppLinks = true,
+  showDashboard = false,
   showIdentity = false,
   className = "",
   defaultOpen = false,
@@ -106,8 +114,8 @@ export function ProfileMenu({
   const panelId = useId();
 
   const items = useMemo(
-    () => profileMenuItems({ showLogout, allowHistoryDelete, includeAppLinks }),
-    [showLogout, allowHistoryDelete, includeAppLinks],
+    () => profileMenuItems({ showDashboard, showLogout, allowHistoryDelete, includeAppLinks }),
+    [showDashboard, showLogout, allowHistoryDelete, includeAppLinks],
   );
   const name = displayNameFor(user);
 
