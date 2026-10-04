@@ -70,16 +70,22 @@ def _lookup_match(
 ) -> Any:
     """What ``promotion_codes.list`` returns for a coupon-expanded lookup.
 
-    The coupon is present because the resolver asks for
-    ``expand=["data.coupon"]`` — without it ``PromotionCode.coupon`` is a bare
-    ``coupon_…`` id and the percentage/duration are unreadable, which is the
-    whole reason the resolver is the source of truth for those facts.
+    The coupon is nested under ``promotion`` because that is where the real API
+    puts it — a ``PromotionCode`` has **no** top-level ``coupon`` field in this
+    API version (its keys are active, code, created, customer,
+    customer_account, expires_at, id, livemode, max_redemptions, metadata,
+    object, promotion, restrictions, times_redeemed). A fake that puts
+    ``coupon`` at the top level is more generous than Stripe and cannot see the
+    difference; this one was written from the live response.
     """
     return SimpleNamespace(
         id="promo_student1",
         code=code,
         active=True,
-        coupon=SimpleNamespace(percent_off=percent_off, duration=duration),
+        promotion=SimpleNamespace(
+            type="coupon",
+            coupon=SimpleNamespace(percent_off=percent_off, duration=duration),
+        ),
     )
 
 
@@ -162,10 +168,61 @@ def test_a_valid_code_resolves_to_its_promotion_code_id(stripe: Any) -> None:
     assert resolved.duration == "once"
     # Case-insensitive match and unique-among-active is Stripe's contract; what
     # we must send is the code, active-only, single result — and the coupon
-    # expansion, without which the facts above are unreadable.
+    # expansion, without which the facts above are unreadable. The path is
+    # `data.promotion.coupon`: `data.coupon` is accepted by Stripe and expands
+    # NOTHING, which is a silent failure, so this string is pinned.
     assert promotion_codes.lookups == [
-        {"code": "STUDENT1", "active": True, "limit": 1, "expand": ["data.coupon"]}
+        {
+            "code": "STUDENT1",
+            "active": True,
+            "limit": 1,
+            "expand": ["data.promotion.coupon"],
+        }
     ]
+
+
+def test_the_coupon_is_read_from_the_promotion_object(stripe: Any) -> None:
+    """The coupon lives at ``promotion.coupon``, NOT at ``coupon``.
+
+    Regression guard: an earlier version read ``PromotionCode.coupon``, which
+    does not exist in this API version, so ``percent_off``/``duration`` came
+    back ``None`` against real Stripe while this suite stayed green. The fake
+    now mirrors the live object, so reading the wrong field fails here.
+    """
+    service, _, _ = stripe
+
+    resolved = asyncio.run(service.resolve_promotion_code("STUDENT1"))
+
+    assert resolved is not None
+    assert resolved.percent_off == 100.0
+    assert resolved.duration == "once"
+
+
+def test_a_coupon_left_as_a_bare_id_degrades_instead_of_raising(stripe: Any) -> None:
+    """If the expansion does not land, the id must still resolve.
+
+    ``promotion.coupon`` is then a plain ``coupon_…`` string, so there is no
+    percentage to report — but a usable promotion id is still returned, and the
+    caller must not be handed an exception. That is the difference between a
+    discount with no summary and a checkout that cannot start.
+    """
+    service, promotion_codes, _ = stripe
+    promotion_codes.matches = [
+        SimpleNamespace(
+            id="promo_student1",
+            code="STUDENT1",
+            active=True,
+            promotion=SimpleNamespace(type="coupon", coupon="campus-free-month"),
+        )
+    ]
+
+    resolved = asyncio.run(service.resolve_promotion_code("STUDENT1"))
+
+    assert resolved is not None
+    assert resolved.id == "promo_student1"
+    assert resolved.code == "STUDENT1"
+    assert resolved.percent_off is None
+    assert resolved.duration is None
 
 
 def test_a_blank_code_is_never_looked_up(stripe: Any) -> None:

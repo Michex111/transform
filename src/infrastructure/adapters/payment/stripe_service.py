@@ -417,10 +417,23 @@ class StripeService:
         *active* codes, so ``active=True`` is what makes an expired or
         deactivated code fail to resolve instead of being applied.
 
-        ``expand=["data.coupon"]`` is what makes the response useful: without it
-        ``PromotionCode.coupon`` is a bare ``coupon_…`` id and the percentage and
-        duration are unreadable. Reading them here (rather than off the created
-        session) is deliberate — see :class:`ResolvedPromotion`.
+        ``expand=["data.promotion.coupon"]`` is what makes the response useful,
+        and the path is not guessable — both halves were verified against the
+        live API after the obvious spelling had silently done nothing:
+
+          * a ``PromotionCode`` has **no ``coupon`` field** in this API version.
+            Its keys are active, code, created, customer, customer_account,
+            expires_at, id, livemode, max_redemptions, metadata, object,
+            **promotion**, restrictions, times_redeemed. The coupon hangs off
+            ``promotion`` instead, so reading ``coupon`` yields nothing at all.
+          * ``expand=["data.coupon"]`` is *accepted* and expands nothing —
+            ``promotion.coupon`` stays a bare ``coupon_…`` id. The expandable
+            path is ``data.promotion.coupon``, which returns the full Coupon.
+
+        A wrong field or a wrong path therefore fails silently rather than
+        raising: the id still resolves and the percentage comes back ``None``,
+        so the SPA shows no discount while checkout charges full price. Only a
+        call against real Stripe distinguishes the two.
 
         ``_stripe_list`` reads the result, NOT ``.data``: ``promotion_codes.list``
         returns a ``ListObject`` envelope, but a bare ``.data`` access on a plain
@@ -441,7 +454,7 @@ class StripeService:
                 "code": normalized,
                 "active": True,
                 "limit": 1,
-                "expand": ["data.coupon"],
+                "expand": ["data.promotion.coupon"],
             },
         )
         matches = _stripe_list(result)
@@ -455,7 +468,12 @@ class StripeService:
             logger.warning("A matched promotion code carried no id; ignoring")
             return None
 
-        coupon = _stripe_get(match, "coupon")
+        # `promotion.coupon` is the current location; the flat `coupon` field is
+        # kept as a fallback for an older API version. Either may still be a bare
+        # id string, in which case there is simply no percentage to report.
+        coupon = _stripe_get(_stripe_get(match, "promotion"), "coupon")
+        if coupon is None:
+            coupon = _stripe_get(match, "coupon")
         percent_off = _stripe_get(coupon, "percent_off")
         duration = _stripe_get(coupon, "duration")
         return ResolvedPromotion(
@@ -464,7 +482,7 @@ class StripeService:
             # UI still has something to show if the field is ever absent.
             code=_stripe_get(match, "code") or normalized,
             percent_off=float(percent_off) if isinstance(percent_off, (int, float)) else None,
-            duration=str(duration) if isinstance(duration, str) else None,
+            duration=duration if isinstance(duration, str) else None,
         )
 
     async def create_checkout_session(
@@ -591,14 +609,20 @@ class StripeService:
     def _discount_fields(session: Any) -> dict[str, Any]:
         """Best-effort read of the session's applied discount, from the session.
 
-        This is only a FALLBACK. A resolved ``Discount`` cannot carry
-        ``percent_off`` or ``duration`` — those live on the coupon, which a
-        Discount reaches only through its nested ``source`` object — and
-        ``promotion_code`` arrives as a bare ``promo_…`` id unless it was
-        explicitly expanded. So every branch here is expected to miss in
-        practice; :class:`ResolvedPromotion` is what actually supplies these
-        fields. It is kept because it costs nothing and covers the case where
-        Stripe does hand back an expanded object.
+        This is only a FALLBACK, and the reason is now measured rather than
+        assumed. Reading a real test-mode session back showed:
+
+            discount.promotion_code -> 'promo_…'   (a bare str, not expanded)
+            discount.source         -> None
+            discount 'coupon'       -> absent
+            discount 'percent_off'  -> absent
+
+        so every branch below genuinely misses: a resolved Discount carries no
+        ``percent_off``/``duration`` (they live on the coupon, reachable only
+        through the Discount's nested ``source``), and its ``promotion_code`` is
+        an un-expanded id. :class:`ResolvedPromotion` is therefore what actually
+        supplies these fields. This is kept because it costs nothing and would
+        cover a future Stripe that does expand — but nothing should depend on it.
 
         Every read goes through ``_stripe_get`` and a missing value becomes
         ``None``, never an exception.

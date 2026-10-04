@@ -95,10 +95,13 @@ def stripe(monkeypatch: pytest.MonkeyPatch) -> Any:
                 id="promo_student1",
                 code="STUDENT1",
                 active=True,
-                # Present because the resolver asks for `expand=["data.coupon"]`.
-                # Without the expansion these facts are unreadable, and the
-                # session cannot supply them (a Discount has no percent_off).
-                coupon=SimpleNamespace(percent_off=100.0, duration="once"),
+                # The coupon is nested under `promotion` — a PromotionCode has
+                # no top-level `coupon` field in this API version. Present
+                # because the resolver asks for `expand=["data.promotion.coupon"]`.
+                promotion=SimpleNamespace(
+                    type="coupon",
+                    coupon=SimpleNamespace(percent_off=100.0, duration="once"),
+                ),
             )
         ]
     )
@@ -141,7 +144,12 @@ def test_a_valid_code_is_resolved_and_applied(stripe: Any) -> None:
     _call(service, CheckoutRequest(tier=SubscriptionTier.PRO, promotion_code="STUDENT1"))
 
     assert promotion_codes.lookups == [
-        {"code": "STUDENT1", "active": True, "limit": 1, "expand": ["data.coupon"]}
+        {
+            "code": "STUDENT1",
+            "active": True,
+            "limit": 1,
+            "expand": ["data.promotion.coupon"],
+        }
     ]
     assert sessions.calls[0]["discounts"] == [{"promotion_code": "promo_student1"}]
     assert sessions.calls[0]["payment_method_collection"] == "if_required"
