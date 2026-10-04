@@ -7,6 +7,7 @@ model can explain rather than an exception that aborts the turn.
 """
 
 import asyncio
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 
 from src.application.dtos.assistant_dto import Artifact
@@ -14,6 +15,7 @@ from src.application.exceptions.file_system_exceptions import FileRecordNotFound
 from src.application.ports.assistant_account_port import AccountOverview
 from src.application.ports.document_text_port import ExtractedDocument
 from src.application.services.assistant_tools import (
+    _MAX_EXTENSION_FILTERS,
     _MAX_LIST_LIMIT,
     AssistantToolBox,
     format_category,
@@ -66,6 +68,13 @@ class FakeFileService:
         self.files = {row.id: row for row in files}
         self.list_calls: list[int] = []
         self.search_calls: list[str] = []
+        #: Recorded so a test can prove a whole-drive listing was asked for,
+        #: rather than inferred from the rows it happened to return.
+        self.list_all_calls: int = 0
+        #: Recorded so a test can prove the format filter reached the service
+        #: (the repository is what actually applies it) instead of being applied
+        #: to an already-fetched page in the toolbox.
+        self.extension_filters: list[Sequence[str] | None] = []
         #: Recorded so a test can prove the delete tool never reaches the real
         #: deletion path (it must only ever propose).
         self.deleted: list[str] = []
@@ -78,19 +87,44 @@ class FakeFileService:
             raise FileRecordNotFoundError()
         return row
 
+    @staticmethod
+    def _match_extension(row: UserFileModel, extensions: Sequence[str] | None) -> bool:
+        """Mirror the repository's SQL ``IN`` over the normalised column."""
+        if extensions is None:
+            return True
+        return (row.file_extension or "") in extensions
+
     async def list_files(
-        self, user_id: int, folder_id: str | None = None, *, offset: int = 0, limit: int = 20
+        self, user_id: int, folder_id: str | None = None, *, offset: int = 0, limit: int = 20,
+        extensions: Sequence[str] | None = None,
     ) -> tuple[list[UserFileModel], int]:
         self.list_calls.append(limit)
+        self.extension_filters.append(extensions)
         rows = [
             row
             for row in self.files.values()
-            if row.user_id == user_id and row.folder_id == folder_id
+            if row.user_id == user_id
+            and row.folder_id == folder_id
+            and self._match_extension(row, extensions)
+        ]
+        return rows[offset : offset + limit], len(rows)
+
+    async def list_all_files(
+        self, user_id: int, *, offset: int = 0, limit: int = 20,
+        extensions: Sequence[str] | None = None,
+    ) -> tuple[list[UserFileModel], int]:
+        self.list_all_calls += 1
+        self.extension_filters.append(extensions)
+        rows = [
+            row
+            for row in self.files.values()
+            if row.user_id == user_id and self._match_extension(row, extensions)
         ]
         return rows[offset : offset + limit], len(rows)
 
     async def search_files(
-        self, user_id: int, query: str, *, offset: int = 0, limit: int = 50
+        self, user_id: int, query: str, *, offset: int = 0, limit: int = 50,
+        extensions: Sequence[str] | None = None,
     ) -> tuple[list[UserFileModel], int]:
         """Literal, case-insensitive substring search across every folder.
 
@@ -99,11 +133,14 @@ class FakeFileService:
         is pinned against the SQL repository.
         """
         self.search_calls.append(query)
+        self.extension_filters.append(extensions)
         needle = query.casefold()
         rows = [
             row
             for row in self.files.values()
-            if row.user_id == user_id and needle in row.file_name.casefold()
+            if row.user_id == user_id
+            and needle in row.file_name.casefold()
+            and self._match_extension(row, extensions)
         ]
         return rows[offset : offset + limit], len(rows)
 
@@ -509,6 +546,210 @@ def test_list_files_reports_a_missing_folder_with_the_known_names() -> None:
     result, _ = _run(box, "list_files", {"folder": "Taxes"})
     assert "error" in result
     assert "Invoices" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# Format filters ("List my PDFs")
+# ---------------------------------------------------------------------------
+
+
+def test_list_files_by_extension_returns_only_that_format() -> None:
+    """The reported bug: "List my PDFs" attached Word documents to the answer.
+
+    A bare listing returns every file, so the model could only narrow the answer
+    in prose — while the artifacts chipped onto that answer came from the
+    UNFILTERED rows. An `extension` filter makes the rows themselves the answer,
+    so the two can no longer disagree.
+    """
+    box = _toolbox(
+        files=[
+            _file("file-1", name="resume.pdf", extension="pdf"),
+            _file("file-2", name="resume.docx", extension="docx", key="objects/resume.docx"),
+            _file("file-3", name="notes.txt", extension="txt", key="objects/notes.txt"),
+        ]
+    )
+    result, artifacts = _run(box, "list_files", {"extension": "pdf"})
+    assert "error" not in result
+    assert [row["file_name"] for row in result["files"]] == ["resume.pdf"]
+    assert result["extension"] == "pdf"
+    # The chips are the same rows as the answer, so no unrelated file is attached.
+    assert [artifact.name for artifact in artifacts] == ["resume.pdf"]
+
+
+def test_list_files_by_extension_searches_every_folder() -> None:
+    """A filed-away PDF is still one of the user's PDFs.
+
+    Without the whole-drive scope the filter would answer from the root and
+    silently omit exactly the files the user filed away — the same defect that
+    ``query`` had before it was fixed.
+    """
+    box = _toolbox(
+        files=[
+            _file("file-1", name="root.pdf", extension="pdf"),
+            _file(
+                "file-2",
+                name="filed.pdf",
+                extension="pdf",
+                folder_id="folder-1",
+                key="objects/filed.pdf",
+            ),
+        ]
+    )
+    result, _ = _run(box, "list_files", {"extension": "pdf"})
+    assert result["scope"] == "all_folders"
+    assert sorted(row["file_name"] for row in result["files"]) == ["filed.pdf", "root.pdf"]
+    service = box._files
+    assert isinstance(service, FakeFileService)
+    assert service.list_all_calls == 1
+    assert service.extension_filters == [["pdf"]]
+
+
+def test_list_files_normalises_the_model_supplied_extension() -> None:
+    """``".PDF"`` / ``"*.pdf"`` / ``"pdf"`` all mean the same format.
+
+    The filter is compared against the stored column with SQL equality, so a
+    value the model spelled with a dot or a wildcard must be normalised rather
+    than matching nothing — which would read to the user as "you have no PDFs".
+    """
+    box = _toolbox(files=[_file("file-1", name="resume.pdf", extension="pdf")])
+    for spelling in (".PDF", "PDF", "*.pdf", " pdf ", "application/pdf"):
+        result, _ = _run(box, "list_files", {"extension": spelling})
+        assert result["extension"] == "pdf", spelling
+        assert result["count"] == 1, spelling
+
+
+def test_list_files_treats_a_filter_that_normalises_to_nothing_as_absent() -> None:
+    """``"*"``/``""`` must widen the listing, not silently empty it.
+
+    Emptying the result would be the worst reading: the model would report that
+    the user has no files of a format it never actually filtered by.
+    """
+    box = _toolbox(
+        files=[
+            _file("file-1", name="resume.pdf", extension="pdf"),
+            _file("file-2", name="resume.docx", extension="docx", key="objects/resume.docx"),
+        ]
+    )
+    for spelling in ("*", "", "   "):
+        result, _ = _run(box, "list_files", {"extension": spelling})
+        assert "extension" not in result, spelling
+        assert result["scope"] == "root", spelling
+        assert result["count"] == 2, spelling
+
+
+def test_list_files_combines_extension_with_query_and_folder() -> None:
+    """The filters compose, and a folder still narrows them."""
+    box = _toolbox(
+        files=[
+            _file("file-1", name="invoice.pdf", extension="pdf", folder_id="folder-1"),
+            _file(
+                "file-2",
+                name="invoice.docx",
+                extension="docx",
+                folder_id="folder-1",
+                key="objects/invoice.docx",
+            ),
+            _file("file-3", name="invoice.pdf", extension="pdf", key="objects/invoice-root.pdf"),
+        ],
+        folders=[_folder("folder-1", "Invoices")],
+    )
+    scoped, _ = _run(box, "list_files", {"folder": "invoices", "extension": "pdf"})
+    assert scoped["scope"] == "folder"
+    assert [row["file_id"] for row in scoped["files"]] == ["file-1"]
+
+    searched, _ = _run(box, "list_files", {"query": "invoice", "extension": "docx"})
+    assert searched["scope"] == "all_folders"
+    assert [row["file_id"] for row in searched["files"]] == ["file-2"]
+
+
+def test_list_files_says_so_when_a_format_filter_matches_nothing() -> None:
+    """An empty format filter must not be read as "you have none of those".
+
+    The note is what stops the model from turning "no rows" into a confident
+    claim about the user's drive.
+    """
+    box = _toolbox(files=[_file("file-1", name="notes.txt", extension="txt")])
+    result, artifacts = _run(box, "list_files", {"extension": "pdf"})
+    assert result["count"] == 0
+    assert artifacts == []
+    assert "note" in result
+    # The note must name the filter that produced no rows, and must tell the
+    # model how to tell "no such files" apart from "that was a category word".
+    assert "pdf" in result["note"]
+    assert "spreadsheets" in result["note"]
+
+
+def test_list_files_answers_a_category_with_one_query() -> None:
+    """"Do I have any spreadsheets?" is ONE question about several extensions.
+
+    A single-format filter would need a call per format — burning a plan's tool
+    budget, and on a small budget coming back half-answered. This is the shape
+    the app's own suggested prompt needs.
+    """
+    box = _toolbox(
+        files=[
+            _file("file-1", name="budget.xlsx", extension="xlsx"),
+            _file("file-2", name="data.csv", extension="csv", key="objects/data.csv"),
+            _file("file-3", name="notes.pdf", extension="pdf", key="objects/notes.pdf"),
+        ]
+    )
+    result, artifacts = _run(box, "list_files", {"extension": ["xlsx", "csv", "ods"]})
+    assert result["count"] == 2
+    assert sorted(row["file_name"] for row in result["files"]) == ["budget.xlsx", "data.csv"]
+    assert result["extension"] == ["xlsx", "csv", "ods"]
+    service = box._files
+    assert isinstance(service, FakeFileService)
+    assert service.list_all_calls == 1
+    assert service.extension_filters == [["xlsx", "csv", "ods"]]
+    # Only the spreadsheets are chipped; the PDF is not part of this answer.
+    assert sorted(artifact.name for artifact in artifacts) == ["budget.xlsx", "data.csv"]
+
+
+def test_list_files_dedupes_and_bounds_the_extension_list() -> None:
+    """The list is model-authored, so it is normalised, deduped and capped."""
+    box = _toolbox(files=[_file("file-1", name="a.pdf", extension="pdf")])
+    result, _ = _run(box, "list_files", {"extension": [".PDF", "pdf", "*.pdf"]})
+    assert result["extension"] == "pdf"  # collapsed to one, reported as a scalar
+    service = box._files
+    assert isinstance(service, FakeFileService)
+    assert service.extension_filters == [["pdf"]]
+
+    many = [f"x{i}" for i in range(_MAX_EXTENSION_FILTERS + 5)]
+    bounded, _ = _run(box, "list_files", {"extension": many})
+    assert len(bounded["extension"]) == _MAX_EXTENSION_FILTERS
+
+
+def test_list_files_finds_a_file_by_extension_on_this_project() -> None:
+    """A concrete case: a PDF the user would call "my PDFs" must be found.
+
+    Reproduces the shape of the reported conversation — a drive holding a PDF
+    and a same-named DOCX — and asserts the PDF-only answer carries only the PDF.
+    """
+    box = _toolbox(
+        files=[
+            _file("file-1", name="Sales Associate resume(General).pdf", extension="pdf"),
+            _file(
+                "file-2",
+                name="Sales Associate resume(General).docx",
+                extension="docx",
+                key="objects/resume.docx",
+            ),
+            _file(
+                "file-3",
+                name="CS2520 course outline 2026 (2).docx",
+                extension="docx",
+                key="objects/outline.docx",
+            ),
+        ]
+    )
+    result, artifacts = _run(box, "list_files", {"extension": "pdf", "limit": 50})
+    assert [row["file_name"] for row in result["files"]] == [
+        "Sales Associate resume(General).pdf"
+    ]
+    # The exact bug: neither .docx may be chipped onto this answer.
+    assert [artifact.name for artifact in artifacts] == [
+        "Sales Associate resume(General).pdf"
+    ]
 
 
 def test_list_folders_lists_the_root_by_default() -> None:

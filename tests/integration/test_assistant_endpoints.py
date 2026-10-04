@@ -622,6 +622,69 @@ def test_chat_lists_the_conversation_afterwards(tmp_path) -> None:
     assert listing["conversations"][0]["title"] == "Hello there"
 
 
+def test_a_category_listing_streams_only_that_category(tmp_path) -> None:
+    """End-to-end: "do I have any spreadsheets?" must not attach anything else.
+
+    A category is one call over several extensions. This drives the exact shape
+    the tool description prescribes and asserts the whole turn completes (no
+    ``error`` frame) with only the category's files chipped onto the answer.
+    """
+    llm = FakeLlmPort(
+        [
+            tool_response("list_files", {"extension": ["xlsx", "csv", "ods"]}),
+            text_response("You have two spreadsheets."),
+        ]
+    )
+    files = [
+        ("budget.xlsx", "objects/budget.xlsx", b"PK", USER_ID),
+        ("data.csv", "objects/data.csv", b"a,b", USER_ID),
+        ("notes.pdf", "objects/notes.pdf", b"%PDF-1.4", USER_ID),
+    ]
+    with assistant_app(str(tmp_path / "category.db"), seed_files=files, llm=llm) as harness:
+        response = _chat(harness, "Do I have any spreadsheets?")
+        assert response.status_code == 200
+        frames = _frames(response)
+        assert [name for name, _ in frames][-1] == "done", frames
+
+    assert sorted(
+        payload["id"] for name, payload in frames if name == "artifact"
+    ) == ["objects/budget.xlsx", "objects/data.csv"]
+
+    tool_message = llm.calls[1][0][-1]
+    payload = json.loads(tool_message.content)
+    assert sorted(row["file_name"] for row in payload["files"]) == ["budget.xlsx", "data.csv"]
+    assert payload["count"] == 2
+    assert payload["extension"] == ["xlsx", "csv", "ods"]
+
+
+def test_a_format_filter_matching_nothing_still_completes_the_turn(tmp_path) -> None:
+    """An empty result is data, not a failure.
+
+    "Do I have any spreadsheets?" where the answer is genuinely none must end in
+    a normal answer, because the alternative is a 503 on a perfectly ordinary
+    question about an empty category.
+    """
+    llm = FakeLlmPort(
+        [
+            tool_response("list_files", {"extension": "xlsx"}),
+            text_response("You have no spreadsheets."),
+        ]
+    )
+    with assistant_app(
+        str(tmp_path / "empty-format.db"),
+        seed_files=[("notes.txt", "objects/notes.txt", b"hi", USER_ID)],
+        llm=llm,
+    ) as harness:
+        response = _chat(harness, "Do I have any spreadsheets?")
+        assert response.status_code == 200
+        frames = _frames(response)
+        assert [name for name, _ in frames][-1] == "done", frames
+
+    payload = json.loads(llm.calls[1][0][-1].content)
+    assert payload["count"] == 0
+    assert "note" in payload
+
+
 def test_chat_with_attachments_streams_and_persists_the_meta(tmp_path) -> None:
     with assistant_app(
         str(tmp_path / "attach.db"),

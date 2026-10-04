@@ -898,6 +898,94 @@ def test_file_listing_ranking_is_deterministic_under_ties() -> None:
         asyncio.run(_run())
 
 
+def test_file_listings_filter_by_extension_across_folders() -> None:
+    """The "list my PDFs" filter, at the layer that has to get it right.
+
+    Three properties matter, and each was a way the assistant could attach a
+    file the user did not ask for:
+
+    * the filter spans the WHOLE drive, so a PDF inside a folder is still found;
+    * the total counts matches only, so "3 PDFs" cannot be said about a listing
+      showing one;
+    * the comparison uses the STORED (normalised) extension, which is why the
+      caller must normalise its input the same way.
+    """
+    with sqlite_session_factory() as factory:
+
+        async def _run() -> None:
+            async with factory() as session:
+                user = await _create_user(factory)
+                now = datetime.now(UTC)
+
+                def row(
+                    file_id: str, folder_id: str | None, name: str, extension: str,
+                ) -> UserFileModel:
+                    return UserFileModel(
+                        id=file_id,
+                        user_id=user.id,
+                        folder_id=folder_id,
+                        file_key=f"objects/{file_id}",
+                        file_name=name,
+                        file_extension=extension,
+                        file_size_bytes=100,
+                        mime_type="application/octet-stream",
+                        is_favorite=False,
+                        created_at=now,
+                    )
+
+                session.add_all(
+                    [
+                        UserFolderModel(
+                            id="f-docs", user_id=user.id, name="Docs",
+                            parent_id=None, created_at=now, updated_at=now,
+                        ),
+                        row("pdf-root", None, "resume.pdf", "pdf"),
+                        row("pdf-filed", "f-docs", "filed.pdf", "pdf"),
+                        row("docx-root", None, "resume.docx", "docx"),
+                        row("txt-root", None, "notes.txt", "txt"),
+                    ]
+                )
+                await session.commit()
+                repo = SQLUserFileRepository(session)
+
+                rows, total = await repo.list_all_by_user(user.id, extensions=["pdf"])
+                assert total == 2  # the docx and txt are not counted either
+                assert sorted(r.id for r in rows) == ["pdf-filed", "pdf-root"]
+
+                # A folder listing can be filtered too.
+                scoped, scoped_total = await repo.list_by_user(
+                    user.id, folder_id="f-docs", extensions=["pdf"]
+                )
+                assert scoped_total == 1
+                assert [r.id for r in scoped] == ["pdf-filed"]
+
+                # …and the filter composes with a name search.
+                searched, searched_total = await repo.search_by_name(
+                    user.id, "resume", extensions=["docx"]
+                )
+                assert searched_total == 1
+                assert [r.id for r in searched] == ["docx-root"]
+
+                # A CATEGORY is one query over several extensions, not several
+                # queries — "do I have any spreadsheets?" must not need one call
+                # per format (or come back half-answered).
+                category, category_total = await repo.list_all_by_user(
+                    user.id, extensions=["pdf", "docx"]
+                )
+                assert category_total == 3
+                assert sorted(r.id for r in category) == ["docx-root", "pdf-filed", "pdf-root"]
+
+                # The stored value is lowercased, so an un-normalised filter
+                # matches nothing — the caller's job, pinned here so it cannot
+                # silently become the reader's problem.
+                unnormalised, unnormalised_total = await repo.list_all_by_user(
+                    user.id, extensions=[".PDF"]
+                )
+                assert (unnormalised, unnormalised_total) == ([], 0)
+
+        asyncio.run(_run())
+
+
 def test_conversion_job_search_filters_by_name_and_format_per_user() -> None:
     """``search_jobs`` matches either end of a conversion, newest first."""
     with sqlite_session_factory() as factory:

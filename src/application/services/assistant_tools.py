@@ -47,7 +47,10 @@ from src.domain.conversions.entities.conversion_job import ConversionJob
 from src.domain.conversions.policies.job_ownership import is_job_owner
 from src.domain.conversions.value_object.job_origin import JobOrigin
 from src.domain.subscriptions.value_object.tier import SubscriptionTier
-from src.infrastructure.adapters.storage.sanitize import extension_from_filename
+from src.infrastructure.adapters.storage.sanitize import (
+    extension_from_filename,
+    normalize_extension,
+)
 from src.infrastructure.converters.conversion_map import build_conversion_map
 from src.infrastructure.database.models import UserFileModel, UserFolderModel
 from src.infrastructure.logging.audit import log_permission_denied
@@ -65,6 +68,10 @@ _QUERY_SCAN_LIMIT = 200
 #: Artifacts emitted per tool call. A "list everything" turn must not render
 #: hundreds of chips in the UI.
 _MAX_ARTIFACTS_PER_TOOL = 5
+#: Formats one listing may be filtered by. A category question names a handful
+#: of extensions; a larger list is the model echoing a vocabulary, and each entry
+#: is a term in the query, so this bounds what it can send.
+_MAX_EXTENSION_FILTERS = 8
 #: Characters of a document handed back by ``read_file_text`` by default.
 _DEFAULT_READ_CHARS = 8000
 
@@ -291,12 +298,21 @@ class AssistantFileServicePort(Protocol):
         ...
 
     async def list_files(
-        self, user_id: int, folder_id: str | None = None, *, offset: int = 0, limit: int = 20
+        self, user_id: int, folder_id: str | None = None, *, offset: int = 0, limit: int = 20,
+        extensions: Sequence[str] | None = None,
     ) -> tuple[list[UserFileModel], int]:
         ...
 
+    async def list_all_files(
+        self, user_id: int, *, offset: int = 0, limit: int = 20,
+        extensions: Sequence[str] | None = None,
+    ) -> tuple[list[UserFileModel], int]:
+        """Every file the user owns, in any folder (optionally some formats)."""
+        ...
+
     async def search_files(
-        self, user_id: int, query: str, *, offset: int = 0, limit: int = 50
+        self, user_id: int, query: str, *, offset: int = 0, limit: int = 50,
+        extensions: Sequence[str] | None = None,
     ) -> tuple[list[UserFileModel], int]:
         ...
 
@@ -526,11 +542,19 @@ class AssistantToolBox:
             LlmToolSpec(
                 name="list_files",
                 description=(
-                    "List or search the user's files. A `query` searches the "
-                    "WHOLE drive (every folder) for a case-insensitive file-name "
-                    "substring, so use it for 'find my invoice'. Passing `folder` "
-                    "narrows the listing — and any `query` — to that one folder. "
-                    "Use this to resolve a file the user referred to by name."
+                    "List or search the user's files. `extension` returns only "
+                    "files of the given format(s) and searches the WHOLE drive, "
+                    "so it is what 'list my PDFs' needs — pass the format name "
+                    "the user said, with no dot. Pass SEVERAL for a category: "
+                    "'spreadsheets' -> ['xlsx','csv','ods'], 'images' -> "
+                    "['png','jpg','jpeg','gif','webp'], 'documents' -> "
+                    "['pdf','doc','docx'] — one call, not one per format. A "
+                    "`query` searches the WHOLE drive for a case-insensitive "
+                    "file-name substring, so use it for 'find my invoice'. "
+                    "`extension` and `query` combine. Passing `folder` narrows "
+                    "anything to that one folder. Without a `folder`, a `query` "
+                    "or an `extension`, this lists the ROOT only. Use this to "
+                    "resolve a file the user referred to by name."
                 ),
                 parameters=_tool_schema(
                     {
@@ -538,8 +562,8 @@ class AssistantToolBox:
                             "type": ["string", "null"],
                             "description": (
                                 "Folder name or id to narrow the listing to; omit "
-                                "to search the whole drive (with a query) or list "
-                                "the root (without one)."
+                                "to search the whole drive (with a query or an "
+                                "extension) or list the root (without either)."
                             ),
                         },
                         "query": {
@@ -547,6 +571,17 @@ class AssistantToolBox:
                             "description": (
                                 "Case-insensitive file-name substring; searches "
                                 "across all folders when no folder is given."
+                            ),
+                        },
+                        "extension": {
+                            "type": ["array", "string", "null"],
+                            "items": {"type": "string"},
+                            "description": (
+                                "Return only files of these formats, e.g. 'pdf' "
+                                "— no dot, no wildcard; a list for a category. "
+                                "Searches every folder. ALWAYS set this when the "
+                                "user names a format or a category ('list my "
+                                "PDFs', 'any spreadsheets?')."
                             ),
                         },
                         "limit": {
@@ -954,6 +989,50 @@ class AssistantToolBox:
         return cleaned or None
 
     @staticmethod
+    def _as_extensions(arguments: dict[str, Any], key: str) -> list[str] | None:
+        """File-format filters from an untrusted model argument, or ``None``.
+
+        Accepts one extension or several, because a user asks in CATEGORIES:
+        "do I have any spreadsheets?" is one question about xlsx/csv/ods, and
+        answering it with a single filter would need three tool calls (burning a
+        plan's budget) or would come back half-answered.
+
+        Every value is normalised with the SAME function that writes
+        ``user_files.file_extension`` (``normalize_extension``), because the
+        filter is compared against that stored column with SQL equality:
+        ``".PDF"`` or ``"pdf "`` would match nothing and read to the user as
+        "you have no PDFs" — a confidently wrong answer, which is worse than no
+        filter at all.
+
+        Leniency is deliberate. A model writing ``".pdf"``, ``"PDF"``, ``"*.pdf"``
+        or ``"application/pdf"`` all mean the same format, so each is reduced to
+        the bare extension rather than rejected into a confusing tool error.
+        Values that normalise to nothing are dropped; an all-empty result reads
+        as "no filter", which is the safe direction — it widens the listing
+        instead of silently emptying it.
+        """
+        raw = arguments.get(key)
+        if raw is None:
+            return None
+        candidates = raw if isinstance(raw, list) else [raw]
+        found: list[str] = []
+        for item in candidates:
+            if not isinstance(item, str):
+                continue
+            # A glob-ish or mime-ish spelling is a common model habit; reduce it
+            # to the bare extension rather than matching nothing.
+            candidate = item.strip().lstrip("*")
+            if "/" in candidate:
+                candidate = candidate.rsplit("/", 1)[-1]
+            normalised = normalize_extension(candidate)
+            if normalised and normalised not in found:
+                found.append(normalised)
+        # Bounded, because the list is model-authored and each entry is a term in
+        # the query. A model that echoes a whole vocabulary does not get to send
+        # an unbounded ``IN`` clause.
+        return found[:_MAX_EXTENSION_FILTERS] or None
+
+    @staticmethod
     def _as_limit(arguments: dict[str, Any], key: str, default: int) -> int:
         """Clamp a model-supplied limit into ``[1, _MAX_LIST_LIMIT]``.
 
@@ -1056,22 +1135,34 @@ class AssistantToolBox:
         limit = self._as_limit(arguments, "limit", 20)
         query = self._as_str(arguments, "query")
         folder_ref = self._as_str(arguments, "folder")
+        extensions = self._as_extensions(arguments, "extension")
 
-        # The three shapes of this call are deliberately distinct, because they
+        # The four shapes of this call are deliberately distinct, because they
         # search genuinely different places:
-        #   folder given          -> that one folder (a `query`, if any, narrows it);
-        #   no folder, `query`    -> the WHOLE drive;
-        #   no folder, no `query` -> the root listing.
-        # Collapsing the middle case into the root listing was the bug: "find my
-        # invoice" would only ever look at root-level files and miss every
-        # document the user had filed away.
+        #   folder given            -> that one folder (a `query`/`extension`, if any, narrows it);
+        #   no folder, `query`      -> the WHOLE drive, by name;
+        #   no folder, `extension`  -> the WHOLE drive, by format;
+        #   none of the above       -> the root listing.
+        #
+        # Both filters are WHOLE-DRIVE by default, for the same reason: a
+        # "filtered" question is a question about everything the user has. That
+        # was the bug for `query` ("find my invoice" only ever saw root-level
+        # files) and it is the bug `extension` exists to fix — "list my PDFs"
+        # must find the PDFs inside folders, or it answers with a subset and no
+        # hint that it did.
+        #
+        # The `extension` filter is what stops the assistant attaching unrelated
+        # documents: without it the model could only ask for "some files" and
+        # then narrow the answer in prose, while the artifacts attached to that
+        # answer came from the unfiltered rows — so a "here are your PDFs"
+        # answer arrived with Word documents chipped onto it.
         if folder_ref is not None:
             folder_id = await self._resolve_folder_id(user_id, folder_ref)
             if folder_id is None:
                 return await self._folder_argument_error(user_id, folder_ref)
             scan = limit if query is None else _QUERY_SCAN_LIMIT
             rows, total = await self._files.list_files(
-                user_id, folder_id, offset=0, limit=scan
+                user_id, folder_id, offset=0, limit=scan, extensions=extensions
             )
             if query is not None:
                 needle = query.casefold()
@@ -1081,11 +1172,17 @@ class AssistantToolBox:
             scope = "folder"
         elif query is not None:
             rows, total = await self._files.search_files(
-                user_id, query, offset=0, limit=limit
+                user_id, query, offset=0, limit=limit, extensions=extensions
             )
             # The repository's total is the number of matches, not the page it
             # returned, so "12 matches, showing 5" stays honest.
             matched = total
+            scope = "all_folders"
+        elif extensions is not None:
+            rows, total = await self._files.list_all_files(
+                user_id, offset=0, limit=limit, extensions=extensions
+            )
+            matched = len(rows)
             scope = "all_folders"
         else:
             rows, total = await self._files.list_files(user_id, None, offset=0, limit=limit)
@@ -1099,10 +1196,26 @@ class AssistantToolBox:
             "total": total,
             "scope": scope,
         }
-        if query is not None and matched == 0:
-            result["note"] = (
-                f"No file name contains {query!r}. Try listing without a query."
-            )
+        # Echoed so the model can name the filter it actually applied, rather
+        # than describing whatever it believes it asked for.
+        if extensions is not None:
+            result["extension"] = extensions[0] if len(extensions) == 1 else extensions
+        if matched == 0:
+            if query is not None:
+                result["note"] = (
+                    f"No file name contains {query!r}. Try listing without a query."
+                )
+            elif extensions is not None:
+                # Phrased so a CATEGORY word cannot become a confident claim: an
+                # unknown extension has two possible meanings, and the model is
+                # told which one to resolve before answering.
+                result["note"] = (
+                    f"No file in the drive has any of: {', '.join(extensions)}. "
+                    "If that was a category word (for example 'spreadsheets'), "
+                    "retry with the real extensions it covers (xlsx, csv, ods). "
+                    "Only if it was already a real extension should you tell the "
+                    "user they have no such files."
+                )
         return result
 
     async def _list_folders(self, user_id: int, arguments: dict[str, Any]) -> dict[str, Any]:

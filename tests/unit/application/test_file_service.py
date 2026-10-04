@@ -1,10 +1,10 @@
 """Unit tests for the FileService business rules (in-memory fakes)."""
 
 import asyncio
+from collections.abc import Sequence
 
 import pytest
 from sqlalchemy.exc import IntegrityError
-
 from src.application.dtos.upload_dto import UploadSession
 from src.application.exceptions.file_system_exceptions import (
     FileRecordNotFoundError,
@@ -28,6 +28,13 @@ from src.infrastructure.database.models import UserFileModel, UserFolderModel
 # ---------------------------------------------------------------------------
 # Fakes
 # ---------------------------------------------------------------------------
+
+def _matches_extension(row: UserFileModel, extensions: Sequence[str] | None) -> bool:
+    """Mirror the repository's SQL ``IN`` over the normalised column."""
+    if extensions is None:
+        return True
+    return (row.file_extension or "") in extensions
+
 
 def _sorted_files(
     rows: list[UserFileModel], sort: FileSortKey, order: FileSortOrder
@@ -79,8 +86,15 @@ class FakeFileRepo:
         self, user_id, *, folder_id=None, offset=0, limit=20,
         sort: FileSortKey = DEFAULT_FILE_SORT,
         order: FileSortOrder = DEFAULT_FILE_SORT_ORDER,
+        extensions: list[str] | None = None,
     ):
-        rows = [f for f in self.files.values() if f.user_id == user_id and f.folder_id == folder_id]
+        rows = [
+            f
+            for f in self.files.values()
+            if f.user_id == user_id
+            and f.folder_id == folder_id
+            and _matches_extension(f, extensions)
+        ]
         rows = _sorted_files(rows, sort, order)
         return rows[offset:offset + limit], len(rows)
 
@@ -88,8 +102,13 @@ class FakeFileRepo:
         self, user_id, *, offset=0, limit=20,
         sort: FileSortKey = DEFAULT_FILE_SORT,
         order: FileSortOrder = DEFAULT_FILE_SORT_ORDER,
+        extensions: list[str] | None = None,
     ):
-        rows = [f for f in self.files.values() if f.user_id == user_id]
+        rows = [
+            f
+            for f in self.files.values()
+            if f.user_id == user_id and _matches_extension(f, extensions)
+        ]
         rows = _sorted_files(rows, sort, order)
         return rows[offset:offset + limit], len(rows)
 
@@ -97,12 +116,15 @@ class FakeFileRepo:
         self, user_id, query, *, offset=0, limit=50,
         sort: FileSortKey = DEFAULT_FILE_SORT,
         order: FileSortOrder = DEFAULT_FILE_SORT_ORDER,
+        extensions: list[str] | None = None,
     ):
         needle = query.casefold()
         rows = [
             f
             for f in self.files.values()
-            if f.user_id == user_id and needle in (f.file_name or "").casefold()
+            if f.user_id == user_id
+            and needle in (f.file_name or "").casefold()
+            and _matches_extension(f, extensions)
         ]
         rows = _sorted_files(rows, sort, order)
         return rows[offset:offset + limit], len(rows)

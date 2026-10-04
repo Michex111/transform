@@ -98,6 +98,48 @@ def test_a_listing_question_calls_list_files() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Format filters
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "question",
+    ["List my PDFs", "show me my pdf files", "which pdf files do I have"],
+)
+def test_a_listing_that_names_a_format_filters_by_it(question: str) -> None:
+    """The offline backend must narrow the listing, not list everything.
+
+    Answering "List my PDFs" from an unfiltered listing is what attached Word
+    documents to the answer: the files returned are the ones that get chipped
+    onto it. The rule engine has to pass the filter like a real model would,
+    because the demo is the only path available without an API key.
+    """
+    calls = _tool_calls([_user(question)])
+    assert [call.name for call in calls] == ["list_files"]
+    assert calls[0].arguments["extension"] == "pdf"
+
+
+def test_a_conversion_request_does_not_filter_by_its_DESTINATION_format() -> None:
+    """The same word means opposite things in the two sentences.
+
+    In "convert this to pdf" the named format is the DESTINATION; filtering the
+    listing by it would answer a convert request with a page of the user's PDFs
+    instead of resolving the file they want converted.
+    """
+    calls = _tool_calls([_user("convert report.docx to pdf")])
+    assert [call.name for call in calls] == ["list_files"]
+    assert "extension" not in calls[0].arguments
+    # Only the property under test is asserted: extracting the file name from
+    # unquoted prose is pre-existing behaviour with its own test.
+    assert "report.docx" in calls[0].arguments["query"]
+
+
+def test_a_listing_with_no_format_names_stays_unfiltered() -> None:
+    calls = _tool_calls([_user("What files do I have?")])
+    assert "extension" not in calls[0].arguments
+
+
+# ---------------------------------------------------------------------------
 # Ranking the drive
 # ---------------------------------------------------------------------------
 

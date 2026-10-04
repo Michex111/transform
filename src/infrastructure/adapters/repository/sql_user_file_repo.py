@@ -1,11 +1,12 @@
 """SQLAlchemy repository for user files stored in S3/Minio."""
 
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, UTC
 from typing import Any
 
-from sqlalchemy import SQLColumnExpression, delete, func, select, update
+from sqlalchemy import SQLColumnExpression, Select, delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.application.services.file_listing import (
@@ -34,9 +35,7 @@ _SORT_COLUMNS: dict[FileSortKey, SQLColumnExpression[Any]] = {
 }
 
 
-def _order_clause(
-    sort: FileSortKey, order: FileSortOrder
-) -> list[SQLColumnExpression[Any]]:
+def _order_clause(sort: FileSortKey, order: FileSortOrder) -> list[SQLColumnExpression[Any]]:
     """Ordering for a file listing, always with a deterministic tie-break.
 
     The secondary ``id`` key is not cosmetic. Two files of the same size (or the
@@ -48,6 +47,31 @@ def _order_clause(
     column = _SORT_COLUMNS[sort]
     primary = column.asc() if order is FileSortOrder.ASC else column.desc()
     return [primary, UserFileModel.id.asc()]
+
+
+def _with_extension(
+    statement: Select[Any], extensions: Sequence[str] | None
+) -> Select[Any]:
+    """Narrow a file listing to one or more extensions (no-op when ``None``).
+
+    Applied BEFORE the count query, so the reported total is the number of
+    *matches* rather than of the unfiltered set — otherwise an answer could say
+    "found 3 matching files" over a page holding one.
+
+    A set rather than a single value because a user asks in CATEGORIES: "do I
+    have any spreadsheets?" is one question about several real extensions
+    (xlsx, csv, ods). Answering it needs one filtered query, not one per format —
+    the alternative burns a plan's tool-call budget and can still come back
+    half-answered.
+
+    The compared values are the stored ``file_extension``, which every write path
+    normalises through :func:`normalize_extension` (lowercase, dot-free). The
+    caller is therefore responsible for normalising its input the same way;
+    comparing a raw ``".PDF"`` here would silently match nothing.
+    """
+    if not extensions:
+        return statement
+    return statement.where(UserFileModel.file_extension.in_(list(extensions)))
 
 
 @dataclass(frozen=True)
@@ -131,6 +155,7 @@ class SQLUserFileRepository:
         offset: int = 0, limit: int = 20,
         sort: FileSortKey = DEFAULT_FILE_SORT,
         order: FileSortOrder = DEFAULT_FILE_SORT_ORDER,
+        extensions: Sequence[str] | None = None,
     ) -> tuple[list[UserFileModel], int]:
         """
         Return a paginated list of files in ONE folder, newest first by default.
@@ -144,12 +169,18 @@ class SQLUserFileRepository:
         would answer "the largest file" from an arbitrary page of rows. See
         :func:`list_all_by_user` to order the WHOLE drive rather than one folder.
 
+        ``extensions`` narrows the listing to one or more formats (see
+        :func:`_with_extension`).
+
         Returns:
             (rows, total_count)
         """
-        base = select(UserFileModel).where(
-            UserFileModel.user_id == user_id,
-            UserFileModel.folder_id == folder_id,
+        base = _with_extension(
+            select(UserFileModel).where(
+                UserFileModel.user_id == user_id,
+                UserFileModel.folder_id == folder_id,
+            ),
+            extensions,
         )
 
         count_q = select(func.count()).select_from(base.subquery())
@@ -166,6 +197,7 @@ class SQLUserFileRepository:
         self, user_id: int, *, offset: int = 0, limit: int = 20,
         sort: FileSortKey = DEFAULT_FILE_SORT,
         order: FileSortOrder = DEFAULT_FILE_SORT_ORDER,
+        extensions: Sequence[str] | None = None,
     ) -> tuple[list[UserFileModel], int]:
         """Return a paginated list of EVERY file a user owns, in any folder.
 
@@ -175,13 +207,20 @@ class SQLUserFileRepository:
         my largest file?" is a question about the drive, and a filed-away
         document is still part of the drive.
 
+        With ``extensions`` set, the whole-drive scope is what makes "list my
+        PDFs" correct: a PDF sitting in a folder is still one of the user's
+        PDFs. Asking only the root would answer with a subset and no hint that
+        it had.
+
         Ordering is applied by the database before ``offset``/``limit``, so
         ``sort=size, order=desc, limit=1`` really is the single largest file.
 
         Returns:
             (rows, total_count)
         """
-        base = select(UserFileModel).where(UserFileModel.user_id == user_id)
+        base = _with_extension(
+            select(UserFileModel).where(UserFileModel.user_id == user_id), extensions
+        )
 
         count_q = select(func.count()).select_from(base.subquery())
         total = (await self._session.execute(count_q)).scalar_one()
@@ -197,6 +236,7 @@ class SQLUserFileRepository:
         self, user_id: int, query: str, *, offset: int = 0, limit: int = 50,
         sort: FileSortKey = DEFAULT_FILE_SORT,
         order: FileSortOrder = DEFAULT_FILE_SORT_ORDER,
+        extensions: Sequence[str] | None = None,
     ) -> tuple[list[UserFileModel], int]:
         """Name-substring search across ALL of a user's folders, newest first.
 
@@ -217,9 +257,12 @@ class SQLUserFileRepository:
         are independent of ``limit`` so the caller can say "showing 5 of 12".
         """
         pattern = f"%{escape_like(query)}%"
-        base = select(UserFileModel).where(
-            UserFileModel.user_id == user_id,
-            UserFileModel.file_name.ilike(pattern, escape="\\"),
+        base = _with_extension(
+            select(UserFileModel).where(
+                UserFileModel.user_id == user_id,
+                UserFileModel.file_name.ilike(pattern, escape="\\"),
+            ),
+            extensions,
         )
 
         count_q = select(func.count()).select_from(base.subquery())

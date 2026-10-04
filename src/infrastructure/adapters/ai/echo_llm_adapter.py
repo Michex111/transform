@@ -58,6 +58,14 @@ _LIST_WORDS = re.compile(
     r"do i have)\b",
     re.IGNORECASE,
 )
+#: A listing question's verb. Used only to decide whether a format named in the
+#: message is something to FILTER BY ("list my PDFs") rather than a conversion
+#: destination ("convert this to PDF") — the same word means opposite things in
+#: the two sentences, and filtering a listing by the destination would answer a
+#: convert request with a list of PDFs.
+_LIST_VERBS = re.compile(
+    r"\b(list|show|find|which|any|do i have|are there)\b", re.IGNORECASE
+)
 #: A superlative about size ("what's my largest file?"). These are answered by
 #: *ranking* the drive rather than listing it, so they are matched before the
 #: generic listing rule: `_LIST_WORDS` also matches "which of my files are the
@@ -239,11 +247,17 @@ class EchoLlmAdapter:
         superlative = self._superlative_arguments(text)
         if superlative is not None:
             return LlmToolCall(id=_CALL_ID, name="list_files", arguments=superlative)
-        if wants_action or _LIST_WORDS.search(text):
+        # Only for a LISTING question: in "convert this to pdf" the named format
+        # is the destination, and filtering the listing by it would answer with
+        # a page of PDFs instead of the file the user wants converted.
+        extension = None if wants_action else self._extension_filter(text)
+        if wants_action or _LIST_WORDS.search(text) or extension is not None:
             query = _named_file(text)
             arguments: dict[str, Any] = {"limit": 20}
             if query is not None:
                 arguments["query"] = query
+            if extension is not None:
+                arguments["extension"] = extension
             return LlmToolCall(id=_CALL_ID, name="list_files", arguments=arguments)
         if _FOLDER_WORDS.search(text):
             return LlmToolCall(id=_CALL_ID, name="list_folders", arguments={})
@@ -282,6 +296,37 @@ class EchoLlmAdapter:
                     arguments={"file_id": file_id, "target_format": target},
                 )
         return None
+
+    @staticmethod
+    def _named_format(text: str) -> str | None:
+        """A file format named in ``text``, accepting the plural spelling.
+
+        ``_named_source_format`` matches the bare format (``pdf``) using word
+        boundaries, which does NOT match the common phrasing "list my PDFs": the
+        trailing ``s`` removes the boundary after ``pdf``. A listing question is
+        phrased in the plural often enough that the filter has to accept it, so
+        this matches ``pdf`` and ``pdfs`` alike.
+
+        Longest key first, so a compound extension (``tar.gz``) is not shadowed
+        by its own tail (``gz``).
+        """
+        lowered = text.casefold()
+        for fmt in sorted(build_conversion_map(), key=len, reverse=True):
+            if re.search(rf"\b{re.escape(fmt)}s?\b", lowered):
+                return fmt
+        return None
+
+    @staticmethod
+    def _extension_filter(text: str) -> str | None:
+        """A format named in a LISTING question ("list my PDFs"), or ``None``.
+
+        Reuses the conversion registry's own vocabulary, so the demo can only
+        ever filter by formats this service actually knows — a made-up extension
+        would come back empty and read as "you have no such files".
+        """
+        if not _LIST_VERBS.search(text):
+            return None
+        return EchoLlmAdapter._named_format(text)
 
     @staticmethod
     def _superlative_arguments(text: str) -> dict[str, Any] | None:

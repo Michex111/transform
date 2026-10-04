@@ -6,6 +6,7 @@ business rules (ownership, size limits, recursive-delete coordination) are
 unit-testable here.
 """
 
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Protocol
 
@@ -65,12 +66,14 @@ class FileRepositoryPort(Protocol):
         offset: int = 0, limit: int = 20,
         sort: FileSortKey = DEFAULT_FILE_SORT,
         order: FileSortOrder = DEFAULT_FILE_SORT_ORDER,
+        extensions: Sequence[str] | None = None,
     ) -> tuple[list[UserFileModel], int]: ...
 
     async def list_all_by_user(
         self, user_id: int, *, offset: int = 0, limit: int = 20,
         sort: FileSortKey = DEFAULT_FILE_SORT,
         order: FileSortOrder = DEFAULT_FILE_SORT_ORDER,
+        extensions: Sequence[str] | None = None,
     ) -> tuple[list[UserFileModel], int]:
         """Every file the user owns, in any folder, ordered by the database."""
         ...
@@ -79,6 +82,7 @@ class FileRepositoryPort(Protocol):
         self, user_id: int, query: str, *, offset: int = 0, limit: int = 50,
         sort: FileSortKey = DEFAULT_FILE_SORT,
         order: FileSortOrder = DEFAULT_FILE_SORT_ORDER,
+        extensions: Sequence[str] | None = None,
     ) -> tuple[list[UserFileModel], int]:
         """Name-substring search across every folder the user owns."""
         ...
@@ -305,19 +309,21 @@ class FileService:
         self, user_id: int, folder_id: str | None = None, *, offset: int = 0, limit: int = 20,
         sort: FileSortKey = DEFAULT_FILE_SORT,
         order: FileSortOrder = DEFAULT_FILE_SORT_ORDER,
+        extensions: Sequence[str] | None = None,
     ) -> tuple[list[UserFileModel], int]:
         """List files inside a folder (or root). Validates folder ownership."""
         if folder_id is not None:
             await self.get_folder(user_id, folder_id)
         return await self._files.list_by_user(
             user_id, folder_id=folder_id, offset=offset, limit=limit,
-            sort=sort, order=order,
+            sort=sort, order=order, extensions=extensions,
         )
 
     async def list_all_files(
         self, user_id: int, *, offset: int = 0, limit: int = 20,
         sort: FileSortKey = DEFAULT_FILE_SORT,
         order: FileSortOrder = DEFAULT_FILE_SORT_ORDER,
+        extensions: Sequence[str] | None = None,
     ) -> tuple[list[UserFileModel], int]:
         """List a user's files across EVERY folder, ordered by the database.
 
@@ -326,15 +332,20 @@ class FileService:
         drive, so it needs this one — a filed-away document is still in the
         drive, and answering from the root alone would be a confident wrong
         answer rather than an incomplete one.
+
+        With ``extensions`` set this is also what makes "list my PDFs" correct:
+        every PDF the user owns, wherever it has been filed.
         """
         return await self._files.list_all_by_user(
             user_id, offset=offset, limit=limit, sort=sort, order=order,
+            extensions=extensions,
         )
 
     async def search_files(
         self, user_id: int, query: str, *, offset: int = 0, limit: int = 50,
         sort: FileSortKey = DEFAULT_FILE_SORT,
         order: FileSortOrder = DEFAULT_FILE_SORT_ORDER,
+        extensions: Sequence[str] | None = None,
     ) -> tuple[list[UserFileModel], int]:
         """Find a user's files by name substring, across every folder.
 
@@ -352,6 +363,7 @@ class FileService:
             return [], 0
         return await self._files.search_by_name(
             user_id, query, offset=offset, limit=limit, sort=sort, order=order,
+            extensions=extensions,
         )
 
     async def move_file(
