@@ -18,6 +18,23 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, runtime_checkable
 
 
+class LlmUnavailableError(RuntimeError):
+    """The provider could not serve this request, but may serve a later one.
+
+    Declared on the PORT rather than inside an adapter because the layer above
+    has to tell "the provider is busy, waiting will help" apart from "this
+    request is wrong, retrying never will" — and it must do that without
+    importing a transport. Adapters raise this once their own retries are
+    exhausted on a *transient* status (throttling, a brief 5xx); a permanent
+    failure (a malformed request, a rejected key) is a bug in the request and
+    is raised as the adapter's own hard-failure type instead.
+
+    The distinction is what lets the presentation layer answer with "the
+    assistant is busy, try again shortly" instead of a generic internal error —
+    a materially different thing to tell a user who is waiting on a document.
+    """
+
+
 @dataclass(frozen=True)
 class LlmToolCall:
     """One function call the model asked for.

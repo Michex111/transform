@@ -22,6 +22,7 @@ from src.application.dtos.assistant_dto import (
     AssistantToolEvent,
     DeletionOutcome,
 )
+from src.application.ports.llm_port import LlmUnavailableError
 from src.application.services.assistant_service import AssistantConversationNotFound
 from src.domain.assistant.exceptions.assistant_exceptions import (
     AssistantAttachmentLimitExceeded,
@@ -141,6 +142,25 @@ def test_error_frames_use_the_documented_codes() -> None:
     assert "INTERNAL_ERROR" in unknown
     # Internal detail is never echoed to the client.
     assert "boom" not in unknown
+
+
+def test_a_throttled_provider_is_reported_as_busy_not_broken() -> None:
+    """A spent rate limit is a transient condition, not an internal error.
+
+    "Try again shortly" is a materially different thing to tell someone who is
+    waiting on a document conversion than "an unexpected error occurred", and
+    the code lets the SPA treat it as retryable.
+    """
+    frame = _error_frame(LlmUnavailableError("429 rate limit ... org_abc ... upgrade"))
+
+    code, payload = _parse(frame)
+    assert code == "error"
+    assert payload["code"] == "AI_BUSY"
+    assert "try again" in payload["message"].lower()
+    # The provider body names the upstream org and carries an upsell link; none
+    # of that belongs in a user-facing message.
+    assert "org_abc" not in frame
+    assert "upgrade" not in frame.lower()
 
 
 # ---------------------------------------------------------------------------

@@ -353,6 +353,17 @@ class Settings(BaseSettings):
     # Document-reading limits for the assistant's file tools. The character
     # budget is what actually bounds the prompt; the byte budget is a cheaper,
     # earlier guard so a huge upload is refused before it is read into memory.
+    #
+    # ⚠️ THIS IS THE SETTING THAT DECIDES WHETHER A DOCUMENT READ FITS THE
+    # PROVIDER'S RATE LIMIT, and the two are easy to leave inconsistent.
+    # English is roughly 4 characters per token, so the default below is about
+    # 12,000 tokens — and a document-reading turn re-sends the whole prompt on
+    # every tool iteration (``AI_MAX_TOOL_ITERATIONS``). On a hosted tier whose
+    # tokens-per-minute budget is smaller than one prompt (Groq's on-demand
+    # free tier is 8,000 TPM), a single large read can NEVER succeed, however
+    # many times it is retried. The adapter retries a throttled request, so a
+    # brief overshoot recovers by itself; a budget below this value does not.
+    # Lower this to fit the plan's TPM, or raise the plan.
     AI_SUMMARY_MAX_INPUT_CHARS: int = 48000
     # Deployment ceiling on one document read, applied as
     # ``min(this, the tier's allowance)`` (see ``assistant_policy``). Keep it at

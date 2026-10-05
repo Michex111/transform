@@ -16,7 +16,12 @@ from collections.abc import Sequence
 import httpx
 import pytest
 
-from src.application.ports.llm_port import LlmMessage, LlmToolCall, LlmToolSpec
+from src.application.ports.llm_port import (
+    LlmMessage,
+    LlmToolCall,
+    LlmToolSpec,
+    LlmUnavailableError,
+)
 from src.infrastructure.adapters.ai.openai_llm_adapter import (
     LlmRequestError,
     OpenAiLlmAdapter,
@@ -222,6 +227,150 @@ def test_a_non_200_response_raises_with_the_status_and_body() -> None:
 
     with pytest.raises(LlmRequestError, match="401"):
         _stream(_adapter(handler), USER)
+
+
+# ---------------------------------------------------------------------------
+# Transient failures (throttling and brief 5xx)
+#
+# The reported failure this exists for: a document-reading turn re-sends the
+# whole prompt on every tool iteration, so it can cross a provider's
+# tokens-per-minute budget that a single request would have fitted inside.
+# Groq answers 429 with a `Retry-After`, and failing the turn outright when a
+# few seconds of waiting would fix it is the wrong trade.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def slept(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Record the adapter's retry sleeps instead of performing them.
+
+    Two reasons this is not a real ``sleep``: the suite must not take seconds
+    per case, and the *duration* is part of the contract under test (a
+    provider's ``Retry-After`` must be honoured, a wild one must be capped).
+    """
+    recorded: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        recorded.append(seconds)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    return recorded
+
+
+def _throttle_then_ok(calls: dict[str, int], **throttle_kwargs: object):
+    """A handler that throttles on the first call and streams on the second."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(429, json={"error": {"message": "rate"}}, **throttle_kwargs)  # type: ignore[arg-type]
+        return httpx.Response(200, content=_sse(_delta("ok"), "[DONE]"))
+
+    return handler
+
+
+def test_a_throttled_completion_is_retried_and_then_succeeds(slept: list[float]) -> None:
+    calls = {"n": 0}
+
+    chunks = _stream(_adapter(_throttle_then_ok(calls)), USER)
+
+    assert calls["n"] == 2
+    assert "".join(chunk.text for chunk in chunks) == "ok"
+    assert chunks[-1].kind == "done"
+    # Our own backoff, because this response sent no `Retry-After`.
+    assert slept == [2.0]
+
+
+def test_the_providers_retry_after_is_honoured(slept: list[float]) -> None:
+    """The provider knows when its window resets; guessing shorter burns an attempt."""
+    calls = {"n": 0}
+
+    _stream(_adapter(_throttle_then_ok(calls, headers={"retry-after": "7"})), USER)
+
+    assert slept == [7.0]
+
+
+def test_a_server_error_is_retried_too(slept: list[float]) -> None:
+    """A brief 5xx is a property of the moment, exactly like a 429."""
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(503, text="unavailable")
+        return httpx.Response(200, content=_sse(_delta("ok"), "[DONE]"))
+
+    chunks = _stream(_adapter(handler), USER)
+
+    assert calls["n"] == 2
+    assert "".join(chunk.text for chunk in chunks) == "ok"
+
+
+def test_a_permanent_client_error_is_never_retried(slept: list[float]) -> None:
+    """A request we built wrong will be wrong again — retrying only adds latency."""
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(400, json={"error": {"message": "bad model"}})
+
+    with pytest.raises(LlmRequestError, match="400"):
+        _stream(_adapter(handler), USER)
+
+    assert calls["n"] == 1
+    assert slept == []
+
+
+def test_exhausted_retries_surface_as_transient_not_a_hard_failure(
+    slept: list[float],
+) -> None:
+    """Out of attempts is still "busy", not "broken".
+
+    The caller did nothing wrong, so the presentation layer must be able to say
+    "try again shortly" rather than "an unexpected error occurred".
+    """
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(429, json={"error": {"message": "rate"}})
+
+    with pytest.raises(LlmUnavailableError):
+        _stream(_adapter(handler), USER)
+
+    assert calls["n"] == 3  # every attempt was used
+
+
+def test_a_huge_retry_after_cannot_park_the_request(slept: list[float]) -> None:
+    """A provider may say "come back in an hour"; a request worker may not wait."""
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(
+            429, json={"error": {"message": "rate"}}, headers={"retry-after": "3600"}
+        )
+
+    with pytest.raises(LlmUnavailableError):
+        _stream(_adapter(handler), USER)
+
+    assert max(slept) <= 15.0, slept
+    assert sum(slept) <= 20.0, slept
+
+
+def test_a_retry_emits_nothing_before_it_succeeds(slept: list[float]) -> None:
+    """The retry must not append a second answer to a stream already read.
+
+    Nothing is yielded until a successful response starts streaming, so a
+    caller that reads this iterator sees exactly one turn — the reason the
+    retry is confined to the pre-stream status check.
+    """
+    calls = {"n": 0}
+
+    chunks = _stream(_adapter(_throttle_then_ok(calls)), USER)
+
+    assert [chunk.kind for chunk in chunks] == ["text", "done"]
+    assert chunks[0].text == "ok"
 
 
 # ---------------------------------------------------------------------------

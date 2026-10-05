@@ -20,6 +20,7 @@ explicitly here:
   decoding at the end is the only correct way to read it.
 """
 
+import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator, Sequence
@@ -33,6 +34,7 @@ from src.application.ports.llm_port import (
     LlmStreamChunk,
     LlmToolCall,
     LlmToolSpec,
+    LlmUnavailableError,
 )
 
 logger = logging.getLogger(__name__)
@@ -40,6 +42,25 @@ logger = logging.getLogger(__name__)
 #: A provider error body can be large and may echo request context; only a short
 #: prefix is kept for the error message, and never the API key.
 _MAX_ERROR_BODY_CHARS = 300
+
+#: How many times one completion is attempted in total (so 2 retries). Small on
+#: purpose: this sits inside a streaming request the user is waiting on, and a
+#: long retry chain is indistinguishable from a hang.
+_MAX_ATTEMPTS = 3
+
+#: Backoff between attempts, used when the provider sends no ``Retry-After``.
+#: The last value repeats if more attempts are ever configured.
+_RETRY_BACKOFF_SECONDS = (2.0, 8.0)
+
+#: Upper bound on the wait before ONE attempt, including a provider-supplied
+#: ``Retry-After``. A provider is entitled to say "come back in an hour"; a
+#: request worker is not entitled to wait for it.
+_MAX_RETRY_WAIT_SECONDS = 15.0
+
+#: Upper bound on time spent sleeping across ALL attempts of one completion.
+#: Bounds the worst case a user can be made to wait before the error surfaces,
+#: which matters because this is a synchronous streaming request.
+_TOTAL_RETRY_BUDGET_SECONDS = 20.0
 
 
 class LlmRequestError(RuntimeError):
@@ -125,54 +146,119 @@ class OpenAiLlmAdapter:
         messages: Sequence[LlmMessage],
         tools: Sequence[LlmToolSpec],
     ) -> AsyncIterator[LlmStreamChunk]:
-        """Stream one completion, emitting text deltas then the assembled result."""
+        """Stream one completion, emitting text deltas then the assembled result.
+
+        A *transient* provider failure is retried, because the common one is
+        throttling: a document-reading turn re-sends the whole prompt on every
+        tool iteration, so it can cross a tokens-per-minute budget that a
+        single request would have fitted inside. The provider usually says how
+        long to wait, and waiting is far better than failing a conversion the
+        user just asked for.
+
+        Retrying is only safe because it happens strictly *before the first
+        yield* — the status is checked as soon as the response opens, so a
+        failed attempt has emitted nothing and a repeat cannot duplicate text
+        into the caller's stream. Once the body starts streaming, a mid-stream
+        failure is NOT retried: by then the caller has already seen deltas, and
+        replaying the turn would append a second answer to the first.
+        """
         payload = self._build_payload(messages, tools)
+        slept = 0.0
+
+        for attempt in range(1, _MAX_ATTEMPTS + 1):
+            async with self._client.stream(
+                "POST", "/chat/completions", json=payload
+            ) as response:
+                if response.status_code == 200:
+                    async for chunk in self._read_stream(response):
+                        yield chunk
+                    return
+
+                body = (await response.aread()).decode("utf-8", errors="replace")
+                message = (
+                    f"Assistant model request failed with HTTP {response.status_code}: "
+                    f"{body[:_MAX_ERROR_BODY_CHARS]}"
+                )
+                if not _is_retryable_status(response.status_code):
+                    # A request we built wrong will be wrong again.
+                    raise LlmRequestError(message)
+
+                delay = _retry_delay_seconds(response, attempt)
+                is_last = attempt == _MAX_ATTEMPTS
+                if is_last or slept + delay > _TOTAL_RETRY_BUDGET_SECONDS:
+                    # Out of attempts, or the next wait would exceed the total
+                    # budget. Surface it as *transient* — the caller did nothing
+                    # wrong, and the honest answer is "busy, try again" rather
+                    # than an internal error.
+                    logger.warning(
+                        "Assistant model still failing after %d attempt(s) (HTTP %s, "
+                        "waited %.1fs)",
+                        attempt,
+                        response.status_code,
+                        slept,
+                    )
+                    raise LlmUnavailableError(message) from None
+
+                logger.warning(
+                    "Assistant model returned HTTP %s; retrying in %.1fs (attempt %d/%d)",
+                    response.status_code,
+                    delay,
+                    attempt,
+                    _MAX_ATTEMPTS,
+                )
+
+            # Outside the response context: the failed connection is released
+            # before we sleep, so a retry does not hold it open.
+            await asyncio.sleep(delay)
+            slept += delay
+
+        # Unreachable: the loop either returns or raises on its final attempt.
+        # Present so the function is total and the failure is explicit if the
+        # attempt accounting is ever changed.
+        raise LlmUnavailableError(
+            "Assistant model request failed after all retries"
+        ) from None
+
+    async def _read_stream(self, response: httpx.Response) -> AsyncIterator[LlmStreamChunk]:
+        """Decode one successful SSE response into chunks."""
         content = ""
         finish_reason: str | None = None
         # index -> partial tool call. Fragments for one call can be split across
         # any number of chunks, so they are merged by index as they arrive.
         partials: dict[int, dict[str, str]] = {}
 
-        async with self._client.stream("POST", "/chat/completions", json=payload) as response:
-            if response.status_code != 200:
-                body = (await response.aread()).decode("utf-8", errors="replace")
-                raise LlmRequestError(
-                    f"Assistant model request failed with HTTP {response.status_code}: "
-                    f"{body[:_MAX_ERROR_BODY_CHARS]}"
-                )
+        async for line in response.aiter_lines():
+            data = _sse_payload(line)
+            if data is None:
+                continue
+            if data == "[DONE]":
+                break
+            try:
+                chunk: Any = json.loads(data)
+            except ValueError:
+                # A truncated or non-JSON keep-alive line: skip it rather
+                # than killing an otherwise healthy stream.
+                continue
+            if not isinstance(chunk, dict):
+                continue
 
-            async for line in response.aiter_lines():
-                data = _sse_payload(line)
-                if data is None:
-                    continue
-                if data == "[DONE]":
-                    break
-                try:
-                    chunk: Any = json.loads(data)
-                except ValueError:
-                    # A truncated or non-JSON keep-alive line: skip it rather
-                    # than killing an otherwise healthy stream.
-                    continue
-                if not isinstance(chunk, dict):
-                    continue
+            choices = chunk.get("choices")
+            if not isinstance(choices, list) or not choices:
+                continue
+            choice = choices[0]
+            if not isinstance(choice, dict):
+                continue
+            if isinstance(choice.get("finish_reason"), str):
+                finish_reason = choice["finish_reason"]
 
-                choices = chunk.get("choices")
-                if not isinstance(choices, list) or not choices:
-                    continue
-                choice = choices[0]
-                if not isinstance(choice, dict):
-                    continue
-                if isinstance(choice.get("finish_reason"), str):
-                    finish_reason = choice["finish_reason"]
-
-                delta = choice.get("delta")
-                if not isinstance(delta, dict):
-                    continue
-                text = delta.get("content")
-                if isinstance(text, str) and text:
-                    content += text
-                    yield LlmStreamChunk(kind="text", text=text)
-                _accumulate_tool_calls(delta.get("tool_calls"), partials)
+            delta = choice.get("delta")
+            if not isinstance(delta, dict):
+                continue
+            text = delta.get("content")
+            if isinstance(text, str) and text:
+                content += text
+                yield LlmStreamChunk(kind="text", text=text)
+            _accumulate_tool_calls(delta.get("tool_calls"), partials)
 
         response_obj = LlmResponse(
             content=content,
@@ -182,6 +268,48 @@ class OpenAiLlmAdapter:
             finish_reason=finish_reason,
         )
         yield LlmStreamChunk(kind="done", response=response_obj)
+
+
+def _is_retryable_status(status_code: int) -> bool:
+    """Whether repeating the same request has any chance of succeeding.
+
+    429 is the provider throttling this deployment and 5xx is the provider
+    briefly unhealthy — both are properties of the *moment*, so the identical
+    request can succeed shortly. Every other 4xx (a malformed request, a
+    rejected key, an unknown model) is a property of the request itself, and
+    repeating it only multiplies the failure and the latency.
+    """
+    return status_code == 429 or status_code >= 500
+
+
+def _parse_retry_after(raw: str | None) -> float | None:
+    """``Retry-After`` in seconds, or None when absent/unusable.
+
+    Only the delay-seconds form is read. The HTTP-date form is legal but no
+    OpenAI-compatible provider is known to send it, and acting on a
+    clock-skewed date would be worse than falling back to our own backoff.
+    """
+    if raw is None:
+        return None
+    try:
+        seconds = float(raw.strip())
+    except (TypeError, ValueError):
+        return None
+    return seconds if seconds >= 0 else None
+
+
+def _retry_delay_seconds(response: httpx.Response, attempt: int) -> float:
+    """How long to wait before the next attempt.
+
+    The provider's own ``Retry-After`` wins when it sends one — it knows when
+    its accounting window resets, and guessing shorter just burns an attempt.
+    Otherwise our own bounded exponential schedule is used.
+    """
+    retry_after = _parse_retry_after(response.headers.get("retry-after"))
+    if retry_after is not None:
+        return min(retry_after, _MAX_RETRY_WAIT_SECONDS)
+    index = min(attempt - 1, len(_RETRY_BACKOFF_SECONDS) - 1)
+    return _RETRY_BACKOFF_SECONDS[index]
 
 
 def _sse_payload(line: str) -> str | None:

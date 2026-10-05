@@ -36,6 +36,7 @@ from src.application.dtos.assistant_dto import (
 from src.application.exceptions.file_system_exceptions import FileSystemError
 from src.application.ports.assistant_model_port import AssistantModelResolver
 from src.application.ports.assistant_repository_port import AssistantQuotaPort
+from src.application.ports.llm_port import LlmUnavailableError
 from src.application.services.assistant_service import (
     AssistantConversationNotFound,
     AssistantService,
@@ -173,6 +174,21 @@ def _error_frame(exc: BaseException) -> str:
         return _frame("error", {"code": "AI_NOT_AVAILABLE_FOR_TIER", "message": str(exc)})
     if isinstance(exc, AssistantQuotaExceeded):
         return _frame("error", {"code": "QUOTA_EXCEEDED", "message": str(exc)})
+    if isinstance(exc, LlmUnavailableError):
+        # The provider is throttling or briefly failing and our own retries are
+        # spent. Deliberately NOT logged as an error with a traceback: nothing
+        # is broken here, and the raw provider body (which names the upstream
+        # org and an upsell URL) must not reach the user either way.
+        logger.warning("Assistant provider temporarily unavailable: %s", exc)
+        return _frame(
+            "error",
+            {
+                "code": "AI_BUSY",
+                "message": (
+                    "The assistant is busy right now. Please try again in a moment."
+                ),
+            },
+        )
     logger.error("Assistant stream failed", exc_info=exc)
     return _frame(
         "error",
@@ -358,6 +374,18 @@ async def chat(
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail={"code": "QUOTA_EXCEEDED", "message": str(exc)},
+        ) from exc
+    except LlmUnavailableError as exc:
+        # Same transient condition as the in-stream case, caught here because a
+        # failure before the first event can still be answered with a status.
+        # 503, not 500: the request was fine and retrying is the right response.
+        logger.warning("Assistant provider temporarily unavailable: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "AI_BUSY",
+                "message": "The assistant is busy right now. Please try again in a moment.",
+            },
         ) from exc
     except Exception as exc:
         logger.exception("Assistant chat failed before streaming")
