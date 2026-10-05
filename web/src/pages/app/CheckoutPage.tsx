@@ -533,7 +533,15 @@ export function CheckoutPage() {
                   <summary className="cursor-pointer text-sm text-muted transition-colors hover:text-on-background">
                     Have a promo code?
                   </summary>
-                  <form onSubmit={applyPromo} className="mt-3 flex gap-2">
+                  {/* `items-center` because the two controls are deliberately
+                      different heights: the field is `h-10` while a `size="sm"`
+                      button is `h-8`. A flex row defaults to `stretch`, and
+                      stretch does NOT resize an item that already has a definite
+                      height, so the button stayed at the top of the row and read
+                      as misaligned (4px above the field's centre). Centring is
+                      the intent; matching the heights would be a different look
+                      (both `h-10`), not what this row is going for. */}
+                  <form onSubmit={applyPromo} className="mt-3 flex items-center gap-2">
                     <input
                       type="text"
                       value={promoDraft}
