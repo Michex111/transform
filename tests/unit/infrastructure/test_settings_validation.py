@@ -425,6 +425,48 @@ def test_explicit_openai_without_a_key_is_a_startup_error() -> None:
         _settings(AI_BACKEND="openai", AI_API_KEY=None).validate_settings()
 
 
+def test_explicit_gemini_without_a_key_is_a_startup_error() -> None:
+    with pytest.raises(RuntimeError, match="AI_API_KEY"):
+        _settings(AI_BACKEND="gemini", AI_API_KEY=None).validate_settings()
+    # An empty key is "unconfigured" too (a copied .env.example).
+    with pytest.raises(RuntimeError, match="AI_API_KEY"):
+        _settings(AI_BACKEND="gemini", AI_API_KEY="").validate_settings()
+
+
+def test_gemini_uses_the_gemini_base_url_not_ai_base_url() -> None:
+    """A Gemini key must never be sent to api.openai.com.
+
+    AI_BASE_URL keeps its OpenAI default; the gemini backend must resolve to
+    AI_GEMINI_BASE_URL instead.
+    """
+    settings = _settings(AI_BACKEND="gemini", AI_API_KEY="AIza-test")
+
+    settings.validate_settings()  # must not raise
+    assert settings._resolve_ai_backend() == "gemini"
+    assert settings.ai_base_url() == "https://generativelanguage.googleapis.com/v1beta/openai"
+
+
+def test_gemini_base_url_must_be_an_http_url() -> None:
+    with pytest.raises(RuntimeError, match="AI_GEMINI_BASE_URL"):
+        _settings(
+            AI_BACKEND="gemini",
+            AI_API_KEY="AIza-test",
+            AI_GEMINI_BASE_URL="generativelanguage.googleapis.com/v1beta/openai",
+        ).validate_settings()
+
+
+def test_auto_never_resolves_to_gemini() -> None:
+    """``auto`` cannot detect the vendor, so a bare key stays on the generic transport."""
+    assert _settings(AI_BACKEND="auto", AI_API_KEY="AIza-test")._resolve_ai_backend() == "openai"
+
+
+def test_the_gemini_base_url_default_points_at_google() -> None:
+    assert (
+        Settings.model_fields["AI_GEMINI_BASE_URL"].default
+        == "https://generativelanguage.googleapis.com/v1beta/openai"
+    )
+
+
 def test_unknown_ai_backend_is_rejected() -> None:
     with pytest.raises(ValueError, match="Unsupported AI_BACKEND"):
         _settings(AI_BACKEND="anthropic").validate_settings()

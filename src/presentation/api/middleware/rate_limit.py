@@ -164,7 +164,14 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         # Only rate-limit API routes. The SPA (index.html, /assets/*) is served
         # by this app and must not consume the client's API budget.
-        if not request.url.path.startswith("/api/"):
+        #
+        # The MCP transport is included: it is entirely machine-facing, so
+        # without a limit a single agent (or a runaway retry loop) could drive
+        # unbounded conversion work. Requests there carry a Bearer token, so
+        # `_resolve_limit` keys them by token hash under the authenticated
+        # budget rather than the anonymous per-IP one.
+        path = request.url.path
+        if not (path.startswith("/api/") or path == "/mcp" or path.startswith("/mcp/")):
             return await call_next(request)
 
         key, limit = self._resolve_limit(request)

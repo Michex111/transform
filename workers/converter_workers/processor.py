@@ -359,6 +359,7 @@ async def process_job(context: WorkerContext, job: ConversionJob) -> None:
                         "Conversion credits exhausted. Upgrade your plan or purchase more credits."
                     )
                     _mark_failed(job, error_message)
+                    job.progress = 100
                     await _persist(terminal=True)
                     # Terminal, permanent state — do NOT retry. Return normally so the
                     # worker acks the message instead of re-queueing it.
@@ -389,6 +390,11 @@ async def process_job(context: WorkerContext, job: ConversionJob) -> None:
             # Download the input file (decrypting it first when at-rest
             # encryption is enabled)
             await context.event_port.publish(**event.downloading().to_dict())
+            # Mirror the phase onto the row and persist it, so a client that
+            # reconnects (or reloads a chat) can draw the real bar immediately
+            # instead of waiting for the SSE stream to replay these events.
+            job.progress = event.progress
+            await _persist()
             plain_input = await _download_input_file(context, job, input_file)
 
             # Resolve the output name now that the input is on disk: a converter
@@ -405,6 +411,8 @@ async def process_job(context: WorkerContext, job: ConversionJob) -> None:
 
             # Perform the conversion — measure actual compute time
             await context.event_port.publish(**event.processing().to_dict())
+            job.progress = event.progress
+            await _persist()
             compute_duration_ms = await _convert_file(context, job, plain_input, output_file)
 
             # Calculate credits from actual compute time (tier-aware discount)
@@ -429,6 +437,8 @@ async def process_job(context: WorkerContext, job: ConversionJob) -> None:
 
             # Upload the output file
             await context.event_port.publish(**event.uploading().to_dict())
+            job.progress = event.progress
+            await _persist()
             output_dest = await _upload_output_file(context, job, output_file)
 
             # Update job status to COMPLETED
@@ -468,13 +478,17 @@ async def process_job(context: WorkerContext, job: ConversionJob) -> None:
             # "completed" in the stream but still has no output_file persisted.
             # Previously the event was published first, causing a race where the
             # History/Queue/guest download could show "Ready" but fail to find a
-            # downloadable output until a refresh.
+            # a downloadable output until a refresh.
+            job.progress = 100
             await _persist(terminal=True)
             await context.event_port.publish(**completed_fields)
 
     except Exception as e:
         error_message = str(e)
         _mark_failed(job, error_message)
+        # Keep how far it got, so a reloaded card shows where the job stopped
+        # rather than falling back to an indeterminate sweep.
+        job.progress = event.progress
         await _persist(terminal=True)
         await context.event_port.publish(**event.failed(error_message).to_dict())
         raise RuntimeError(error_message)

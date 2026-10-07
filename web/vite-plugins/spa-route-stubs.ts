@@ -63,6 +63,10 @@ export const SPA_ROUTES = [
   "/app/checkout",
   "/app/settings",
   "/app/support",
+  // The OAuth consent screen. An AI application redirects the browser here, so
+  // it is always a HARD load — without a stub the connection attempt 404s at
+  // the CDN before the SPA ever boots.
+  "/app/authorize",
 ] as const;
 
 /**

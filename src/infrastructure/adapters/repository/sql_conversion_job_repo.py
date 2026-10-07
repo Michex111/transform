@@ -37,6 +37,7 @@ class SQLConversionJobRepository:
             credits_used=job_data.credits_used,
             input_size_bytes=job_data.input_size_bytes,
             output_size_bytes=job_data.output_size_bytes,
+            progress=job_data.progress,
             data_key_wrapped=job_data.data_key_wrapped,
             client_encrypted=job_data.client_encrypted,
             # Stored as the enum's plain string value. The column is a
@@ -64,6 +65,7 @@ class SQLConversionJobRepository:
                 credits_used=job.credits_used,
                 input_size_bytes=job.input_size_bytes,
                 output_size_bytes=job.output_size_bytes,
+                progress=job.progress,
                 data_key_wrapped=job.data_key_wrapped,
                 client_encrypted=job.client_encrypted,
                 updated_at=datetime.now(UTC),
@@ -459,6 +461,7 @@ class SQLConversionJobRepository:
             created_at=job_model.created_at,
             input_size_bytes=job_model.input_size_bytes,
             output_size_bytes=job_model.output_size_bytes,
+            progress=job_model.progress,
             # Defensive: a row written before 0021 defaults to WEB server-side,
             # but any unrecognised value still degrades to WEB rather than
             # raising on a history read.

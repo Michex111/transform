@@ -42,11 +42,19 @@ class LlmToolCall:
     ``arguments`` is already-decoded JSON. Providers stream the arguments as a
     JSON *string* in fragments; decoding is the adapter's job so the
     application never has to reason about half-parsed JSON.
+
+    ``thought_signature`` is an opaque, provider-issued token that must be
+    replayed verbatim with the call on the next request. Google's Gemini models
+    attach one to every function call and reject a follow-up turn that omits it
+    ("Function call is missing a thought_signature"). It is meaningless to
+    providers that do not use it, so it stays ``None``/absent there and the
+    application simply carries the value back and forth without reading it.
     """
 
     id: str
     name: str
     arguments: dict[str, Any] = field(default_factory=dict)
+    thought_signature: str | None = None
 
 
 @dataclass(frozen=True)

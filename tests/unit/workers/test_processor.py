@@ -419,6 +419,52 @@ def test_process_job_publishes_expected_event_sequence(
     assert [event["progress"] for event in fake_event_publisher.published_events] == [25, 50, 75, 100]
 
 
+def test_process_job_persists_progress_at_each_phase(
+    conversion_job,
+    fake_storage_port,
+    fake_queue_port,
+    fake_event_publisher,
+    fake_converter_registry,
+) -> None:
+    """The job row's ``progress`` must follow the phases.
+
+    Persisted progress is what lets a reloaded chat (or a client whose SSE
+    stream never delivered) draw the real bar instead of an indeterminate
+    sweep, so it must be written, not just published.
+    """
+
+    class RecordingRepository(FakeDatabaseRepository):
+        def __init__(self) -> None:
+            super().__init__()
+            self.progress_writes: list[int] = []
+
+        async def update_conversion_job(self, job: ConversionJob) -> None:
+            self.progress_writes.append(job.progress)
+            await super().update_conversion_job(job)
+
+    @fake_converter_registry.register(conversion_job.conversion)
+    def converter(input_path: str, output_path: str) -> None:
+        text = Path(input_path).read_text(encoding="utf-8")
+        Path(output_path).write_text(text.upper(), encoding="utf-8")
+
+    repository = RecordingRepository()
+    context = WorkerContext(
+        storage_port=fake_storage_port,
+        queue_port=fake_queue_port,
+        event_port=fake_event_publisher,
+        converter_registry=fake_converter_registry,
+        job_repository=repository,
+        worker_name="processor-test",
+    )
+
+    conversion_job.pending_processing()
+    asyncio.run(process_job(context, conversion_job))
+
+    # 0 at "started", then one write per phase, then the terminal write.
+    assert repository.progress_writes == [0, 25, 50, 75, 100]
+    assert conversion_job.progress == 100
+
+
 def test_process_job_cleans_up_temporary_download_path(
     conversion_job,
     fake_storage_port,

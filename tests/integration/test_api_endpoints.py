@@ -302,6 +302,42 @@ def test_conversion_history_endpoint_defaults_file_sizes_to_zero() -> None:
     assert row["output_size_bytes"] == 0
 
 
+def test_conversion_history_endpoint_reports_worker_progress() -> None:
+    """The persisted progress is returned with the job.
+
+    This is what lets a reloaded AI chat (or any client that reconnects) draw a
+    real progress bar immediately, instead of an indeterminate sweep until — and
+    unless — the SSE stream replays the job's events.
+    """
+    with create_test_client() as client:
+        client.post(
+            "/api/conversions/jobs",
+            json={"source_format": "pdf", "target_format": "docx", "input_key": "uploads/a.pdf"},
+        )
+        conversion_service = client.app.state.fake_conversion_service  # type: ignore
+        conversion_service.created_jobs[0].progress = 50
+
+        response = client.get("/api/conversions/history")
+
+    assert response.status_code == 200
+    row = response.json()["jobs"][0]
+    assert row["progress"] == 50
+
+
+def test_conversion_history_endpoint_defaults_progress_to_zero() -> None:
+    """A job the worker has not touched reports 0 = "not started", which the SPA
+    renders as an indeterminate bar rather than a frozen empty one."""
+    with create_test_client() as client:
+        client.post(
+            "/api/conversions/jobs",
+            json={"source_format": "pdf", "target_format": "docx", "input_key": "uploads/a.pdf"},
+        )
+        response = client.get("/api/conversions/history")
+
+    assert response.status_code == 200
+    assert response.json()["jobs"][0]["progress"] == 0
+
+
 def test_conversion_history_endpoint_reports_when_the_job_was_created() -> None:
     """History must carry when a conversion happened.
 

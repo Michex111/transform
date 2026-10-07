@@ -24,7 +24,7 @@ from src.application.dtos.assistant_dto import (
 )
 from src.application.exceptions.file_system_exceptions import FileRecordNotFoundError
 from src.application.ports.document_text_port import ExtractedDocument
-from src.application.ports.llm_port import LlmMessage, LlmToolCall, LlmToolSpec
+from src.application.ports.llm_port import LlmMessage, LlmResponse, LlmToolCall, LlmToolSpec
 from src.application.services.assistant_service import (
     AssistantService,
     build_bounded_history,
@@ -700,6 +700,55 @@ def test_tool_call_round_trip_records_both_sides_of_the_pair() -> None:
     assert llm.calls[1][0][-1].role == "tool"
 
 
+def test_a_tool_call_thought_signature_survives_storage_and_replay() -> None:
+    """Gemini's per-call signature must persist and be replayed verbatim.
+
+    The assistant replays history from storage on every turn and Gemini rejects
+    a function call whose signature is missing, so a signature that is written
+    but not read back (or vice versa) breaks the *following* turn — not the one
+    that produced it, which is what makes the omission easy to miss.
+    """
+    toolbox = ScriptedToolBox({"list_files": {"files": [], "count": 0}})
+    llm = FakeLlmPort(
+        [
+            LlmResponse(
+                content="",
+                tool_calls=(
+                    LlmToolCall(
+                        id="call_list_files",
+                        name="list_files",
+                        arguments={},
+                        thought_signature="sig-123",
+                    ),
+                ),
+                finish_reason="tool_calls",
+            ),
+            text_response("Found it."),
+        ]
+    )
+    conversations = FakeConversationRepository()
+    _chat(_service(llm=llm, toolbox=toolbox, conversations=conversations))
+
+    stored = conversations.messages["conv-1"][1]
+    assert stored.meta is not None
+    assert stored.meta["tool_calls"][0]["thought_signature"] == "sig-123"
+    # Replayed to the model on the next round-trip, inside the same turn.
+    replayed = next(m for m in llm.calls[1][0] if m.role == "assistant")
+    assert replayed.tool_calls[0].thought_signature == "sig-123"
+
+
+def test_a_tool_call_without_a_signature_stores_no_signature_key() -> None:
+    """A non-Gemini transcript keeps the exact metadata shape it always had."""
+    toolbox = ScriptedToolBox({"list_files": {"files": [], "count": 0}})
+    llm = FakeLlmPort([tool_response("list_files", {}), text_response("Done.")])
+    conversations = FakeConversationRepository()
+    _chat(_service(llm=llm, toolbox=toolbox, conversations=conversations))
+
+    stored = conversations.messages["conv-1"][1]
+    assert stored.meta is not None
+    assert "thought_signature" not in stored.meta["tool_calls"][0]
+
+
 def test_tool_failures_are_passed_back_to_the_model() -> None:
     toolbox = ScriptedToolBox({"list_files": {"error": "no such folder"}})
     llm = FakeLlmPort(
@@ -847,6 +896,42 @@ def test_bounded_history_ignores_extra_tool_meta_keys() -> None:
         Message(id="a2", conversation_id="c", position=0, role=MessageRole.ASSISTANT, content="done"),
     ]
     assert build_bounded_history(rich, 10) == build_bounded_history(plain, 10)
+
+
+def test_bounded_history_rehydrates_a_stored_thought_signature() -> None:
+    """A signature persisted on a tool call must reach the replayed history.
+
+    Gemini rejects a follow-up turn whose function call lacks its signature, and
+    history is replayed from storage on every new turn — so the signature has to
+    be read back, not merely written.
+    """
+    assistant = Message(
+        id="a1",
+        conversation_id="c",
+        position=0,
+        role=MessageRole.ASSISTANT,
+        content="",
+        meta={
+            "tool_calls": [
+                {
+                    "id": "c1",
+                    "name": "list_files",
+                    "arguments": {},
+                    "thought_signature": "sig-123",
+                }
+            ]
+        },
+    )
+    history = build_bounded_history([assistant, _tool_message("t1", "c1")], 10)
+    assert history[0].tool_calls[0].thought_signature == "sig-123"
+
+
+def test_bounded_history_tolerates_a_tool_call_without_a_signature() -> None:
+    """A transcript recorded against a non-Gemini provider reads back cleanly."""
+    history = build_bounded_history(
+        [_assistant_with_calls("a1", "c1"), _tool_message("t1", "c1")], 10
+    )
+    assert history[0].tool_calls[0].thought_signature is None
 
 
 def test_bounded_history_drops_an_unanswered_tool_request() -> None:

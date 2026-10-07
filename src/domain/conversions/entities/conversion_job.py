@@ -41,6 +41,13 @@ class ConversionJob:
     # nothing that already had a position moves. ``WEB`` is the pre-existing
     # behaviour, so every caller that does not know about origin is unchanged.
     origin: JobOrigin = JobOrigin.WEB
+    # How far the worker has got, as a percentage (0/25/50/75/100). Persisted so
+    # that a client which reconnects — or opens a historical chat — can render
+    # the real bar immediately, instead of showing an indeterminate sweep until
+    # (and unless) the SSE stream replays the job's events. 0 means "not started
+    # or not reported", which the UI shows as indeterminate rather than as an
+    # empty 0% bar.
+    progress: int = 0
 
     def pending_processing(self):
         if self.status != JobStatus.AWAITING_UPLOAD:

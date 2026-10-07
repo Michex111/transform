@@ -30,6 +30,9 @@ import type {
   AssistantAttachment,
   AssistantConversation,
   AssistantConversationDetailResponse,
+  ConnectedAppListResponse,
+  McpConsentApprovalResponse,
+  McpConsentRequestResponse,
   AssistantConversationListResponse,
   AssistantMessage,
   AssistantMessageRole,
@@ -67,6 +70,7 @@ import type {
   HistoryDeleteRange,
   InvoiceListResponse,
   InvoiceResponse,
+  JobProgressEvent,
   PaymentMethodListResponse,
   PaymentMethodSessionResponse,
   PhoneVerificationStatusResponse,
@@ -89,6 +93,7 @@ import type {
 } from "./types"
 import { ASSISTANT_INTERNAL_ERROR, HISTORY_DELETE_RANGES } from "./types"
 import { MAX_ASSISTANT_ATTACHMENTS } from "@/lib/assistantAttachments"
+import { asNumeric } from "@/lib/progress"
 
 /* ------------------------------------------------------------------ *
  * Primitives
@@ -379,6 +384,10 @@ export function normalizeConversionMap(value: unknown): ConversionMapResponse {
 
 export function normalizeConversionJob(value: unknown): ConversionJobResponse {
   const o = asObject(value)
+  // `0` means the worker has not reported yet. Leaving it undefined keeps the
+  // bar indeterminate (moving) for a queued job instead of drawing a frozen
+  // empty 0% bar; any real value (25+) renders determinate.
+  const progress = asNumeric(o.progress)
   return {
     job_id: asString(o.job_id),
     status: asString(o.status),
@@ -393,6 +402,7 @@ export function normalizeConversionJob(value: unknown): ConversionJobResponse {
     compute_duration_ms: asNumber(o.compute_duration_ms),
     input_size_bytes: asNumber(o.input_size_bytes),
     output_size_bytes: asNumber(o.output_size_bytes),
+    progress: progress !== null && progress > 0 ? progress : undefined,
     created_at: asNullableString(o.created_at),
     data_key_wrapped: asNullableString(o.data_key_wrapped),
     client_encrypted: asBoolean(o.client_encrypted),
@@ -419,6 +429,49 @@ export function normalizeGuestJob(value: unknown): GuestJobResponse {
     ...normalizeConversionJob(value),
     guest_token: asString(asObject(value).guest_token),
   }
+}
+
+/**
+ * Normalise one `progress` frame from a job's SSE stream.
+ *
+ * The frame is JSON, but it has crossed Redis, which stores every stream field
+ * as a string — so `progress` can arrive as `"25"` where the type says
+ * `number`. Reading that verbatim made `jobProgress()` treat it as "no value"
+ * and the bar render as an indeterminate sweep instead of tracking the job. The
+ * API now types the frame, but the SPA and the API deploy independently, so the
+ * coercion is repeated here for an older API that still stringifies.
+ *
+ * Optional fields are set only when present and parseable, so "the server did
+ * not measure this" stays absent rather than becoming a fabricated `0` (which
+ * the detail panel reads as a real zero-byte size).
+ */
+export function normalizeJobProgressEvent(value: unknown): JobProgressEvent {
+  const o = asObject(value)
+  const event: JobProgressEvent = {
+    job_id: asString(o.job_id),
+    status: asString(o.status),
+    output_file: asNullableString(o.output_file),
+  }
+
+  const progress = asNumeric(o.progress)
+  if (progress !== null) event.progress = progress
+
+  const message = asNullableString(o.message)
+  if (message !== null) event.message = message
+
+  const compute = asNumeric(o.compute_duration_ms)
+  if (compute !== null) event.compute_duration_ms = compute
+
+  const credits = asNumeric(o.credits_used)
+  if (credits !== null) event.credits_used = credits
+
+  const inputSize = asNumeric(o.input_size_bytes)
+  if (inputSize !== null) event.input_size_bytes = inputSize
+
+  const outputSize = asNumeric(o.output_size_bytes)
+  if (outputSize !== null) event.output_size_bytes = outputSize
+
+  return event
 }
 
 /* ------------------------------------------------------------------ *
@@ -939,7 +992,9 @@ function asNullableRecord(value: unknown): Record<string, unknown> | null {
 export function normalizeAssistantStatus(value: unknown): AssistantStatus {
   const o = asObject(value)
   const backend: AssistantStatus["backend"] =
-    o.backend === "openai" || o.backend === "echo" ? o.backend : "unknown"
+    o.backend === "openai" || o.backend === "gemini" || o.backend === "echo"
+      ? o.backend
+      : "unknown"
   return {
     enabled: asBoolean(o.enabled),
     backend,
@@ -1240,4 +1295,64 @@ export function normalizeAssistantStreamEvent(
     default:
       return null
   }
+}
+
+/* ------------------------------------------------------------------ *
+ * MCP (AI agent access)
+ * ------------------------------------------------------------------ */
+
+/**
+ * The connected-applications list.
+ *
+ * `scopes` must always be an array because the card maps over it to render the
+ * permission badges, and `client_name` must always be a string because it is
+ * printed — a malformed body should render an empty, harmless card rather than
+ * take the settings page down.
+ */
+export function normalizeConnectedAppList(value: unknown): ConnectedAppListResponse {
+  const o = asObject(value)
+  return {
+    apps: asArray<unknown>(o.apps).map((row) => {
+      const r = asObject(row)
+      return {
+        id: asString(r.id),
+        client_id: asString(r.client_id),
+        client_name: asString(r.client_name),
+        scopes: asStringArray(r.scopes),
+        status: asString(r.status),
+        created_at: asNullableString(r.created_at),
+        last_used_at: asNullableString(r.last_used_at),
+        revoked_at: asNullableString(r.revoked_at),
+      }
+    }),
+  }
+}
+
+/** The pending authorization request shown on the consent screen. */
+export function normalizeMcpConsent(value: unknown): McpConsentRequestResponse {
+  const o = asObject(value)
+  return {
+    client_id: asString(o.client_id),
+    client_name: asString(o.client_name),
+    redirect_uri: asString(o.redirect_uri),
+    resource: asString(o.resource),
+    scopes: asArray<unknown>(o.scopes).map((row) => {
+      const r = asObject(row)
+      return {
+        scope: asString(r.scope),
+        description: asString(r.description),
+        requested: asBoolean(r.requested),
+        already_granted: asBoolean(r.already_granted),
+        // Absent reads as destructive: an older API that does not send the flag
+        // must not cause a destructive permission to be pre-selected.
+        destructive: r.destructive === undefined ? true : asBoolean(r.destructive),
+      }
+    }),
+  }
+}
+
+/** The redirect the consent decision produced. */
+export function normalizeMcpConsentApproval(value: unknown): McpConsentApprovalResponse {
+  const o = asObject(value)
+  return { redirect_url: asString(o.redirect_url) }
 }

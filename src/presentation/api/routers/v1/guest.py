@@ -63,6 +63,7 @@ from src.presentation.api.routers.v1.conversions import (
     _safe_display_name,
     _to_response,
 )
+from src.presentation.api.routers.v1.job_event_payload import job_event_payload
 from src.presentation.schemas.conversion import (
     ConversionMapResponse,
     ConversionJobResponse,
@@ -371,29 +372,14 @@ async def stream_job_events(
             async for _, fields in subscriber.iter_events(job_id):
                 if await request.is_disconnected():
                     return
-                status_value = fields.get("status", "")
-                payload = {
-                    "job_id": job_id,
-                    "status": status_value,
-                    "progress": fields.get("progress", 0),
-                    "message": fields.get("message", ""),
-                }
-                if "compute_duration_ms" in fields:
-                    payload["compute_duration_ms"] = fields["compute_duration_ms"]
-                if "credits_used" in fields:
-                    payload["credits_used"] = fields["credits_used"]
-                if "input_size_bytes" in fields:
-                    payload["input_size_bytes"] = fields["input_size_bytes"]
-                if "output_size_bytes" in fields:
-                    payload["output_size_bytes"] = fields["output_size_bytes"]
-                if fields.get("output_file"):
-                    payload["output_file"] = fields["output_file"]
-                if "credits_remaining" in fields:
-                    payload["credits_remaining"] = fields["credits_remaining"]
+                # Same typed payload as the authenticated stream: Redis
+                # stringifies every field, and a string `progress` is what made
+                # the guest progress bar render as an indeterminate sweep.
+                payload = job_event_payload(job_id, fields)
 
                 yield f"event: progress\ndata: {json.dumps(payload)}\n\n"
 
-                if status_value in ("COMPLETED", "FAILED"):
+                if payload["status"] in ("COMPLETED", "FAILED"):
                     terminal_seen = True
                     break
 

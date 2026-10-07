@@ -90,6 +90,7 @@ describe("settingsTabHref", () => {
   it("names every other tab in the query string", () => {
     expect(settingsTabHref("phone")).toBe("/app/settings?tab=phone");
     expect(settingsTabHref("api-keys")).toBe("/app/settings?tab=api-keys");
+    expect(settingsTabHref("connected-apps")).toBe("/app/settings?tab=connected-apps");
     expect(settingsTabHref("danger")).toBe("/app/settings?tab=danger");
   });
 
@@ -97,7 +98,13 @@ describe("settingsTabHref", () => {
     // Total over the union: a tab with no case here would be a link the reader
     // could not resolve.
     for (const tab of SETTINGS_TABS) expect(settingsTabHref(tab)).toContain("/app/settings");
-    expect(SETTINGS_TABS).toHaveLength(4);
+    expect(SETTINGS_TABS).toEqual([
+      "profile",
+      "phone",
+      "api-keys",
+      "connected-apps",
+      "danger",
+    ]);
   });
 
   it("round-trips through the reader", () => {

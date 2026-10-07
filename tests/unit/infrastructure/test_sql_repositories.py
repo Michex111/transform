@@ -573,6 +573,45 @@ def test_worker_persists_status_via_repo() -> None:
         asyncio.run(_run())
 
 
+def test_conversion_job_progress_survives_the_round_trip() -> None:
+    """``progress`` is persisted and read back.
+
+    That is what lets a reloaded client (or one whose SSE stream never
+    delivered) draw the real bar instead of an indeterminate sweep.
+    """
+    with sqlite_session_factory() as factory:
+
+        async def _run() -> None:
+            async with factory() as session:
+                user = await _create_user(factory)
+                repo = SQLConversionJobRepository(session)
+                job = ConversionJob(
+                    job_id="progress-job",
+                    conversion=ConversionType("pdf", "docx"),
+                    input_file="input.pdf",
+                    user_id=user.id,
+                    status=JobStatus.PENDING,
+                )
+                await repo.save_conversion_job(job)
+
+                # A job the worker has not touched reports 0 = "not started".
+                fresh = await repo.get_conversion_job("progress-job")
+                assert fresh is not None
+                assert fresh.progress == 0
+
+                fresh.status = JobStatus.PROCESSING
+                fresh.progress = 50
+                await repo.update_conversion_job(fresh)
+
+            async with factory() as session:
+                repo = SQLConversionJobRepository(session)
+                stored = await repo.get_conversion_job("progress-job")
+                assert stored is not None
+                assert stored.progress == 50
+
+        asyncio.run(_run())
+
+
 def test_conversation_message_meta_survives_the_round_trip() -> None:
     """The UI-only meta (labels, summaries, artifacts) is persisted verbatim.
 

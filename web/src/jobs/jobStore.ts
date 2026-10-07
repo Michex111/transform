@@ -9,6 +9,7 @@
  */
 
 import type { ConversionJobResponse } from "@/api/types";
+import { asNumeric } from "@/lib/progress";
 
 /** A client-side job with upload/progress augmentation. */
 export interface UiJob extends ConversionJobResponse {
@@ -213,10 +214,17 @@ export function reduceStreamError<T extends UiJob>(
  * `45` for such rows, which `aria-valuenow` then announced to assistive tech as
  * a fact. A completed job is genuinely at 100%, which is not an invention.
  */
-export function jobProgress(job: { status: string; progress?: number }): number | null {
-  if (typeof job.progress === "number" && Number.isFinite(job.progress)) {
-    return job.progress;
-  }
+export function jobProgress(job: {
+  status: string;
+  /**
+   * A number, but typed as `unknown` on purpose: a frame that crossed Redis —
+   * or a job cached by a bundle from before the API was fixed — can hold a
+   * numeric string, and `asNumeric` reads both without inventing a value.
+   */
+  progress?: unknown;
+}): number | null {
+  const pct = asNumeric(job.progress);
+  if (pct !== null) return pct;
   return job.status === "COMPLETED" ? 100 : null;
 }
 

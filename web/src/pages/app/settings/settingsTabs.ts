@@ -8,7 +8,7 @@
  * the writer of that value cannot drift apart.
  */
 
-export const SETTINGS_TABS = ["profile", "phone", "api-keys", "danger"] as const;
+export const SETTINGS_TABS = ["profile", "phone", "api-keys", "connected-apps", "danger"] as const;
 
 export type SettingsTab = (typeof SETTINGS_TABS)[number];
 

@@ -442,6 +442,15 @@ export interface ConversionJobResponse {
   input_size_bytes?: number
   output_size_bytes?: number
   /**
+   * Worker progress percentage (0/25/50/75/100), persisted on the job row.
+   *
+   * Optional for the independent-deploy reason: an older API omits it and the
+   * UI falls back to the SSE stream. `0` means "not reported yet" and is
+   * treated the same as absent — an indeterminate bar — rather than as a
+   * frozen empty 0% bar.
+   */
+  progress?: number
+  /**
    * When the job row was created, ISO-8601.
    *
    * Optional because the API and the SPA deploy independently: a new bundle can
@@ -1020,8 +1029,11 @@ export interface JobProgressEvent {
  * `"unknown"` is not an API value — it is what `normalizeAssistantStatus`
  * substitutes for a value the contract does not define (or omits), so the UI can
  * tell "a real model" apart from "echo/demo mode" without inventing an answer.
+ * `"gemini"` is Google's Gemini API (reached through its OpenAI-compatibility
+ * endpoint), named separately from the generic `"openai"` transport so the UI
+ * can show which provider is answering.
  */
-export type AssistantBackend = "openai" | "echo" | "unknown"
+export type AssistantBackend = "openai" | "gemini" | "echo" | "unknown"
 
 export interface AssistantStatus {
   enabled: boolean
@@ -1269,3 +1281,59 @@ export const ASSISTANT_ATTACHMENT_NOT_FOUND = "ATTACHMENT_NOT_FOUND"
  * retrying against a proposal that no longer exists.
  */
 export const ASSISTANT_DELETION_NOT_FOUND = "DELETION_NOT_FOUND"
+
+/* ------------------------------------------------------------------ *
+ * MCP (AI agent access)
+ * ------------------------------------------------------------------ */
+
+/**
+ * One AI application the user has connected.
+ *
+ * `client_name` is supplied by the application itself at registration, so it is
+ * untrusted text: render it as text (React does this by default), never as
+ * HTML.
+ */
+export interface ConnectedAppResponse {
+  id: string
+  client_id: string
+  client_name: string
+  scopes: string[]
+  /** `ACTIVE` or `REVOKED`. */
+  status: string
+  created_at: string | null
+  last_used_at: string | null
+  revoked_at: string | null
+}
+
+export interface ConnectedAppListResponse {
+  apps: ConnectedAppResponse[]
+}
+
+/** One permission row on the consent screen. */
+export interface McpScopeDescription {
+  scope: string
+  description: string
+  /** Only requested scopes may be approved. */
+  requested: boolean
+  already_granted: boolean
+  /**
+   * Whether this permission allows an irreversible action. The server sends
+   * this so the "never pre-select it" rule stays next to the list of
+   * destructive scopes on the server rather than being duplicated here as a
+   * scope-name string literal.
+   */
+  destructive: boolean
+}
+
+export interface McpConsentRequestResponse {
+  client_id: string
+  client_name: string
+  redirect_uri: string
+  resource: string
+  scopes: McpScopeDescription[]
+}
+
+export interface McpConsentApprovalResponse {
+  /** Absolute URL (the application's callback) the browser must be sent to. */
+  redirect_url: string
+}

@@ -186,6 +186,42 @@ def test_keeps_two_tool_calls_separate() -> None:
     assert [(call.id, call.name) for call in response.tool_calls] == [("a", "one"), ("b", "two")]
 
 
+def test_a_gemini_thought_signature_is_captured_from_the_stream() -> None:
+    """Google attaches a signature to each tool call; it must survive decoding.
+
+    Without it, the follow-up turn is rejected with a 400 ("Function call is
+    missing a thought_signature"), so dropping it here breaks every Gemini
+    tool-using conversation.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        fragment = {
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_1",
+                                "extra_content": {
+                                    "google": {"thought_signature": "c2lnbmF0dXJl"}
+                                },
+                                "function": {"name": "list_files", "arguments": "{}"},
+                            }
+                        ]
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ]
+        }
+        return httpx.Response(200, content=_sse(fragment, "[DONE]"))
+
+    response = _stream(_adapter(handler), USER, [TOOL])[-1].response
+    assert response is not None
+    assert response.tool_calls[0].thought_signature == "c2lnbmF0dXJl"
+
+
 def test_ignores_keepalives_and_malformed_lines() -> None:
     """A proxy injecting noise must not kill an otherwise healthy stream."""
 
@@ -440,6 +476,57 @@ def test_history_is_mapped_to_the_wire_format() -> None:
         "function": {"name": "list_files", "arguments": '{"query": "x"}'},
     }
     assert tool == {"role": "tool", "content": '{"count": 1}', "tool_call_id": "c1", "name": "list_files"}
+
+
+def test_a_thought_signature_is_replayed_on_the_wire() -> None:
+    """A captured signature is echoed back on the assistant tool call."""
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(200, content=_sse(_delta("ok"), "[DONE]"))
+
+    messages = [
+        LlmMessage(role="user", content="run it"),
+        LlmMessage(
+            role="assistant",
+            content="",
+            tool_calls=(
+                LlmToolCall(
+                    id="c1",
+                    name="list_files",
+                    arguments={"query": "x"},
+                    thought_signature="c2lnbmF0dXJl",
+                ),
+            ),
+        ),
+    ]
+    _stream(_adapter(handler), messages, [TOOL])
+
+    assert captured["messages"][1]["tool_calls"][0]["extra_content"] == {
+        "google": {"thought_signature": "c2lnbmF0dXJl"}
+    }
+
+
+def test_a_tool_call_without_a_signature_carries_no_extra_content() -> None:
+    """Non-Gemini providers must see the exact payload they always did."""
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(200, content=_sse(_delta("ok"), "[DONE]"))
+
+    messages = [
+        LlmMessage(role="user", content="run it"),
+        LlmMessage(
+            role="assistant",
+            content="",
+            tool_calls=(LlmToolCall(id="c1", name="list_files", arguments={}),),
+        ),
+    ]
+    _stream(_adapter(handler), messages, [TOOL])
+
+    assert "extra_content" not in captured["messages"][1]["tool_calls"][0]
 
 
 def test_model_property_reports_the_configured_model() -> None:

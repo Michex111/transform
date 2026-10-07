@@ -53,10 +53,13 @@ import {
   normalizeFolderList,
   normalizeForgotPassword,
   normalizeGuestJob,
+  normalizeJobProgressEvent,
   normalizePaymentMethodList,
   normalizePaymentMethodSession,
   normalizePhoneStatus,
   normalizePortal,
+  normalizeConnectedAppList,
+  normalizeMcpConsent,
   normalizePresignedUrls,
   normalizeResendVerification,
   normalizeResetPassword,
@@ -248,6 +251,40 @@ describe("normalizeGuestJob", () => {
 
   it("preserves a valid guest token", () => {
     expect(normalizeGuestJob({ job_id: "g1", guest_token: "tok" }).guest_token).toBe("tok");
+  });
+});
+
+describe("normalizeJobProgressEvent", () => {
+  it("coerces stringified numbers from a frame that crossed Redis", () => {
+    // Regression: `progress: "25"` failed the client's `typeof === number`
+    // guard, so the bar rendered an indeterminate sweep instead of tracking.
+    const event = normalizeJobProgressEvent({
+      job_id: "j1",
+      status: "PROCESSING",
+      progress: "25",
+      message: "converting file",
+      compute_duration_ms: "1200",
+      credits_used: "4",
+      input_size_bytes: "10",
+      output_size_bytes: "5",
+    });
+    expect(event.progress).toBe(25);
+    expect(event.compute_duration_ms).toBe(1200);
+    expect(event.credits_used).toBe(4);
+    expect(event.input_size_bytes).toBe(10);
+    expect(event.output_size_bytes).toBe(5);
+    expect(event.message).toBe("converting file");
+  });
+
+  it("omits fields the frame did not carry rather than inventing zeros", () => {
+    const event = normalizeJobProgressEvent({ job_id: "j1", status: "PROCESSING" });
+    expect(event.progress).toBeUndefined();
+    expect(event.credits_used).toBeUndefined();
+    expect(event.input_size_bytes).toBeUndefined();
+  });
+
+  it("keeps a real zero", () => {
+    expect(normalizeJobProgressEvent({ progress: 0 }).progress).toBe(0);
   });
 });
 
@@ -652,6 +689,21 @@ describe("single-object normalizers", () => {
     expect(j.credits_used).toBe(0);
   });
 
+  it("normalizeConversionJob reads the persisted progress percentage", () => {
+    // The persisted value is what lets a reloaded chat draw a real bar
+    // immediately, instead of an indeterminate sweep until SSE replays.
+    expect(normalizeConversionJob({ job_id: "j", progress: 50 }).progress).toBe(50);
+    // A numeric string (a legacy cache, or an older API) still reads.
+    expect(normalizeConversionJob({ job_id: "j", progress: "75" }).progress).toBe(75);
+  });
+
+  it("normalizeConversionJob treats progress 0 as not reported", () => {
+    // 0 means "the worker has not started"; leaving it undefined keeps the bar
+    // indeterminate (moving) rather than a frozen empty 0% bar.
+    expect(normalizeConversionJob({ job_id: "j", progress: 0 }).progress).toBeUndefined();
+    expect(normalizeConversionJob({ job_id: "j" }).progress).toBeUndefined();
+  });
+
   it("normalizeSubscriptionStatus defaults its fields", () => {
     const s = normalizeSubscriptionStatus({});
     expect(s.tier).toBe("");
@@ -826,6 +878,16 @@ describe("normalizeAssistantStatus", () => {
       model: "gpt-4o-mini",
       max_attachments: MAX_ASSISTANT_ATTACHMENTS,
     });
+  });
+
+  it("accepts the gemini backend as a real (non-demo) provider", () => {
+    const status = normalizeAssistantStatus({
+      enabled: true,
+      backend: "gemini",
+      model: "gemini-2.5-flash-lite",
+    });
+    expect(status.backend).toBe("gemini");
+    expect(status.model).toBe("gemini-2.5-flash-lite");
   });
 
   it("keeps every absent entitlement absent, except max_attachments", () => {
@@ -1494,5 +1556,46 @@ describe("wallet split, plan change, payment method session", () => {
     });
 
     expect(list.methods[0].wallet).toBeNull();
+  });
+});
+
+describe("normalizeConnectedAppList", () => {
+  it("coerces every field so the card can render a malformed body", () => {
+    const list = normalizeConnectedAppList({
+      apps: [{ id: "g1", client_name: null, scopes: "documents.read" }],
+    });
+
+    expect(list.apps[0].id).toBe("g1");
+    // `scopes` is mapped over to render badges, so it must always be an array.
+    expect(list.apps[0].scopes).toEqual([]);
+    expect(list.apps[0].client_name).toBe("");
+    expect(list.apps[0].last_used_at).toBeNull();
+  });
+
+  it("returns an empty list rather than throwing on a non-object body", () => {
+    expect(normalizeConnectedAppList(null).apps).toEqual([]);
+    expect(normalizeConnectedAppList({ apps: "nope" }).apps).toEqual([]);
+  });
+});
+
+describe("normalizeMcpConsent", () => {
+  it("keeps the requested flags and coerces missing ones to false", () => {
+    const consent = normalizeMcpConsent({
+      client_id: "c1",
+      client_name: "Agent",
+      redirect_uri: "https://agent.test/cb",
+      resource: "https://api.test/mcp",
+      scopes: [
+        { scope: "documents.read", description: "Read", requested: true },
+        { scope: "documents.delete", description: "Delete" },
+      ],
+    });
+
+    expect(consent.client_name).toBe("Agent");
+    expect(consent.scopes[0].requested).toBe(true);
+    // Only an explicit `true` may count as requested: a malformed flag must
+    // never make a permission approvable.
+    expect(consent.scopes[1].requested).toBe(false);
+    expect(consent.scopes[1].already_granted).toBe(false);
   });
 });

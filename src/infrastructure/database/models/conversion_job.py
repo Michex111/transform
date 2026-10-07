@@ -49,6 +49,12 @@ class ConversionJobModel(Base):
     origin: Mapped[str] = mapped_column(
         String(16), nullable=False, default=JobOrigin.WEB.value, server_default="WEB"
     )
+    # Percentage the worker has reached (0/25/50/75/100). Persisted so a client
+    # that reloads a chat or reconnects can show the real bar without waiting for
+    # the SSE stream to replay. 0 = "not reported yet", rendered as indeterminate.
+    progress: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

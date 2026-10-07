@@ -427,6 +427,13 @@ describe("jobProgress", () => {
     expect(jobProgress({ status: "PROCESSING", progress: 0 })).toBe(0);
   });
 
+  it("reads a numeric string, from a legacy cache or an old API frame", () => {
+    // Redis stringifies every SSE field, so a frame (or a job cached by a
+    // bundle from before the API was fixed) can hold `"42"`. Rejecting it made
+    // the bar fall back to an indeterminate sweep.
+    expect(jobProgress({ status: "PROCESSING", progress: "42" })).toBe(42);
+  });
+
   it("returns null when there is no real value, so nothing is announced", () => {
     // The pages used to render `progress ?? 45`, which `aria-valuenow` then
     // reported to assistive tech as a fact the backend never sent.

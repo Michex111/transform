@@ -3,6 +3,7 @@ import { useSearchParams } from "react-router-dom";
 import { Card, SkeletonText } from "@/components/ui";
 import { useAuth } from "@/auth/AuthContext";
 import { ApiKeysSection } from "./settings/ApiKeysSection";
+import { ConnectedAppsSection } from "./settings/ConnectedAppsSection";
 import { CreditPreferenceSection } from "./settings/CreditPreferenceSection";
 import { DangerZoneSection } from "./settings/DangerZoneSection";
 import { DriveSection } from "./settings/DriveSection";
@@ -15,6 +16,7 @@ const TAB_LABELS: Record<SettingsTab, string> = {
   profile: "Profile",
   phone: "Phone",
   "api-keys": "API keys",
+  "connected-apps": "AI apps",
   danger: "Danger zone",
 };
 
@@ -45,6 +47,8 @@ function SettingsPanel({ tab }: { tab: SettingsTab }) {
       return <PhoneSection />;
     case "api-keys":
       return <ApiKeysSection />;
+    case "connected-apps":
+      return <ConnectedAppsSection />;
     case "danger":
       return <DangerZoneSection />;
   }

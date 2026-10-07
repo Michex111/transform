@@ -865,6 +865,26 @@ describe("applyJobProgress", () => {
     expect(next.progress).toBe(42);
   });
 
+  it("never lets progress move backwards on a replayed or repeated frame", () => {
+    // The stream replays a job's history and then streams live, so frames can
+    // arrive out of order across a reconnect. Rendering a lower value verbatim
+    // made the bar jump backwards.
+    const next = applyJobProgress(job({ progress: 75 }), {
+      job_id: "j1",
+      status: "PROCESSING",
+      progress: 25,
+    });
+    expect(next.progress).toBe(75);
+  });
+
+  it("keeps the last real percentage when a frame carries none", () => {
+    const next = applyJobProgress(job({ progress: 50 }), {
+      job_id: "j1",
+      status: "PROCESSING",
+    });
+    expect(next.progress).toBe(50);
+  });
+
   it("fills in the terminal fields so no refetch is needed", () => {
     const next = applyJobProgress(job(), {
       job_id: "j1",

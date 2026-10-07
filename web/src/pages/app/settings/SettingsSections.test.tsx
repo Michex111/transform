@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToString } from "react-dom/server";
 import { MemoryRouter } from "react-router-dom";
 import type { ReactElement } from "react";
+import { SETTINGS_TABS } from "@/pages/app/settings/settingsTabs";
 
 // `vi.hoisted` so the mock factories below can read it — `vi.mock` calls are
 // hoisted above the imports, and a plain module-level `let` would still be in
@@ -212,12 +213,15 @@ describe("SettingsPage tabs", () => {
     state.user = user({ phone_number: "+14155552671", phone_verified: true });
   });
 
-  it("renders four tabs with exactly one selected", () => {
+  it("renders one tab per settings section with exactly one selected", () => {
     const html = render(<SettingsPage />);
 
-    expect(html.match(/role="tab"/g)).toHaveLength(4);
+    // Derived from the tab list rather than hard-coded: the assertion that
+    // matters is "one tab per section, exactly one selected", and a literal
+    // count turns adding a legitimate section into a failing test.
+    expect(html.match(/role="tab"/g)).toHaveLength(SETTINGS_TABS.length);
     expect(html.match(/aria-selected="true"/g)).toHaveLength(1);
-    expect(html.match(/aria-selected="false"/g)).toHaveLength(3);
+    expect(html.match(/aria-selected="false"/g)).toHaveLength(SETTINGS_TABS.length - 1);
     expect(html).toContain('aria-label="Account settings"');
   });
 

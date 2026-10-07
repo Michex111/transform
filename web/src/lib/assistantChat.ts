@@ -16,6 +16,7 @@ import {
   type JobProgressEvent,
 } from "@/api/types";
 import { buildTranscript } from "@/lib/assistantTranscript";
+import { mergeProgress } from "@/lib/progress";
 import type { UiJob } from "@/jobs/jobStore";
 
 /** One entry of the "what the assistant is doing" row while a turn streams. */
@@ -622,12 +623,18 @@ export function editTurn(state: AssistantChatState, messageId: string): EditTurn
  * `message` is the only field with a rule: it carries status prose ("downloading
  * file", the failure reason), so it becomes the error text for a `FAILED` event
  * and is ignored otherwise. It must never be mistaken for a filename.
+ *
+ * `progress` is monotonic (`mergeProgress`): the stream replays a job's history
+ * and then streams live, so a late or repeated frame must not make the bar jump
+ * backwards or fall back to an indeterminate sweep.
  */
 export function applyJobProgress(job: UiJob, event: JobProgressEvent): UiJob {
   return {
     ...job,
     status: event.status,
-    progress: event.progress,
+    progress: mergeProgress(job.progress, event.progress, {
+      completed: event.status === "COMPLETED",
+    }),
     errorMessage:
       event.status === "FAILED" ? event.message ?? job.errorMessage : job.errorMessage,
     // Only the terminal event carries these; spreading them in means the card

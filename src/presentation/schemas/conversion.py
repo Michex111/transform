@@ -43,6 +43,10 @@ class ConversionJobResponse(BaseModel):
     # all rather than as a zero-byte file.
     input_size_bytes: int = 0
     output_size_bytes: int = 0
+    # Percentage the worker has reached (0/25/50/75/100). Defaulted so an older
+    # client sees no change; the SPA uses it to draw a real bar immediately when
+    # a chat is reloaded, rather than waiting for the SSE stream to replay.
+    progress: int = 0
     # When the job row was created, so a history list can show *when* a
     # conversion happened. Optional (not merely nullable) because the SPA and
     # the API deploy independently: a new bundle can talk to an older API that

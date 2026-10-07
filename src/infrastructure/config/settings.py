@@ -298,12 +298,21 @@ class Settings(BaseSettings):
     # deterministic in tests) and starts calling a real model the moment a key
     # is added, with no extra switch to remember.
     #
-    # Accepted values: auto | openai | echo. Naming a transport whose
+    # Accepted values: auto | openai | gemini | echo. Naming a transport whose
     # credentials are missing is a startup error — an explicit choice must not
     # be quietly downgraded to a stub that answers without the model the
     # operator asked for. ``echo`` is never rejected: it is a supported,
     # intentional backend, not a degraded fallback. The boot log names the
     # resolved backend (see the API lifespan).
+    #
+    # ``gemini`` is Google's Gemini API, reached through its official
+    # OpenAI-compatibility endpoint (``AI_GEMINI_BASE_URL``). It is a named
+    # backend rather than "just set AI_BASE_URL" so the switch is one line, the
+    # base URL cannot be left pointing at OpenAI by accident, and ``/status``
+    # reports *which* provider is answering. It reuses the same OpenAI-wire
+    # adapter as ``openai`` — Google implements ``POST /chat/completions`` for
+    # Gemini, streaming and tool calling included, so a second transport would
+    # be the same request written twice.
     AI_BACKEND: str = "auto"
 
     # Credential for the OpenAI-compatible API. Not required for ``echo``.
@@ -312,6 +321,12 @@ class Settings(BaseSettings):
     # provider that implements ``POST /chat/completions`` works (OpenAI,
     # Azure OpenAI, OpenRouter, Together, Groq, vLLM, Ollama, LM Studio).
     AI_BASE_URL: str = "https://api.openai.com/v1"
+    # Base URL for the ``gemini`` backend, WITHOUT a trailing slash. This is
+    # Google's OpenAI-compatibility endpoint for the Gemini API, so the same
+    # adapter and the same tool-calling payload work unchanged. It is a
+    # separate setting (not AI_BASE_URL) so ``AI_BACKEND=gemini`` cannot be left
+    # pointed at api.openai.com and then fail every turn with a 401.
+    AI_GEMINI_BASE_URL: str = "https://generativelanguage.googleapis.com/v1beta/openai"
     AI_MODEL: str = "gpt-4o-mini"
 
     # Per-level model overrides. The domain maps a tier to a *level*
@@ -380,6 +395,29 @@ class Settings(BaseSettings):
     # environment does not crash the boot (Settings uses `extra="forbid"`); its
     # value is never read. It defaults to None and should not be set.
     FRONTEND_DIST_DIR: str | None = None
+
+    # ------------------------------------------------------------------
+    # MCP (AI agent access)
+    # ------------------------------------------------------------------
+    # Transform exposes a remote MCP server so an authorized AI agent can act
+    # on a user's documents. Access is granted through a browser OAuth consent
+    # flow and is revocable per application.
+    #
+    # ``MCP_RESOURCE_URL`` is the PUBLIC URL of the MCP endpoint. It is both the
+    # RFC 8707 resource indicator that tokens are bound to and the OAuth issuer
+    # identifier, because this service is its own authorization server. Getting
+    # it wrong is a security bug (a token minted for another audience would be
+    # accepted), so production boot refuses a plaintext or loopback value.
+    MCP_ENABLED: bool = True
+    MCP_RESOURCE_URL: str | None = None
+    #: Lifetime of an MCP access token. Kept short because the token is the
+    #: only thing an agent holds; refresh tokens carry the long-lived grant.
+    MCP_ACCESS_TOKEN_TTL_MINUTES: int = 60
+    MCP_REFRESH_TOKEN_TTL_DAYS: int = 30
+    #: PKCE authorization codes are redeemed within seconds of being issued.
+    MCP_AUTHORIZATION_CODE_TTL_MINUTES: int = 5
+    #: SPA route that renders the consent screen. Relative to ``APP_BASE_URL``.
+    MCP_CONSENT_PATH: str = "/app/authorize"
 
     # ------------------------------------------------------------------
     # Upload size limits (bytes)
@@ -509,7 +547,7 @@ class Settings(BaseSettings):
 
     _SUPPORTED_SMS_BACKENDS = frozenset({"auto", "console", "twilio"})
 
-    _SUPPORTED_AI_BACKENDS = frozenset({"auto", "openai", "echo"})
+    _SUPPORTED_AI_BACKENDS = frozenset({"auto", "openai", "gemini", "echo"})
 
     def _resolve_email_backend(self) -> str:
         """The concrete email transport to use: console | smtp | resend.
@@ -563,13 +601,16 @@ class Settings(BaseSettings):
         return bool(self.AI_API_KEY.get_secret_value().strip())
 
     def _resolve_ai_backend(self) -> str:
-        """The concrete assistant backend to use: openai | echo.
+        """The concrete assistant backend to use: openai | gemini | echo.
 
         ``auto`` prefers a real model over the local rule engine: an API key is
         a deliberate, single-purpose credential, so its presence is the signal
-        that the operator wants real completions. Callers should use this
-        rather than reading ``AI_BACKEND`` directly so the rule lives in one
-        place (the API lifespan and the ``/status`` endpoint both rely on it).
+        that the operator wants real completions. ``auto`` can only resolve to
+        the *generic* OpenAI-compatible transport — it cannot guess which vendor
+        a bare key belongs to — so naming Gemini is an explicit choice
+        (``AI_BACKEND=gemini``). Callers should use this rather than reading
+        ``AI_BACKEND`` directly so the rule lives in one place (the API lifespan
+        and the ``/status`` endpoint both rely on it).
         """
         configured = self.AI_BACKEND.strip().lower()
         if configured != "auto":
@@ -577,6 +618,123 @@ class Settings(BaseSettings):
         if self._ai_key_present():
             return "openai"
         return "echo"
+
+    def ai_base_url(self) -> str:
+        """The completion endpoint for the resolved backend.
+
+        The base URL is provider-aware so ``AI_BACKEND=gemini`` is a complete
+        switch on its own: it defaults to Google's OpenAI-compatibility endpoint
+        instead of inheriting ``AI_BASE_URL`` (whose default is OpenAI's), which
+        would send a Gemini key to api.openai.com.
+        """
+        if self._resolve_ai_backend() == "gemini":
+            return self.AI_GEMINI_BASE_URL
+        return self.AI_BASE_URL
+
+    # ------------------------------------------------------------------
+    # MCP (AI agent access)
+    # ------------------------------------------------------------------
+
+    def mcp_resource_url(self) -> str:
+        """Public URL of the MCP endpoint (the RFC 8707 resource indicator).
+
+        Doubles as the OAuth **issuer** identifier: this service is its own
+        authorization server, and the SDK serves the AS metadata at
+        ``{issuer}/.well-known/oauth-authorization-server`` — which is exactly
+        where a client that discovered us through the protected-resource
+        metadata will look.
+        """
+        configured = (self.MCP_RESOURCE_URL or "").strip()
+        if configured:
+            return configured.rstrip("/")
+        # Development default: the API's own local port (NOT the SPA origin —
+        # the MCP endpoint lives on the API).
+        return "http://localhost:8000/mcp"
+
+    def mcp_issuer_url(self) -> str:
+        """OAuth issuer identifier. Equal to the MCP resource URL by design."""
+        return self.mcp_resource_url()
+
+    def mcp_consent_url(self) -> str:
+        """Absolute SPA URL of the consent screen the browser is sent to.
+
+        The SPA (not the API) renders consent because the signed-in session
+        lives in the SPA's storage as a bearer token; a top-level navigation to
+        the API could not carry it. The API stays authoritative: the page only
+        relays the approval back, and every value is re-validated server-side.
+        """
+        return f"{self.APP_BASE_URL.rstrip('/')}{self.MCP_CONSENT_PATH}"
+
+    def _validate_mcp(self, environment: str) -> None:
+        """Check the MCP configuration, hard-failing only on unsafe choices.
+
+        Two tiers on purpose, because the two situations have different
+        consequences:
+
+        * A **deliberately configured** non-HTTPS ``MCP_RESOURCE_URL`` in
+          production is a boot failure. That value is the token audience, and
+          the audience is what makes a token usable only at this server — so an
+          http URL that can be rewritten in transit is a security problem, not
+          a broken deployment.
+        * An **unset** ``MCP_RESOURCE_URL`` in production only logs a warning.
+          The audience then defaults to a loopback URL, so no remote client can
+          obtain a usable token — fail-safe, just non-functional. Aborting a
+          boot over it would take the whole API down for a feature the operator
+          may simply not want yet, which is the worse outcome.
+
+        Ordering matters too: ``validate_settings`` calls this **last**, so it
+        can never mask the more specific SECRET_KEY / ALLOWED_ORIGINS /
+        BACKBLAZE_USE_SSL failures that are the actually actionable ones.
+        """
+        if not self.MCP_ENABLED:
+            return
+        for label, value in (
+            ("MCP_ACCESS_TOKEN_TTL_MINUTES", self.MCP_ACCESS_TOKEN_TTL_MINUTES),
+            ("MCP_REFRESH_TOKEN_TTL_DAYS", self.MCP_REFRESH_TOKEN_TTL_DAYS),
+            ("MCP_AUTHORIZATION_CODE_TTL_MINUTES", self.MCP_AUTHORIZATION_CODE_TTL_MINUTES),
+        ):
+            if value <= 0:
+                raise RuntimeError(f"{label} must be positive.")
+        if not self.MCP_CONSENT_PATH.startswith("/"):
+            raise RuntimeError("MCP_CONSENT_PATH must be an absolute SPA path (e.g. /app/authorize).")
+        resource = self.mcp_resource_url()
+        configured = bool((self.MCP_RESOURCE_URL or "").strip())
+        if environment == "production":
+            if not resource.startswith("https://"):
+                if configured:
+                    # The operator deliberately set a plaintext audience. That
+                    # is not a broken deployment, it is an unsafe one: the
+                    # audience is what makes a token usable only here, and an
+                    # http URL can be rewritten in transit. Refuse to boot.
+                    raise RuntimeError(
+                        "MCP_RESOURCE_URL must be an absolute https:// URL in production "
+                        f"(got {resource!r}). It is the token audience and the OAuth issuer, "
+                        "so a plaintext value would let an attacker forge a token for this "
+                        "server. Set it to the public API origin, e.g. "
+                        "https://transform-api-7b3g.onrender.com/mcp."
+                    )
+                # Left at the development default. This is not a vulnerability —
+                # the audience is a loopback URL, so only a localhost client can
+                # obtain a usable token — but it does mean no real AI client can
+                # connect, and the failure will look like "the app is broken"
+                # rather than "a setting is missing". Say so at WARNING (which
+                # survives the production log level) instead of aborting a boot
+                # over a feature that may simply not be wanted yet.
+                logger.warning(
+                    "MCP_RESOURCE_URL is not set, so the MCP endpoint advertises %r as its "
+                    "audience and OAuth issuer. Remote AI clients will not be able to "
+                    "connect. Set it to the public API origin (e.g. "
+                    "https://transform-api-7b3g.onrender.com/mcp), or set MCP_ENABLED=false "
+                    "to remove the endpoint.",
+                    resource,
+                )
+            elif not resource.endswith("/mcp"):
+                logger.warning(
+                    "MCP_RESOURCE_URL (%s) does not end in /mcp; the MCP endpoint is "
+                    "mounted at /mcp, so tokens minted with a different audience will "
+                    "be rejected as soon as validate_token_resource is enforced.",
+                    resource,
+                )
 
     def ai_model_for_level(self, level: str) -> str:
         """The model id to call for an assistant ``level``.
@@ -757,14 +915,19 @@ class Settings(BaseSettings):
                 f"Unsupported AI_BACKEND {self.AI_BACKEND!r}; expected one of "
                 f"{sorted(self._SUPPORTED_AI_BACKENDS)}."
             )
-        if ai_backend == "openai" and not self._ai_key_present():
-            raise RuntimeError("AI_BACKEND=openai requires AI_API_KEY.")
-        if not self.AI_BASE_URL.startswith(("http://", "https://")):
+        if ai_backend in ("openai", "gemini") and not self._ai_key_present():
+            raise RuntimeError(f"AI_BACKEND={ai_backend} requires AI_API_KEY.")
+        # Validate the URL the resolved backend will actually call. For
+        # ``gemini`` that is AI_GEMINI_BASE_URL, not AI_BASE_URL — checking the
+        # wrong one would pass a broken Gemini URL and fail on the first turn.
+        base_url = self.ai_base_url()
+        base_url_setting = "AI_GEMINI_BASE_URL" if ai_backend == "gemini" else "AI_BASE_URL"
+        if not base_url.startswith(("http://", "https://")):
             # Without this, a typo (``api.openai.com/v1`` with no scheme) turns
             # every assistant turn into an opaque transport error at runtime
             # instead of a one-line startup failure.
             raise RuntimeError(
-                f"AI_BASE_URL {self.AI_BASE_URL!r} must start with http:// or "
+                f"{base_url_setting} {base_url!r} must start with http:// or "
                 "https://."
             )
         if self.AI_MAX_TOOL_ITERATIONS < 1:
@@ -824,6 +987,11 @@ class Settings(BaseSettings):
 
         self._warn_on_degraded_email_delivery()
         self._warn_on_degraded_sms_delivery()
+        # Deliberately LAST: it is the least specific check (an MCP misconfiguration
+        # is never the reason a boot should fail for a deployment that does not
+        # want MCP), and running it first masked the SECRET_KEY / ALLOWED_ORIGINS /
+        # BACKBLAZE_USE_SSL errors that are the actually actionable ones.
+        self._validate_mcp(environment)
 
     def _warn_on_degraded_sms_delivery(self) -> None:
         """Log when phone-verification codes cannot actually be delivered.

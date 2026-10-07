@@ -67,6 +67,9 @@ const SettingsPage = lazy(() =>
 const SupportPage = lazy(() =>
   import("@/pages/app/SupportPage").then((m) => ({ default: m.SupportPage })),
 );
+const AuthorizePage = lazy(() =>
+  import("@/pages/app/AuthorizePage").then((m) => ({ default: m.AuthorizePage })),
+);
 
 function RouteFallback() {
   return (
@@ -138,6 +141,10 @@ export default function App() {
           <Route path="/app/billing" element={<BillingPage />} />
           <Route path="/app/settings" element={<SettingsPage />} />
           <Route path="/app/support" element={<SupportPage />} />
+          {/* The OAuth consent screen an AI application sends the browser to.
+              Inside `ProtectedRoute` on purpose: the decision is made by a
+              signed-in user, and the API refuses to mint a code without one. */}
+          <Route path="/app/authorize" element={<AuthorizePage />} />
         </Route>
       </Route>
 

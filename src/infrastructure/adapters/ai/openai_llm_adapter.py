@@ -3,9 +3,10 @@
 Talks to ``POST {AI_BASE_URL}/chat/completions`` with httpx instead of the
 ``openai`` SDK. WHY: the wire format is a documented JSON contract that every
 serious provider implements, so speaking it directly buys compatibility with
-OpenAI, Azure OpenAI, OpenRouter, Groq, vLLM, Ollama and LM Studio at once —
-while an SDK would add a dependency, and pin this deployment to one vendor's
-release cadence, for one POST request.
+OpenAI, Azure OpenAI, OpenRouter, Groq, Google Gemini (via its OpenAI
+compatibility endpoint), vLLM, Ollama and LM Studio at once — while an SDK would
+add a dependency, and pin this deployment to one vendor's release cadence, for
+one POST request.
 
 The only genuinely fiddly part is the streaming protocol, and it is handled
 explicitly here:
@@ -339,10 +340,24 @@ def _accumulate_tool_calls(
         index = raw.get("index")
         if not isinstance(index, int):
             index = position
-        entry = partials.setdefault(index, {"id": "", "name": "", "arguments": ""})
+        entry = partials.setdefault(
+            index, {"id": "", "name": "", "arguments": "", "thought_signature": ""}
+        )
         call_id = raw.get("id")
         if isinstance(call_id, str) and call_id:
             entry["id"] = call_id
+        # Google's Gemini models attach a thought signature to each tool call
+        # (under ``extra_content.google``); it must be echoed back verbatim on
+        # the next request or the follow-up turn is rejected with a 400. It is
+        # captured here and re-emitted by ``_to_wire_message``. Other
+        # providers never send it, so this is a no-op for them.
+        extra = raw.get("extra_content")
+        if isinstance(extra, dict):
+            google = extra.get("google")
+            if isinstance(google, dict):
+                signature = google.get("thought_signature")
+                if isinstance(signature, str) and signature:
+                    entry["thought_signature"] = signature
         function = raw.get("function")
         if not isinstance(function, dict):
             continue
@@ -376,7 +391,31 @@ def _finalise_tool_call(index: int, partial: dict[str, str]) -> LlmToolCall:
         id=partial["id"] or f"call_{index}",
         name=partial["name"],
         arguments=arguments,
+        thought_signature=partial.get("thought_signature") or None,
     )
+
+
+def _tool_call_to_wire(call: LlmToolCall) -> dict[str, Any]:
+    """Render one tool call for an assistant turn.
+
+    ``extra_content.google.thought_signature`` is re-emitted only when the call
+    carries one, so providers that do not use thought signatures (OpenAI, Groq)
+    see the exact payload they always did. Gemini requires it on every replayed
+    function call and rejects the request without it.
+    """
+    entry: dict[str, Any] = {
+        "id": call.id,
+        "type": "function",
+        "function": {
+            "name": call.name,
+            "arguments": json.dumps(call.arguments),
+        },
+    }
+    if call.thought_signature:
+        entry["extra_content"] = {
+            "google": {"thought_signature": call.thought_signature}
+        }
+    return entry
 
 
 def _to_wire_message(message: LlmMessage) -> dict[str, Any]:
@@ -391,17 +430,7 @@ def _to_wire_message(message: LlmMessage) -> dict[str, Any]:
         return {
             "role": "assistant",
             "content": message.content,
-            "tool_calls": [
-                {
-                    "id": call.id,
-                    "type": "function",
-                    "function": {
-                        "name": call.name,
-                        "arguments": json.dumps(call.arguments),
-                    },
-                }
-                for call in message.tool_calls
-            ],
+            "tool_calls": [_tool_call_to_wire(call) for call in message.tool_calls],
         }
     if message.role == "tool":
         wire: dict[str, Any] = {"role": "tool", "content": message.content}

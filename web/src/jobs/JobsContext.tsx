@@ -10,6 +10,7 @@ import {
 import { api } from "@/api/client";
 import { useAuth } from "@/auth/AuthContext";
 import { clearCachedFiles, dropCachedFile, releaseCachedFile } from "@/lib/fileCache";
+import { mergeProgress } from "@/lib/progress";
 import { clearCachedPreviews } from "@/lib/previewCache";
 import {
   FINISHED_STATUSES,
@@ -143,7 +144,11 @@ function JobsStore({ userId, children }: { userId: number | null; children: Reac
                 ? {
                     ...j,
                     status: evt.status,
-                    progress: evt.progress,
+                    // Monotonic: a replayed or out-of-order frame must not make
+                    // a running job's bar jump backwards or go indeterminate.
+                    progress: mergeProgress(j.progress, evt.progress, {
+                      completed: evt.status === "COMPLETED",
+                    }),
                     // `message` carries status prose ("downloading file", the
                     // failure reason, …). It must never overwrite the user's
                     // real filename (which is what the History/Queue file

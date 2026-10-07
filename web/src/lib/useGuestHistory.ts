@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { GuestHistoryItem } from "@/api/types";
 import { capGuestHistory } from "@/lib/guestHistory";
+import { mergeProgress } from "@/lib/progress";
 import { isActiveJob } from "@/jobs/jobStore";
 
 const STORAGE_KEY = "transform_guest_jobs";
@@ -84,11 +85,16 @@ export function useGuestHistory(subscribe: GuestHistorySubscribe) {
       const cleanup = subscribe(
         item,
         {
-          onProgress: (evt) => updateItem(id, {
+          onProgress: (evt) => updateItem(id, (prev) => ({
             status: evt.status,
-            progress: evt.progress,
+            // Monotonic: a replayed or out-of-order frame must not make the bar
+            // jump backwards or go indeterminate. Read from `prev` (not the
+            // subscribe-time snapshot) so the value never regresses.
+            progress: mergeProgress(prev.progress, evt.progress, {
+              completed: evt.status === "COMPLETED",
+            }),
             errorMessage: evt.status === "FAILED" ? evt.message ?? undefined : undefined,
-          }),
+          })),
           onError: (msg) => updateItem(id, { status: "FAILED", errorMessage: msg || "Conversion failed" }),
           onDone: async () => {
             try {
@@ -116,9 +122,26 @@ export function useGuestHistory(subscribe: GuestHistorySubscribe) {
     setItems((prev) => capGuestHistory([item, ...prev]));
   }, []);
 
-  const updateItem = useCallback((jobId: string, patch: Partial<GuestHistoryItem>) => {
-    setItems((prev) => prev.map((i) => (i.job_id === jobId ? { ...i, ...patch } : i)));
-  }, []);
+  const updateItem = useCallback(
+    (
+      jobId: string,
+      patch:
+        | Partial<GuestHistoryItem>
+        | ((prev: GuestHistoryItem) => Partial<GuestHistoryItem>),
+    ) => {
+      setItems((prev) =>
+        prev.map((i) => {
+          if (i.job_id !== jobId) return i;
+          // The updater form lets a caller merge against the *latest* value
+          // (progress must never regress), instead of a snapshot captured when
+          // the subscription was created.
+          const resolved = typeof patch === "function" ? patch(i) : patch;
+          return { ...i, ...resolved };
+        }),
+      );
+    },
+    [],
+  );
 
   const removeItem = useCallback((jobId: string) => {
     subs.current.get(jobId)?.();

@@ -65,8 +65,13 @@ def test_events_router_forwards_credits_remaining() -> None:
     payloads = [json.loads(l[len("data: "):]) for l in data_lines]
     completed = [p for p in payloads if p.get("status") == "COMPLETED"]
     assert completed, "expected a COMPLETED event payload"
-    assert completed[0]["credits_used"] == "4"
-    assert completed[0]["credits_remaining"] == "46"
+    # Redis stores every stream field as a string; the endpoint must hand the
+    # client real numbers — a string `progress` is what made the SPA's progress
+    # bar fall back to an indeterminate sweep instead of tracking the job.
+    assert completed[0]["progress"] == 100
+    assert completed[0]["compute_duration_ms"] == 1200
+    assert completed[0]["credits_used"] == 4
+    assert completed[0]["credits_remaining"] == 46
 
 
 def test_events_router_omits_credit_fields_when_absent() -> None:

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { CircleNotch, CloudArrowUp, DownloadSimple } from "@phosphor-icons/react";
 import type { AssistantArtifact } from "@/api/types";
 import { useAuth } from "@/auth/AuthContext";
@@ -9,6 +9,19 @@ import { FINISHED_STATUSES, jobProgress, type UiJob } from "@/jobs/jobStore";
 import { applyJobProgress } from "@/lib/assistantChat";
 import { formatMeta } from "@/lib/format";
 import { useSaveToDrive } from "@/lib/useSaveToDrive";
+
+/**
+ * How many times a dropped progress stream is reattached before giving up, and
+ * how long to wait between attempts.
+ *
+ * A dropped stream says nothing about the job, so the card keeps its last known
+ * state and tries to reconnect — otherwise the bar freezes at whatever value it
+ * had (or stays indeterminate) for the rest of the chat. The budget is small
+ * because each attempt re-fetches the job; a persistently unreachable API is
+ * not something a card should hammer.
+ */
+const MAX_STREAM_RETRIES = 5;
+const STREAM_RETRY_DELAY_MS = 3000;
 
 /**
  * The live card for a conversion the assistant started.
@@ -39,10 +52,29 @@ export function ConversionCard({ artifact }: { artifact: AssistantArtifact }) {
   // Fetch once, then follow the job's progress stream until it reaches a
   // terminal state. The cleanup always unsubscribes, so scrolling a transcript
   // away (or unmounting the whole chat) never leaves an SSE connection open.
+  //
+  // `retryTick` re-runs this effect after a dropped stream so the card
+  // re-fetches the job (now carrying the persisted progress) and reattaches.
+  const [retryTick, setRetryTick] = useState(0);
+  const retries = useRef(0);
+
   useEffect(() => {
     if (!jobId) return;
     let cancelled = false;
     let unsubscribe: (() => void) | null = null;
+    let retryTimer: number | null = null;
+
+    const retry = () => {
+      // A dropped stream (proxy hiccup, redeploy, offline tab) says nothing
+      // about the job itself, so the last known status is kept — only the
+      // server's own terminal event may report an outcome. But it must not
+      // stop the bar updating forever, so reattach a bounded number of times.
+      if (cancelled || retries.current >= MAX_STREAM_RETRIES) return;
+      retries.current += 1;
+      retryTimer = window.setTimeout(() => {
+        if (!cancelled) setRetryTick((tick) => tick + 1);
+      }, STREAM_RETRY_DELAY_MS);
+    };
 
     client
       .getJob(jobId)
@@ -56,11 +88,12 @@ export function ConversionCard({ artifact }: { artifact: AssistantArtifact }) {
         unsubscribe = client.subscribeToJob(jobId, {
           onProgress: (event) =>
             setJob((previous) => (previous ? applyJobProgress(previous, event) : previous)),
-          onError: () => {
-            // A dropped stream (proxy hiccup, redeploy, offline tab) says
-            // nothing about the job itself, so the last known status is kept —
-            // only the server's own terminal event may report an outcome.
+          onConnected: () => {
+            // A successful (re)connection clears the budget, so the limit is on
+            // *consecutive* failures rather than a card's lifetime.
+            retries.current = 0;
           },
+          onError: retry,
           onDone: () => {},
         });
       })
@@ -73,9 +106,10 @@ export function ConversionCard({ artifact }: { artifact: AssistantArtifact }) {
 
     return () => {
       cancelled = true;
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
       unsubscribe?.();
     };
-  }, [client, jobId]);
+  }, [client, jobId, retryTick]);
 
   // The artifact carries the formats when the assistant started the job; the
   // fetched job is the fallback for a row the server persisted without them.

@@ -24,7 +24,7 @@ class AssistantStatusResponse(BaseModel):
     """
 
     enabled: bool = Field(description="False when the caller's tier has no allowance")
-    backend: str = Field(description="Resolved transport: 'openai' or 'echo'")
+    backend: str = Field(description="Resolved transport: 'openai', 'gemini' or 'echo'")
     model: str = Field(description="Model identifier, or 'echo' for the offline backend")
 
     tier: str = Field(default="", description="Caller's subscription tier")

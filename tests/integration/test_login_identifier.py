@@ -23,9 +23,17 @@ from typing import Any, Generator
 
 import pytest
 from fastapi.testclient import TestClient
-from httpx import Response
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
+
+# Starlette's test client uses `httpx2` when it is installed and falls back to
+# `httpx` otherwise (it even warns that plain `httpx` is deprecated). Mirroring
+# that choice keeps this annotation correct whichever one is present — `mcp`
+# pulls in `httpx2`, so the two are genuinely interchangeable here.
+try:  # pragma: no cover - the choice depends on the installed environment
+    from httpx2 import Response
+except ImportError:  # pragma: no cover
+    from httpx import Response
 
 import src.presentation.api.main as api_main
 from src.infrastructure.config.settings import get_settings

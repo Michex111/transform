@@ -15,6 +15,12 @@ from src.infrastructure.database.models.credit import (
     MonthlyCreditModel,
 )
 from src.infrastructure.database.models.file import UserFileModel, UserFolderModel
+from src.infrastructure.database.models.mcp import (
+    MCPAgentGrantModel,
+    MCPAuthorizationCodeModel,
+    MCPOAuthClientModel,
+    MCPTokenModel,
+)
 from src.infrastructure.database.models.subscription import UserSubscriptionModel
 from src.infrastructure.database.models.user import UserModel
 
@@ -24,6 +30,10 @@ __all__ = [
     "AiMessageModel",
     "ConversionJobModel",
     "CreditTransactionModel",
+    "MCPAgentGrantModel",
+    "MCPAuthorizationCodeModel",
+    "MCPOAuthClientModel",
+    "MCPTokenModel",
     "MonthlyCreditModel",
     "UserFileModel",
     "UserFolderModel",

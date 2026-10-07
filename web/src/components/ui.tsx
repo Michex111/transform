@@ -3,6 +3,7 @@ import { motion, useReducedMotion, type HTMLMotionProps } from "motion/react";
 import { Coins } from "@phosphor-icons/react";
 import { formatMeta, statusMeta } from "@/lib/format";
 import { formatTint } from "@/lib/formatVisual";
+import { displayPercent } from "@/lib/progress";
 import { FormatThumb, type FormatThumbSize } from "@/components/FormatThumb";
 
 /* ---------------- Skeleton (loading) ---------------- */
@@ -333,9 +334,21 @@ export function ProgressBar({
         className={`h-1.5 w-full overflow-hidden rounded-full bg-outline ${className}`}
         role="progressbar"
         aria-label={ariaLabel}
+        // No `aria-valuenow` (there is no honest number to report), but the bar
+        // is still *working*, so say so rather than leaving a nameless, valueless
+        // widget for a screen reader to announce as nothing.
+        aria-busy="true"
+        aria-valuetext="In progress"
       >
-        {/* An animated sweep, so a running job still reads as "moving". */}
+        {/* An animated sweep, so a running job still reads as "moving".
+            Keyed distinctly from the determinate fill below: without the key
+            React reuses this same `motion.div` when the bar becomes
+            determinate, and framer-motion keeps the animated `x` transform
+            (it is absent from the new `animate`), so the fill renders offset
+            and clipped — the "animation is wrong" the determinate bar shows
+            right after a job's first progress event. */}
         <motion.div
+          key="indeterminate"
           className="h-full w-1/3 rounded-full"
           animate={{ x: ["-100%", "300%"] }}
           transition={{ duration: 1.4, repeat: Infinity, ease: "easeInOut" }}
@@ -346,9 +359,23 @@ export function ProgressBar({
   }
 
   const clamp = Math.max(0, Math.min(100, value));
+  // Same clamp+round rule the rest of the app uses for a displayed percentage,
+  // so `aria-valuenow`/`aria-valuetext` cannot drift from it.
+  const rounded = displayPercent(value) ?? 0;
   return (
-    <div className={`h-1.5 w-full overflow-hidden rounded-full bg-outline ${className}`} role="progressbar" aria-label={ariaLabel} aria-valuenow={clamp} aria-valuemin={0} aria-valuemax={100}>
+    <div
+      className={`h-1.5 w-full overflow-hidden rounded-full bg-outline ${className}`}
+      role="progressbar"
+      aria-label={ariaLabel}
+      aria-valuenow={rounded}
+      aria-valuemin={0}
+      aria-valuemax={100}
+      // The percentage as text too: some screen readers announce `valuenow`
+      // bare, and the unit ("42%") is what makes it read as progress.
+      aria-valuetext={`${rounded}%`}
+    >
       <motion.div
+        key="determinate"
         className="h-full rounded-full"
         initial={{ width: 0 }}
         animate={{ width: `${clamp}%` }}

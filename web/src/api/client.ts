@@ -15,6 +15,9 @@ import {
   normalizeAssistantSummary,
   normalizeApiKeyList,
   normalizeBatchDelete,
+  normalizeConnectedAppList,
+  normalizeMcpConsent,
+  normalizeMcpConsentApproval,
   normalizeCancelSubscription,
   normalizeChangePlan,
   normalizeCheckout,
@@ -37,6 +40,7 @@ import {
   normalizeForgotPassword,
   normalizeGuestJob,
   normalizeInvoices,
+  normalizeJobProgressEvent,
   normalizePhoneStatus,
   normalizePaymentMethodList,
   normalizePaymentMethodSession,
@@ -1449,6 +1453,57 @@ export class ApiClient {
     this.request<unknown>('/v1/api-keys', { cacheTtlMs: 30_000 }).then(normalizeApiKeyList)
   deleteApiKey = (id: string) => this.request<void>(`/v1/api-keys/${id}`, { method: 'DELETE' })
 
+  // ---- Connected AI applications (MCP) ----
+  /**
+   * Applications the user has connected to their account.
+   *
+   * These are not API keys: each one was authorized through a browser consent
+   * flow, holds a scoped, revocable token, and can be disconnected without the
+   * user touching a password or a key.
+   */
+  listConnectedApps = () =>
+    this.request<unknown>('/v1/mcp/connected-apps', { cacheTtlMs: 15_000 }).then(
+      normalizeConnectedAppList,
+    )
+  /**
+   * Disconnect one application. Takes effect on the agent's very next request,
+   * because access tokens are resolved through the (now revoked) grant rather
+   * than trusted on their own.
+   */
+  revokeConnectedApp = (id: string) =>
+    this.request<void>(`/v1/mcp/connected-apps/${id}`, { method: 'DELETE' })
+
+  /** The authorization request an application is asking the user to approve. */
+  mcpConsentRequest = (params: {
+    client_id: string
+    redirect_uri: string
+    scope: string
+    resource?: string
+  }) =>
+    this.request<unknown>(`/v1/mcp/authorize?${new URLSearchParams(params).toString()}`).then(
+      normalizeMcpConsent,
+    )
+  /**
+   * Record the user's decision.
+   *
+   * `approved_scopes` is intersected server-side with the scopes the request
+   * actually asked for, so this page cannot approve a permission the user was
+   * never shown.
+   */
+  approveMcpConsent = (body: {
+    client_id: string
+    redirect_uri: string
+    code_challenge: string
+    scope: string
+    resource?: string | null
+    state?: string | null
+    approved_scopes: string[]
+  }) =>
+    this.request<unknown>('/v1/mcp/authorize', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }).then(normalizeMcpConsentApproval)
+
   // ---- Transform AI (assistant) ----
 
   /** Whether the assistant is on, and which backend answers. */
@@ -1637,7 +1692,10 @@ function subscribeToJobStream(
       const dispatch = (eventName: string, dataStr: string) => {
         if (eventName === 'progress') {
           try {
-            handlers.onProgress(JSON.parse(dataStr))
+            // Normalised, not raw: a frame that crossed Redis can carry its
+            // numbers as strings, which the progress bar would read as "no
+            // value" (indeterminate) instead of tracking the job.
+            handlers.onProgress(normalizeJobProgressEvent(JSON.parse(dataStr)))
           } catch {
             /* ignore malformed progress */
           }

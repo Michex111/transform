@@ -178,6 +178,23 @@ def _auto_title(first_message: str) -> str:
     return collapsed[:_MAX_TITLE_CHARS]
 
 
+def _tool_call_to_meta(call: LlmToolCall) -> dict[str, object]:
+    """Serialise one tool call for storage on an assistant message.
+
+    ``thought_signature`` is written only when the provider issued one, so a
+    transcript recorded against OpenAI/Groq keeps the exact metadata shape it
+    always had (no ``null`` key appears in the stored JSON).
+    """
+    entry: dict[str, object] = {
+        "id": call.id,
+        "name": call.name,
+        "arguments": call.arguments,
+    }
+    if call.thought_signature:
+        entry["thought_signature"] = call.thought_signature
+    return entry
+
+
 def _tool_calls_of(message: Message) -> tuple[LlmToolCall, ...]:
     """Rehydrate the tool calls recorded on a stored assistant message.
 
@@ -199,11 +216,15 @@ def _tool_calls_of(message: Message) -> tuple[LlmToolCall, ...]:
         arguments = entry.get("arguments")
         if not isinstance(call_id, str) or not isinstance(name, str):
             continue
+        signature = entry.get("thought_signature")
         calls.append(
             LlmToolCall(
                 id=call_id,
                 name=name,
                 arguments=arguments if isinstance(arguments, dict) else {},
+                # Replayed verbatim so a Gemini follow-up turn is accepted; a
+                # value stored by a non-Gemini turn simply is not there.
+                thought_signature=signature if isinstance(signature, str) and signature else None,
             )
         )
     return tuple(calls)
@@ -580,8 +601,7 @@ class AssistantService:
             content=content,
             meta={
                 "tool_calls": [
-                    {"id": call.id, "name": call.name, "arguments": call.arguments}
-                    for call in tool_calls
+                    _tool_call_to_meta(call) for call in tool_calls
                 ]
             },
         )

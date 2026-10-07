@@ -41,12 +41,28 @@ from src.presentation.api.routers.v1 import (
     users,
     webhooks,
 )
+from src.presentation.api.routers.v1 import mcp as mcp_routes
+from src.presentation.mcp.server import (
+    MCP_MOUNT_PATH,
+    LazyMCPMount,
+)
 
 logger = logging.getLogger(__name__)
 
 # Fail fast on insecure production configuration (weak SECRET_KEY, wildcard
 # CORS with credentials, plaintext object storage).
 settings = get_settings()
+
+# ---------------------------------------------------------------------------
+# MCP (AI agent access)
+# ---------------------------------------------------------------------------
+# A lazy mount rather than an import-time server: the Streamable HTTP session
+# manager can only be started once per instance, so the server is built inside
+# the lifespan (see ``LazyMCPMount``). Mounting an ASGI sub-application does NOT
+# propagate lifespan events, which is why the parent starts the session manager
+# itself — without it every MCP request fails with
+# "Task group is not initialized".
+_mcp_mount = LazyMCPMount() if settings.MCP_ENABLED else None
 
 # ---------------------------------------------------------------------------
 # Metrics
@@ -117,7 +133,13 @@ async def lifespan(_: FastAPI):
     except Exception as e:  # noqa: BLE001 — startup must proceed
         logger.warning("Bucket CORS setup failed: %s", e)
 
-    yield
+    if _mcp_mount is None:
+        yield
+        return
+
+    logger.warning("MCP transport: enabled at %s", settings.mcp_resource_url())
+    async with _mcp_mount.run():
+        yield
 
 
 app = FastAPI(
@@ -235,6 +257,17 @@ app.include_router(webhooks.router)
 app.include_router(dashboard.router)
 app.include_router(events.router)
 app.include_router(assistant.router)
+# MCP: the OAuth discovery documents live at the origin root (RFC 9728/8414),
+# and the user-facing consent + management endpoints under the versioned prefix.
+app.include_router(mcp_routes.well_known_router)
+app.include_router(mcp_routes.router)
+
+# ---------------------------------------------------------------------------
+# MCP transport
+# ---------------------------------------------------------------------------
+# Mounted after every API router so it can never shadow a product endpoint.
+if _mcp_mount is not None:
+    app.mount(MCP_MOUNT_PATH, _mcp_mount)
 
 
 # ---------------------------------------------------------------------------

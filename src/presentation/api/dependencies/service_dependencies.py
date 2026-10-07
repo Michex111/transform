@@ -12,6 +12,7 @@ from src.application.services.assistant_tools import AssistantToolBox
 from src.application.services.conversion_service import ConversionService
 from src.application.services.file_service import FileService
 from src.application.services.file_transfer_service import TransferService
+from src.application.services.mcp_access_service import MCPAccessService
 from src.application.services.priority_queue_dispatcher import PriorityQueueDispatcher
 from src.application.services.queue_priority_router import QueuePriorityRouter
 from src.application.ports.assistant_account_port import AssistantAccountPort
@@ -36,6 +37,7 @@ from src.infrastructure.adapters.repository.sql_assistant_account_adapter import
 from src.infrastructure.adapters.repository.sql_conversation_repo import SQLConversationRepository
 from src.infrastructure.adapters.repository.sql_conversion_job_repo import SQLConversionJobRepository
 from src.infrastructure.adapters.repository.sql_credit_repo import SQLCreditRepository
+from src.infrastructure.adapters.repository.sql_mcp_repo import SQLMCPRepository
 from src.infrastructure.adapters.repository.sql_subscription_repo import SQLSubscriptionRepository
 from src.infrastructure.adapters.repository.sql_user_file_repo import SQLUserFileRepository
 from src.infrastructure.adapters.repository.sql_user_folder_repo import SQLUserFolderRepository
@@ -288,6 +290,25 @@ def get_conversation_repository(
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> SQLConversationRepository:
     return SQLConversationRepository(session=db)
+
+
+def get_mcp_access_service(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> MCPAccessService:
+    """The MCP OAuth rules, bound to this request's database session.
+
+    Built per request (not cached) for the same reason as
+    ``get_assistant_account_port``: the repository is bound to the request's
+    ``AsyncSession``, and caching it would pin a pooled connection open.
+    """
+    settings = get_settings()
+    return MCPAccessService(
+        repository=SQLMCPRepository(session=db),
+        resource_url=settings.mcp_resource_url(),
+        access_token_ttl_minutes=settings.MCP_ACCESS_TOKEN_TTL_MINUTES,
+        refresh_token_ttl_days=settings.MCP_REFRESH_TOKEN_TTL_DAYS,
+        authorization_code_ttl_minutes=settings.MCP_AUTHORIZATION_CODE_TTL_MINUTES,
+    )
 
 
 def get_assistant_account_port(

@@ -556,7 +556,8 @@ def test_guest_events_streams_connected_and_terminal_event() -> None:
     payloads = [json.loads(l[len("data: "):]) for l in data_lines]
     completed = [p for p in payloads if p.get("status") == "COMPLETED"]
     assert completed, "expected a COMPLETED event payload"
-    assert completed[0]["progress"] == "100"
+    # The guest stream coerces the Redis-stringified fields to numbers too.
+    assert completed[0]["progress"] == 100
 
 
 def test_guest_download_neutralises_a_crlf_in_the_output_name() -> None:
