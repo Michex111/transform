@@ -24,7 +24,7 @@ explicitly here:
 import asyncio
 import json
 import logging
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncGenerator, Sequence
 from typing import Any
 
 import httpx
@@ -146,7 +146,7 @@ class OpenAiLlmAdapter:
         *,
         messages: Sequence[LlmMessage],
         tools: Sequence[LlmToolSpec],
-    ) -> AsyncIterator[LlmStreamChunk]:
+    ) -> AsyncGenerator[LlmStreamChunk]:
         """Stream one completion, emitting text deltas then the assembled result.
 
         A *transient* provider failure is retried, because the common one is
@@ -220,7 +220,7 @@ class OpenAiLlmAdapter:
             "Assistant model request failed after all retries"
         ) from None
 
-    async def _read_stream(self, response: httpx.Response) -> AsyncIterator[LlmStreamChunk]:
+    async def _read_stream(self, response: httpx.Response) -> AsyncGenerator[LlmStreamChunk]:
         """Decode one successful SSE response into chunks."""
         content = ""
         finish_reason: str | None = None

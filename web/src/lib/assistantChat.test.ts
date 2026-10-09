@@ -899,6 +899,27 @@ describe("applyJobProgress", () => {
     expect(next.output_size_bytes).toBe(5);
   });
 
+  it("takes the output key from the terminal frame", () => {
+    // Only the terminal frame carries it, and it is the one authority on what
+    // the worker produced — the reason the conversion card must read it here
+    // rather than waiting for a refetch it may never make. Dropping it left a
+    // finished job's card still saying its result was pending.
+    const next = applyJobProgress(job(), {
+      job_id: "j1",
+      status: "COMPLETED",
+      output_file: "output/user/49/job/j1/report.docx",
+    });
+    expect(next.output_file).toBe("output/user/49/job/j1/report.docx");
+  });
+
+  it("keeps the output key once a later frame omits it", () => {
+    const next = applyJobProgress(job({ output_file: "output/j1/report.docx" }), {
+      job_id: "j1",
+      status: "COMPLETED",
+    });
+    expect(next.output_file).toBe("output/j1/report.docx");
+  });
+
   it("records the frame's message as the error text for a failure", () => {
     const next = applyJobProgress(job(), {
       job_id: "j1",

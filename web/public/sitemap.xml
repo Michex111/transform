@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Transform sitemap.
+  Only pages that are user-valuable AND supported by the real conversion graph
+  are listed. The format hub and pair pages below were verified against
+  `build_conversion_map()` for the current release; regenerate the pair list
+  from the graph in CI when converters change rather than hand-editing it.
+-->
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <url><loc>https://transform-to.com/</loc><changefreq>weekly</changefreq><priority>1.0</priority></url>
+  <url><loc>https://transform-to.com/convert</loc><changefreq>weekly</changefreq><priority>0.9</priority></url>
+  <url><loc>https://transform-to.com/pricing</loc><changefreq>weekly</changefreq><priority>0.8</priority></url>
+  <url><loc>https://transform-to.com/developers</loc><changefreq>monthly</changefreq><priority>0.8</priority></url>
+  <url><loc>https://transform-to.com/mcp</loc><changefreq>monthly</changefreq><priority>0.8</priority></url>
+  <url><loc>https://transform-to.com/security</loc><changefreq>monthly</changefreq><priority>0.6</priority></url>
+
+  <!-- Format hubs -->
+  <url><loc>https://transform-to.com/pdf-converter</loc><priority>0.8</priority></url>
+  <url><loc>https://transform-to.com/docx-converter</loc><priority>0.8</priority></url>
+  <url><loc>https://transform-to.com/txt-converter</loc><priority>0.7</priority></url>
+  <url><loc>https://transform-to.com/jpg-converter</loc><priority>0.7</priority></url>
+  <url><loc>https://transform-to.com/png-converter</loc><priority>0.7</priority></url>
+  <url><loc>https://transform-to.com/mp3-converter</loc><priority>0.7</priority></url>
+  <url><loc>https://transform-to.com/mp4-converter</loc><priority>0.7</priority></url>
+
+  <!-- High-value conversion pairs (verified in the conversion graph) -->
+  <url><loc>https://transform-to.com/pdf-to-docx</loc><priority>0.7</priority></url>
+  <url><loc>https://transform-to.com/docx-to-pdf</loc><priority>0.7</priority></url>
+  <url><loc>https://transform-to.com/pdf-to-jpg</loc><priority>0.7</priority></url>
+  <url><loc>https://transform-to.com/pdf-to-png</loc><priority>0.7</priority></url>
+  <url><loc>https://transform-to.com/pdf-to-txt</loc><priority>0.6</priority></url>
+  <url><loc>https://transform-to.com/jpg-to-pdf</loc><priority>0.7</priority></url>
+  <url><loc>https://transform-to.com/png-to-pdf</loc><priority>0.7</priority></url>
+  <url><loc>https://transform-to.com/pptx-to-pdf</loc><priority>0.6</priority></url>
+  <url><loc>https://transform-to.com/docx-to-txt</loc><priority>0.6</priority></url>
+</urlset>

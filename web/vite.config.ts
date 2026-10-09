@@ -15,6 +15,23 @@ export default defineConfig({
   // deep links and the post-Checkout redirect don't 404. See the plugin file.
   plugins: [react(), tailwindcss(), spaRouteStubs()],
   resolve: { alias },
+  build: {
+    rollupOptions: {
+      output: {
+        // Split the framework and the animation runtime out of the entry chunk.
+        // Without this every shared dependency collapsed into one ~539 kB
+        // (164 kB gzip) `index` bundle that had to be re-downloaded whenever any
+        // app code changed. Only these two are pinned by name — deliberately no
+        // catch-all `vendor` chunk, because `@phosphor-icons/react` ships its
+        // icons as individual modules and a catch-all would merge them back into
+        // one big chunk, undoing that per-icon splitting.
+        manualChunks: {
+          "vendor-react": ["react", "react-dom", "react-router-dom"],
+          "vendor-motion": ["motion"],
+        },
+      },
+    },
+  },
   server: {
     proxy: {
       // Forward API calls to the FastAPI backend during development.

@@ -43,7 +43,10 @@ import type {
   AssistantStreamEvent,
   AssistantSummaryResponse,
   AssistantToolEvent,
+  BatchConversionResponse,
   BatchDeleteResponse,
+  BatchItemResult,
+  BatchStatusResponse,
   CancelSubscriptionResponse,
   ChangePlanResponse,
   CheckoutResponse,
@@ -79,6 +82,7 @@ import type {
   ResendVerificationResponse,
   ResetPasswordResponse,
   ResumeSubscriptionResponse,
+  SavedWorkflow,
   StorageBreakdownEntry,
   StorageStats,
   SubscriptionPlanResponse,
@@ -90,6 +94,10 @@ import type {
   UploadSessionPartsResponse,
   UserResponse,
   VerifyEmailResponse,
+  WorkflowDefinition,
+  WorkflowListResponse,
+  WorkflowOperation,
+  WorkflowRunResponse,
 } from "./types"
 import { ASSISTANT_INTERNAL_ERROR, HISTORY_DELETE_RANGES } from "./types"
 import { MAX_ASSISTANT_ATTACHMENTS } from "@/lib/assistantAttachments"
@@ -1355,4 +1363,100 @@ export function normalizeMcpConsent(value: unknown): McpConsentRequestResponse {
 export function normalizeMcpConsentApproval(value: unknown): McpConsentApprovalResponse {
   const o = asObject(value)
   return { redirect_url: asString(o.redirect_url) }
+}
+
+/* ---------------- Batch conversions + saved workflows ---------------- */
+
+/** One batch item: always carries both keys, with `job`/`error` nullable. */
+export function normalizeBatchItem(value: unknown): BatchItemResult {
+  const o = asObject(value)
+  return {
+    file_id: asString(o.file_id),
+    file_name: asString(o.file_name),
+    // `null` rather than an empty-job placeholder: "no job was created" and
+    // "a job with blank fields" must not render the same.
+    job: o.job == null ? null : normalizeConversionJob(o.job),
+    error: asNullableString(o.error),
+  }
+}
+
+/** `POST /conversions/batch`. */
+export function normalizeBatchConversion(value: unknown): BatchConversionResponse {
+  const o = asObject(value)
+  return {
+    batch_id: asString(o.batch_id),
+    status: asString(o.status),
+    created_count: asNumber(o.created_count),
+    failed_count: asNumber(o.failed_count),
+    items: asArray<unknown>(o.items).map(normalizeBatchItem),
+    workflow_id: asNullableString(o.workflow_id),
+  }
+}
+
+/** `GET /conversions/batches/{id}` — the re-readable view of a batch. */
+export function normalizeBatchStatus(value: unknown): BatchStatusResponse {
+  const o = asObject(value)
+  return {
+    batch_id: asString(o.batch_id),
+    status: asString(o.status),
+    total: asNumber(o.total),
+    completed_count: asNumber(o.completed_count),
+    failed_count: asNumber(o.failed_count),
+    active_count: asNumber(o.active_count),
+    items: asArray<unknown>(o.items).map(normalizeConversionJob),
+    workflow_id: asNullableString(o.workflow_id),
+  }
+}
+
+/** One step of a stored definition. Unknown types are kept verbatim so a
+ *  definition saved by a newer API still round-trips through the UI. */
+export function normalizeWorkflowOperation(value: unknown): WorkflowOperation {
+  const o = asObject(value)
+  return {
+    type: asString(o.type, 'convert') as WorkflowOperation['type'],
+    target_format: asString(o.target_format),
+  }
+}
+
+export function normalizeWorkflowDefinition(value: unknown): WorkflowDefinition {
+  const o = asObject(value)
+  return {
+    source: asNullableString(o.source) ?? undefined,
+    operations: asArray<unknown>(o.operations).map(normalizeWorkflowOperation),
+  }
+}
+
+export function normalizeWorkflow(value: unknown): SavedWorkflow {
+  const o = asObject(value)
+  return {
+    workflow_id: asString(o.workflow_id),
+    name: asString(o.name),
+    description: asString(o.description),
+    definition: normalizeWorkflowDefinition(o.definition),
+    run_count: asNumber(o.run_count),
+    created_at: asNullableString(o.created_at),
+    updated_at: asNullableString(o.updated_at),
+  }
+}
+
+/** `{workflows: [...]}` — always an array even when the key is missing. */
+export function normalizeWorkflowList(value: unknown): WorkflowListResponse {
+  const o = asObject(value)
+  return { workflows: asArray<unknown>(o.workflows).map(normalizeWorkflow) }
+}
+
+export function normalizeWorkflowRun(value: unknown): WorkflowRunResponse {
+  const o = asObject(value)
+  return {
+    workflow_id: asString(o.workflow_id),
+    batch_id: asString(o.batch_id),
+    status: asString(o.status),
+    created_count: asNumber(o.created_count),
+    failed_count: asNumber(o.failed_count),
+    items: asArray<unknown>(o.items).map(normalizeBatchItem),
+    // The problems are passed through as raw objects: the API's own per-item
+    // shape mirrors `items` (which carries the rendered detail), so re-typing
+    // them here would only add a second, weaker definition of the same thing.
+    problems: asArray<Record<string, unknown>>(o.problems),
+  }
 }

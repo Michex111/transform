@@ -22,7 +22,7 @@ because an ASGI sub-application is not reachable from FastAPI's
 """
 
 import contextlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -64,7 +64,7 @@ class MCPServiceScope:
 
 
 @contextlib.asynccontextmanager
-async def open_mcp_scope(user_id: int) -> AsyncIterator[MCPServiceScope]:
+async def open_mcp_scope(user_id: int) -> AsyncGenerator[MCPServiceScope]:
     """Build the per-call service bundle for ``user_id`` and dispose of it."""
     session_factory = get_session_factory()
     async with session_factory() as session:

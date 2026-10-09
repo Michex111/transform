@@ -643,6 +643,13 @@ export function applyJobProgress(job: UiJob, event: JobProgressEvent): UiJob {
     compute_duration_ms: event.compute_duration_ms ?? job.compute_duration_ms,
     input_size_bytes: event.input_size_bytes ?? job.input_size_bytes,
     output_size_bytes: event.output_size_bytes ?? job.output_size_bytes,
+    // The terminal frame is the only one that carries the output key, and it is
+    // authoritative about what the worker actually produced — a container
+    // rather than the target format when a converter emits one (`pdf -> jpg` on
+    // a multi-page PDF yields a `.zip`). Dropping it left the card on a job
+    // that had already finished still saying its result was pending, whenever
+    // the card's one-off fetch had raced ahead of completion.
+    output_file: event.output_file ?? job.output_file,
   };
 }
 

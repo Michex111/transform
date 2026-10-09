@@ -11,6 +11,7 @@ import { Link, useParams } from "react-router-dom";
 import { ArrowRight, WarningCircle } from "@phosphor-icons/react";
 import { Button } from "@/components/ui";
 import { parseFormatSlug } from "@/lib/formatRoutes";
+import { SeoHead } from "@/components/SeoHead";
 import { FormatConverterPage } from "@/pages/public/FormatConverterPage";
 import { ConversionPage } from "@/pages/public/ConversionPage";
 
@@ -18,6 +19,14 @@ import { ConversionPage } from "@/pages/public/ConversionPage";
 function NotFoundPanel({ slug }: { slug: string }) {
   return (
     <div className="format-glyph-field">
+      <SeoHead
+        meta={{
+          title: "Page not found",
+          description: "There is no page at this address.",
+          path: `/${slug}`,
+          noindex: true,
+        }}
+      />
       <div className="mx-auto max-w-2xl px-4 py-20 sm:px-6">
         <div className="rounded-xl border border-outline bg-surface p-8 text-center">
           <WarningCircle size={28} className="mx-auto mb-3 text-muted" aria-hidden />

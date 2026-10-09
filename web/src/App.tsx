@@ -17,6 +17,12 @@ const SecurityPage = lazy(() =>
 const GuestConvertPage = lazy(() =>
   import("@/pages/public/GuestConvertPage").then((m) => ({ default: m.GuestConvertPage })),
 );
+const DevelopersPage = lazy(() =>
+  import("@/pages/public/DevelopersPage").then((m) => ({ default: m.DevelopersPage })),
+);
+const McpPage = lazy(() =>
+  import("@/pages/public/McpPage").then((m) => ({ default: m.McpPage })),
+);
 const LoginPage = lazy(() =>
   import("@/pages/public/LoginPage").then((m) => ({ default: m.LoginPage })),
 );
@@ -55,6 +61,9 @@ const HistoryPage = lazy(() =>
 const FilesPage = lazy(() =>
   import("@/pages/app/FilesPage").then((m) => ({ default: m.FilesPage })),
 );
+const WorkflowsPage = lazy(() =>
+  import("@/pages/app/WorkflowsPage").then((m) => ({ default: m.WorkflowsPage })),
+);
 const BillingPage = lazy(() =>
   import("@/pages/app/BillingPage").then((m) => ({ default: m.BillingPage })),
 );
@@ -69,6 +78,12 @@ const SupportPage = lazy(() =>
 );
 const AuthorizePage = lazy(() =>
   import("@/pages/app/AuthorizePage").then((m) => ({ default: m.AuthorizePage })),
+);
+const ApiLogsPage = lazy(() =>
+  import("@/pages/app/developer/ApiLogsPage").then((m) => ({ default: m.ApiLogsPage })),
+);
+const McpActivityPage = lazy(() =>
+  import("@/pages/app/developer/McpActivityPage").then((m) => ({ default: m.McpActivityPage })),
 );
 
 function RouteFallback() {
@@ -88,6 +103,8 @@ export default function App() {
         <Route path="/" element={<LandingPage />} />
         <Route path="/pricing" element={<PricingPage />} />
         <Route path="/security" element={<SecurityPage />} />
+        <Route path="/developers" element={<DevelopersPage />} />
+        <Route path="/mcp" element={<McpPage />} />
         <Route path="/convert" element={<GuestConvertPage />} />
         {/* Dynamic format routes, ranked below every static segment above. */}
         <Route path="/:slug" element={<FormatRoutePage />} />
@@ -136,11 +153,16 @@ export default function App() {
           <Route path="/app/assistant" element={<AssistantPage />} />
           <Route path="/app/convert" element={<ConvertPage />} />
           <Route path="/app/queue" element={<QueuePage />} />
+          <Route path="/app/workflows" element={<WorkflowsPage />} />
           <Route path="/app/history" element={<HistoryPage />} />
           <Route path="/app/files" element={<FilesPage />} />
           <Route path="/app/billing" element={<BillingPage />} />
           <Route path="/app/settings" element={<SettingsPage />} />
           <Route path="/app/support" element={<SupportPage />} />
+          {/* Developer section — the last sidebar group. Two separate pages:
+              API request observability and MCP agent access control. */}
+          <Route path="/app/developer/api-logs" element={<ApiLogsPage />} />
+          <Route path="/app/developer/mcp-activity" element={<McpActivityPage />} />
           {/* The OAuth consent screen an AI application sends the browser to.
               Inside `ProtectedRoute` on purpose: the decision is made by a
               signed-in user, and the API refuses to mint a code without one. */}

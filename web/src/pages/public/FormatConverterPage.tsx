@@ -14,6 +14,8 @@ import { FormatLink, FormatLinkGrid } from "@/components/FormatLink";
 import { formatVisual } from "@/lib/formatVisual";
 import { useConversionMap } from "@/lib/useConversionMap";
 import { Reveal } from "@/lib/motion";
+import { SeoHead } from "@/components/SeoHead";
+import { breadcrumbJsonLd } from "@/lib/seo";
 
 interface FormatConverterPageProps {
   /** Normalised (lowercase, dot-free) format extension, e.g. "pdf". */
@@ -127,6 +129,14 @@ export function FormatConverterPage({ ext }: FormatConverterPageProps) {
   if (!isSupported) {
     return (
       <div className="format-glyph-field">
+        <SeoHead
+          meta={{
+            title: `${label} Converter`,
+            description: `${label} is not part of Transform's supported conversion graph.`,
+            path: `/${ext}-converter`,
+            noindex: true,
+          }}
+        />
         <div className="mx-auto max-w-2xl px-4 py-20 sm:px-6">
           <div className="rounded-xl border border-outline bg-surface p-8 text-center">
             <FormatThumb format={ext} size="lg" label="" className="mx-auto mb-4" />
@@ -154,6 +164,19 @@ export function FormatConverterPage({ ext }: FormatConverterPageProps) {
   /* ---------------- happy path ---------------- */
   return (
     <div className="format-glyph-field">
+      <SeoHead
+        meta={{
+          title: `${label} Converter`,
+          description,
+          path: `/${ext}-converter`,
+        }}
+        jsonLd={[
+          breadcrumbJsonLd([
+            { name: "Home", path: "/" },
+            { name: `${label} Converter`, path: `/${ext}-converter` },
+          ]),
+        ]}
+      />
       <div className="mx-auto max-w-4xl px-4 py-12 sm:px-6">
         <Reveal>
           <p className="mb-2 text-xs font-medium uppercase tracking-wider text-muted">

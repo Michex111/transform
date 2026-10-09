@@ -385,6 +385,43 @@ async def list_favorite_files(
     )
 
 
+@router.get("/search", response_model=FileListResponse)
+async def search_files(
+    current_user: CurrentUser,
+    file_service: Annotated[FileService, Depends(get_file_service)],
+    q: str = Query(description="Name substring to match, across every folder"),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=20, ge=1, le=50),
+) -> FileListResponse:
+    """Search the caller's own files by name, across every folder.
+
+    Backs the assistant composer's ``@`` document picker. It deliberately
+    searches the whole drive rather than one folder, because the user is naming
+    a document they remember, not the folder they filed it in.
+
+    An empty ``q`` returns nothing rather than everything: ``FileService``
+    answers a blank search with an empty result, so this endpoint can never be
+    used to enumerate a user's drive in one call. Every result is scoped by
+    ``current_user.id`` inside the service, so the route cannot widen access —
+    it has no query of its own that could.
+
+    Declared before ``/{file_id}`` so the literal path is not captured as a file
+    id by the parameterised route below.
+    """
+    try:
+        rows, total = await file_service.search_files(
+            current_user.id, q, offset=(page - 1) * page_size, limit=page_size,
+        )
+    except FileSystemError as exc:
+        raise _map_fs_error(exc) from exc
+    return FileListResponse(
+        files=[_to_metadata(r) for r in rows],
+        total=total,
+        page=page,
+        page_size=page_size,
+    )
+
+
 @router.post("/batch-delete", response_model=BatchDeleteResponse)
 async def batch_delete(
     payload: BatchDeleteRequest,

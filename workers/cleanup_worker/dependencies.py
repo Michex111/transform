@@ -17,4 +17,5 @@ def build_cleanup_worker() -> CleanupWorker:
         guest_file_retention_hours=settings.GUEST_FILE_RETENTION_HOURS,
         temp_file_retention_hours=settings.TEMP_FILE_RETENTION_HOURS,
         job_archive_days=settings.JOB_ARCHIVE_AFTER_DAYS,
+        telemetry_retention_days=settings.TELEMETRY_RETENTION_DAYS,
     )

@@ -55,6 +55,27 @@ class ConversionJobModel(Base):
     progress: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default="0"
     )
+    # Groups the jobs created by one batch request. Nullable, because the
+    # overwhelming majority of jobs are single conversions and a NULL is the
+    # honest representation of "not part of a batch".
+    #
+    # There is deliberately NO parent `batches` table: the jobs are already
+    # persisted, already carry their own status, and are already streamed
+    # individually, so a parent row would be a second copy of state that can
+    # drift out of step with its children. A batch is a *query* over this
+    # column (see `list_by_batch`).
+    #
+    # Indexed because listing a batch is exactly the access pattern it serves.
+    batch_id: Mapped[str | None] = mapped_column(String(36), index=True, nullable=True)
+    # The saved workflow this job was produced by, when it came from a run.
+    #
+    # Not a foreign key on purpose. A hard FK would make deleting a workflow
+    # either fail or cascade into the user's conversion history — and that
+    # history is the user's own record of work they actually did, which must
+    # outlive the shortcut that produced it. A dangling id here is harmless:
+    # nothing joins on it, and the runs view simply stops naming a workflow that
+    # no longer exists.
+    workflow_id: Mapped[str | None] = mapped_column(String(36), index=True, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

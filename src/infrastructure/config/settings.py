@@ -505,6 +505,46 @@ class Settings(BaseSettings):
     TEMP_FILE_RETENTION_HOURS: int = 1           # temp/ prefix objects
     JOB_ARCHIVE_AFTER_DAYS: int = 30             # full job history retention
 
+    # ------------------------------------------------------------------
+    # Developer observability (API Logs + MCP Activity)
+    # ------------------------------------------------------------------
+    # Master switch for capturing API request events. Turning it off stops new
+    # rows being written (the ingestion sink becomes a no-op) without removing
+    # the endpoints, so the feature can be disabled in an emergency without a
+    # rollback. Existing history stays readable.
+    TELEMETRY_ENABLED: bool = True
+
+    # How long request events and MCP tool invocations are kept. Bounded on
+    # purpose: an observability table that grows forever is a cost and a privacy
+    # liability, and "we keep it indefinitely" is not something the product
+    # promises. Deleted by the cleanup worker on its normal interval.
+    TELEMETRY_RETENTION_DAYS: int = 30
+
+    # Ingestion batching. The queue is the backpressure boundary: past
+    # `TELEMETRY_INGEST_MAX_QUEUE` items the writer drops rather than slowing a
+    # request, and the drop is counted and logged.
+    TELEMETRY_INGEST_BATCH_SIZE: int = 100
+    TELEMETRY_INGEST_MAX_QUEUE: int = 10_000
+    TELEMETRY_INGEST_FLUSH_SECONDS: float = 2.0
+
+    # The longest window a single metrics/log query may cover. A request for
+    # "all time" would scan the whole table; this bounds the work per call.
+    TELEMETRY_MAX_RANGE_DAYS: int = 30
+
+    # Live mode: how often a connected SSE client is sent a fresh aggregate, and
+    # how many concurrent streams one process will hold. The cap is what keeps
+    # "live dashboard" from becoming an unbounded resource: each stream costs one
+    # small query per interval, so the ceiling is streams × interval.
+    TELEMETRY_SSE_INTERVAL_SECONDS: float = 5.0
+    TELEMETRY_SSE_MAX_CONNECTIONS: int = 25
+
+    # Window used for the "current rate" reading, and the page size ceiling for
+    # the log explorer. Both are server-side bounds: the client cannot ask for a
+    # bigger page or a shorter rate window than these allow.
+    TELEMETRY_CURRENT_WINDOW_SECONDS: int = 60
+    TELEMETRY_MAX_PAGE_SIZE: int = 200
+    TELEMETRY_DEFAULT_PAGE_SIZE: int = 50
+
     # Credit calculation — time-based, derived from worker compute seconds
     # Formula: credits_used = ceil(compute_seconds * CREDIT_BASE_RATE_PER_SECOND * format_multiplier)
     CREDIT_BASE_RATE_PER_SECOND: float = 0.5  # 0.5 credits per second of raw compute

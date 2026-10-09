@@ -16,15 +16,53 @@
     <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png?v=2" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png?v=2" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="description" content="Transform — convert files between formats with a live queue, real-time progress, and no sign-up required." />
+    <!--
+      Default metadata for crawlers that do not execute JavaScript (social
+      unfurlers, many AI crawlers) and for the first paint before the SPA boots.
+      Per-route values are applied at runtime by `components/SeoHead.tsx`; these
+      are the site-wide fallbacks. There is deliberately no canonical link here:
+      the shell is served for every route, so a static canonical would
+      mis-canonicalise every page but the root. SeoHead sets it per route.
+    -->
+    <meta name="description" content="Transform is an AI-powered document platform. Convert files between 60+ formats, keep them in an encrypted Drive, and let AI work with your documents — with an API and MCP for developers and agents." />
     <meta name="theme-color" content="#121417" />
+    <meta property="og:site_name" content="Transform" />
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Transform — Convert, store, and automate your documents" />
+    <meta property="og:description" content="Convert, store, and automate your documents with Transform's AI-powered platform." />
+    <meta property="og:url" content="https://transform-to.com/" />
+    <meta property="og:image" content="https://transform-to.com/og.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Transform — Convert, store, and automate your documents" />
+    <meta name="twitter:description" content="Convert, store, and automate your documents with Transform's AI-powered platform." />
+    <meta name="twitter:image" content="https://transform-to.com/og.png" />
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "Organization",
+            "name": "Transform",
+            "url": "https://transform-to.com",
+            "logo": "https://transform-to.com/apple-touch-icon.png"
+          },
+          {
+            "@type": "WebSite",
+            "name": "Transform",
+            "url": "https://transform-to.com"
+          }
+        ]
+      }
+    </script>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@500;600;700&display=swap"
       rel="stylesheet"
     />
-    <title>Transform — File Converter</title>
+    <title>Transform — Convert, store, and automate your documents</title>
   </head>
   <body>
     <div id="root"></div>

@@ -5,7 +5,11 @@
 
 import { describe, expect, it } from "vitest";
 import type { AssistantConversation } from "@/api/types";
-import { groupConversations, relativeTimeLabel } from "@/lib/conversationGroups";
+import {
+  filterConversations,
+  groupConversations,
+  relativeTimeLabel,
+} from "@/lib/conversationGroups";
 
 const NOW = new Date(2026, 8, 29, 12, 0, 0).getTime();
 
@@ -105,5 +109,39 @@ describe("relativeTimeLabel", () => {
     expect(relativeTimeLabel(null, NOW)).toBe("");
     expect(relativeTimeLabel(undefined, NOW)).toBe("");
     expect(relativeTimeLabel("nope", NOW)).toBe("");
+  });
+});
+
+describe("filterConversations", () => {
+  const HISTORY = [
+    conversation("a", iso(2026, 8, 29, 9), { title: "Convert my resume to PDF" }),
+    conversation("b", iso(2026, 8, 29, 9), { title: "What files did I add recently?" }),
+    conversation("c", iso(2026, 8, 29, 9), { title: "RESUME formatting advice" }),
+  ];
+
+  it("matches a title substring case-insensitively", () => {
+    const found = filterConversations(HISTORY, "resume");
+    expect(found.map((entry) => entry.id)).toEqual(["a", "c"]);
+  });
+
+  it("returns the list unchanged for a blank query", () => {
+    // An empty box means "no filter", not "no results". Identity is asserted
+    // rather than equality so a needless copy cannot creep in unnoticed.
+    expect(filterConversations(HISTORY, "")).toBe(HISTORY);
+    expect(filterConversations(HISTORY, "   ")).toBe(HISTORY);
+  });
+
+  it("ignores surrounding whitespace around the query", () => {
+    expect(filterConversations(HISTORY, "  resume  ").map((entry) => entry.id)).toEqual(["a", "c"]);
+  });
+
+  it("returns nothing when no title matches", () => {
+    expect(filterConversations(HISTORY, "zzzz")).toEqual([]);
+  });
+
+  it("tolerates a conversation with no title", () => {
+    // The API can return an untitled conversation; it must not throw.
+    const untitled = conversation("d", iso(2026, 8, 29, 9), { title: "" });
+    expect(filterConversations([untitled], "anything")).toEqual([]);
   });
 });

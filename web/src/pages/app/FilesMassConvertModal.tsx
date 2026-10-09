@@ -13,12 +13,26 @@ import type { FileMetadataResponse } from "@/api/types";
 
 /**
  * Convert a group of selected files (all sharing the same source format) into a
- * chosen target format in one go. Dispatches a conversion job per file and adds
- * each to the jobs queue, reporting aggregate success and per-file errors.
+ * chosen target format in one go.
  *
- * The modal owns the conversion loop; the parent's `onConverted` callback only
- * needs to finish up (clear selection, exit selection mode) — it must NOT
- * re-submit jobs, or every file would be converted twice.
+ * This dispatches through `POST /conversions/batch` — **one request** — rather
+ * than looping over the single-conversion endpoint. The loop was the old
+ * implementation, and it was wrong in three ways that a batch endpoint fixes:
+ *
+ *   - it issued N requests, so a five-file selection was five round trips and
+ *     five chances to trip the rate limiter;
+ *   - it gave the frontend the job of deciding which files may be converted,
+ *     where the only authority is the server's own ownership check; and
+ *   - it had no group identity, so a failed file could not be retried *as part
+ *     of the same batch* and the set was unrecoverable after a reload.
+ *
+ * The response is per item, so a partially-failed selection is reported
+ * honestly: the items that started stay started, and each failure names its own
+ * file. The batch id is kept so the run can be re-read later.
+ *
+ * The parent's `onConverted` callback only finishes up (clear selection, exit
+ * selection mode) — it must NOT re-submit jobs, or every file would be
+ * converted twice.
  */
 export function FilesMassConvertModal({
   open,
@@ -35,10 +49,13 @@ export function FilesMassConvertModal({
 }) {
   const { api: client } = useAuth();
   const { addJob } = useJobs();
-  const { success, error } = useToast();
+  const { success, error: toastError } = useToast();
   const [target, setTarget] = useState("");
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState<{ ok: number; failed: number } | null>(null);
+  // The per-file reasons a batch reported. Kept so the modal can name the files
+  // that did not start instead of only counting them.
+  const [itemErrors, setItemErrors] = useState<Array<{ name: string; reason: string }>>([]);
 
   const source = sourceFormat.toLowerCase();
   // Valid targets come from the shared, cached conversion map; `enabled` keeps a
@@ -53,6 +70,7 @@ export function FilesMassConvertModal({
     if (!open) return;
     setTarget("");
     setDone(null);
+    setItemErrors([]);
   }, [open]);
 
   useEffect(() => {
@@ -63,37 +81,51 @@ export function FilesMassConvertModal({
     if (!target || busy || files.length === 0) return;
     setBusy(true);
     setDone(null);
+    setItemErrors([]);
 
-    let ok = 0;
-    let failed = 0;
-    // Convert sequentially so we can report progress per file without hammering
-    // the job endpoint with parallel requests.
-    for (const file of files) {
-      try {
-        const job = await client.convertLibraryFile(file.id, target);
+    try {
+      const result = await client.batchConvert(
+        files.map((file) => file.id),
+        target,
+      );
+
+      // Register only the jobs that actually started. A failed item has no job,
+      // so nothing is added to the queue for it.
+      for (const item of result.items) {
+        if (!item.job) continue;
+        const file = files.find((candidate) => candidate.id === item.file_id);
         addJob({
-          ...job,
-          fileName: file.file_name,
-          status: job.status,
+          ...item.job,
+          fileName: item.file_name || file?.file_name || item.job.input_file,
+          status: item.job.status,
           createdAt: new Date().toISOString(),
         });
-        ok += 1;
-      } catch (err) {
-        failed += 1;
-        error(`${file.file_name}: ${err instanceof Error ? err.message : "conversion failed"}`);
       }
-    }
 
-    setBusy(false);
-    setDone({ ok, failed });
-    if (failed === 0) {
-      success(`${ok} ${ok === 1 ? "file" : "files"} → ${target.toUpperCase()} added to the queue.`);
-      onConverted();
-      onClose();
-    } else if (ok > 0) {
-      success(`${ok} converted, ${failed} failed.`);
-      onConverted();
-      onClose();
+      const failures = result.items
+        .filter((item) => item.error)
+        .map((item) => ({ name: item.file_name || item.file_id, reason: item.error ?? "" }));
+
+      setItemErrors(failures);
+      setDone({ ok: result.created_count, failed: result.failed_count });
+
+      if (result.failed_count === 0) {
+        success(
+          `${result.created_count} ${result.created_count === 1 ? "file" : "files"} → ${target.toUpperCase()} added to the queue.`,
+        );
+        onConverted();
+        onClose();
+      } else if (result.created_count > 0) {
+        // Stays open so the user can read which files failed and why.
+        success(`${result.created_count} queued, ${result.failed_count} could not start.`);
+        onConverted();
+      }
+      // Nothing started: leave the modal open on the error list rather than
+      // closing over a message the user would have to catch in a toast.
+    } catch (err) {
+      toastError(err instanceof Error ? err.message : "Could not start the conversions");
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -181,10 +213,22 @@ export function FilesMassConvertModal({
             <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
-              className="flex items-center gap-2 rounded-lg border border-error/40 bg-error/10 px-3 py-2 text-sm text-error"
+              className="space-y-1.5 rounded-lg border border-error/40 bg-error/10 px-3 py-2 text-sm text-error"
             >
-              <X size={15} weight="bold" />
-              {done.failed} {done.failed === 1 ? "file" : "files"} failed — everything else was queued.
+              <p className="flex items-center gap-2 font-medium">
+                <X size={15} weight="bold" />
+                {done.failed} {done.failed === 1 ? "file" : "files"} could not start
+                {done.ok > 0 ? " — everything else was queued." : "."}
+              </p>
+              {/* The server's own reason per file, so the user can act on the
+                  ones they care about rather than re-guessing the whole set. */}
+              <ul className="space-y-1 pl-6 text-xs">
+                {itemErrors.map((item) => (
+                  <li key={item.name} className="min-w-0 break-words">
+                    <span className="font-medium">{item.name}</span>: {item.reason}
+                  </li>
+                ))}
+              </ul>
             </motion.div>
           )}
         </AnimatePresence>
@@ -197,6 +241,13 @@ export function FilesMassConvertModal({
             <ArrowsClockwise size={16} /> {busy ? "Converting…" : "Convert all"}
           </Button>
         </div>
+        {done && done.failed > 0 && done.ok === 0 && (
+          // Nothing started, so the modal stays open on the reasons rather than
+          // closing over a message the user would have to catch in a toast.
+          <Button variant="secondary" className="w-full" onClick={onClose}>
+            Close
+          </Button>
+        )}
       </div>
     </Modal>
   );

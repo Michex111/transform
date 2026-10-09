@@ -22,18 +22,26 @@ from src.infrastructure.database.models.mcp import (
     MCPTokenModel,
 )
 from src.infrastructure.database.models.subscription import UserSubscriptionModel
+from src.infrastructure.database.models.telemetry import (
+    ApiRequestEventModel,
+    McpToolInvocationModel,
+)
 from src.infrastructure.database.models.user import UserModel
+from src.infrastructure.database.models.workflow import SavedWorkflowModel
 
 __all__ = [
     "APIKeyModel",
     "AiConversationModel",
     "AiMessageModel",
+    "ApiRequestEventModel",
     "ConversionJobModel",
     "CreditTransactionModel",
     "MCPAgentGrantModel",
     "MCPAuthorizationCodeModel",
     "MCPOAuthClientModel",
     "MCPTokenModel",
+    "McpToolInvocationModel",
+    "SavedWorkflowModel",
     "MonthlyCreditModel",
     "UserFileModel",
     "UserFolderModel",

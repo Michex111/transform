@@ -57,6 +57,8 @@ describe("SPA route stubs", () => {
     "reset-password",
     "pricing",
     "security",
+    "developers",
+    "mcp",
     "convert",
   ])("stubs the public route /%s", (route) => {
     expect(SPA_ROUTES).toContain(`/${route}`);

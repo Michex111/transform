@@ -16,13 +16,15 @@ from fastapi import FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
+from prometheus_client import CONTENT_TYPE_LATEST, Counter, Gauge, Histogram, generate_latest
 from sqlalchemy import text
 
 from src.infrastructure.config.settings import get_settings
 from src.infrastructure.database.initializer import initialize_database
 from src.infrastructure.database.session import get_engine
 from src.infrastructure.adapters.storage.cors import apply_bucket_cors
+from src.infrastructure.telemetry.ingestion import get_telemetry_ingestion
+from src.presentation.api.middleware.api_telemetry import api_telemetry_middleware
 from src.presentation.api.middleware.rate_limit import build_rate_limit_middleware
 from src.presentation.api.middleware.security_headers import SecurityHeadersMiddleware
 from src.presentation.api.middleware.body_limit import RequestBodyLimitMiddleware
@@ -33,6 +35,7 @@ from src.presentation.api.routers.v1 import (
     conversions,
     credits,
     dashboard,
+    developer,
     events,
     files,
     guest,
@@ -40,6 +43,7 @@ from src.presentation.api.routers.v1 import (
     upload,
     users,
     webhooks,
+    workflows,
 )
 from src.presentation.api.routers.v1 import mcp as mcp_routes
 from src.presentation.mcp.server import (
@@ -76,6 +80,26 @@ HTTP_REQUEST_DURATION = Histogram(
     "http_request_duration_seconds",
     "HTTP request duration in seconds",
     ["method", "path"],
+)
+
+# Telemetry write-path health. Exposed as gauges so a queue that is filling up
+# (or a writer that has started dropping) is alertable rather than silent — the
+# whole point of counting drops is that somebody can act on the count.
+TELEMETRY_QUEUE_DEPTH = Gauge(
+    "telemetry_ingest_queue_depth",
+    "Items waiting in the telemetry ingestion queue",
+)
+TELEMETRY_DROPPED = Gauge(
+    "telemetry_ingest_dropped_total",
+    "Telemetry items dropped because the ingestion queue was full",
+)
+TELEMETRY_WRITE_FAILURES = Gauge(
+    "telemetry_ingest_write_failures_total",
+    "Telemetry batches that failed to persist",
+)
+TELEMETRY_WRITTEN = Gauge(
+    "telemetry_ingest_written_total",
+    "Telemetry items successfully persisted",
 )
 
 
@@ -133,13 +157,27 @@ async def lifespan(_: FastAPI):
     except Exception as e:  # noqa: BLE001 — startup must proceed
         logger.warning("Bucket CORS setup failed: %s", e)
 
+    # Start the telemetry write path. It is a no-op when TELEMETRY_ENABLED is
+    # false, and it must be started before any request is served so the first
+    # request's event is not lost.
+    ingestion = get_telemetry_ingestion()
+    ingestion.start()
+
     if _mcp_mount is None:
-        yield
+        try:
+            yield
+        finally:
+            await ingestion.stop()
         return
 
     logger.warning("MCP transport: enabled at %s", settings.mcp_resource_url())
-    async with _mcp_mount.run():
-        yield
+    try:
+        async with _mcp_mount.run():
+            yield
+    finally:
+        # Drain the queue on shutdown so a clean deploy does not lose the final
+        # seconds of activity.
+        await ingestion.stop()
 
 
 app = FastAPI(
@@ -217,6 +255,16 @@ async def metrics_middleware(request: Request, call_next):
     return response
 
 
+# Record every attributable API request for the Developer > API Logs dashboard.
+#
+# The position in the stack is not load-bearing: the middleware reads the owner
+# from state written by the route's own authentication dependency, and it
+# excludes the streaming endpoints whose duration would otherwise be measured as
+# a connection lifetime. It writes to a bounded queue and never awaits storage,
+# so it cannot fail — or slow down — the request it describes.
+app.middleware("http")(api_telemetry_middleware)
+
+
 @app.get("/health", tags=["health"])
 async def health_check() -> dict:
     """Liveness check — the process is up and serving traffic."""
@@ -241,6 +289,11 @@ async def readiness_check() -> JSONResponse:
 @app.get("/metrics", tags=["health"], include_in_schema=False)
 async def metrics_endpoint() -> Response:
     """Prometheus metrics endpoint."""
+    stats = get_telemetry_ingestion().stats()
+    TELEMETRY_QUEUE_DEPTH.set(stats.get("queue_depth", 0))
+    TELEMETRY_DROPPED.set(stats.get("dropped_events", 0) + stats.get("dropped_invocations", 0))
+    TELEMETRY_WRITE_FAILURES.set(stats.get("write_failures", 0))
+    TELEMETRY_WRITTEN.set(stats.get("written_events", 0) + stats.get("written_invocations", 0))
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
@@ -257,6 +310,11 @@ app.include_router(webhooks.router)
 app.include_router(dashboard.router)
 app.include_router(events.router)
 app.include_router(assistant.router)
+app.include_router(workflows.router)
+# Developer observability: API logs + MCP activity. Excluded from request
+# telemetry capture (see the middleware) so the instrument does not measure
+# itself.
+app.include_router(developer.router)
 # MCP: the OAuth discovery documents live at the origin root (RFC 9728/8414),
 # and the user-facing consent + management endpoints under the versioned prefix.
 app.include_router(mcp_routes.well_known_router)

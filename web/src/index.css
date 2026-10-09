@@ -21,6 +21,48 @@
   --color-success: #22c55e;
   --color-warning: #f5a623;
   --color-error: #f43f5e;
+  --color-info: #4a9eff;
+
+  /* Semantic containers — a tinted fill plus a readable on-color, so a status
+     badge/callout never has to invent an alpha suffix (an alpha suffix on a
+     `var(--token)` is invalid CSS and silently drops the declaration — see the
+     `color-mix` note on the scrollbar tokens below). */
+  --color-success-container: #122e1e;
+  --color-on-success-container: #b6f0cd;
+  --color-warning-container: #33260c;
+  --color-on-warning-container: #f7ddab;
+  --color-error-container: #3a1620;
+  --color-on-error-container: #ffc9d4;
+  --color-info-container: #16283f;
+  --color-on-info-container: #cfe4ff;
+
+  /* Additional surfaces. `surface-raised` is one step above `surface` (menus,
+     popovers, sticky headers, stat cards); `surface-sunken` is one step below
+     the page (code blocks, table wells, inset tracks). `overlay` is the scrim
+     behind modals — a token so every backdrop matches. */
+  --color-surface-raised: #262a31;
+  --color-surface-sunken: #0e1013;
+  --color-overlay: rgb(8 9 12 / 0.66);
+
+  /* Link text on a dark surface: primary lightened so it clears AA at body
+     size (plain #5a6bff on #1b1e23 is ~4.1:1). */
+  --color-link: #8f9bff;
+
+  /* Elevation. A dark UI reads depth through a border plus a soft shadow, not
+     through a lighter fill, so these are shadow-only scales. e1 = resting card
+     hover, e2 = raised card / menu, e3 = popover / toast, e4 = modal. */
+  --shadow-e1: 0 1px 2px rgb(0 0 0 / 0.35), inset 0 1px 0 rgb(255 255 255 / 0.04);
+  --shadow-e2: 0 4px 12px -2px rgb(0 0 0 / 0.45), inset 0 1px 0 rgb(255 255 255 / 0.05);
+  --shadow-e3: 0 12px 28px -6px rgb(0 0 0 / 0.55), inset 0 1px 0 rgb(255 255 255 / 0.06);
+  --shadow-e4: 0 24px 56px -12px rgb(0 0 0 / 0.65);
+
+  /* Categorical chart palette — ordered so adjacent series stay legible. */
+  --color-chart-1: #5a6bff;
+  --color-chart-2: #f97316;
+  --color-chart-3: #1fa463;
+  --color-chart-4: #e8549c;
+  --color-chart-5: #f5a623;
+  --color-chart-6: #4a9eff;
 
   /* Format colors */
   --color-fmt-pdf: #ff5a5f;

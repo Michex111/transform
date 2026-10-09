@@ -39,6 +39,8 @@ export const SPA_ROUTES = [
   // Public marketing routes
   "/pricing",
   "/security",
+  "/developers",
+  "/mcp",
   "/convert",
   // Auth routes
   "/login",
@@ -54,6 +56,7 @@ export const SPA_ROUTES = [
   "/app/assistant",
   "/app/convert",
   "/app/queue",
+  "/app/workflows",
   "/app/history",
   "/app/files",
   "/app/billing",
@@ -67,6 +70,10 @@ export const SPA_ROUTES = [
   // it is always a HARD load — without a stub the connection attempt 404s at
   // the CDN before the SPA ever boots.
   "/app/authorize",
+  // Developer section. Deep-linking to a saved view (or a shared link) is a
+  // hard load, so both pages need a stub.
+  "/app/developer/api-logs",
+  "/app/developer/mcp-activity",
 ] as const;
 
 /**

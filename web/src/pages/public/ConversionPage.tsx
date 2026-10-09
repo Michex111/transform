@@ -12,6 +12,8 @@ import { FormatLink, FormatLinkGrid } from "@/components/FormatLink";
 import { formatVisual } from "@/lib/formatVisual";
 import { useConversionMap } from "@/lib/useConversionMap";
 import { Reveal } from "@/lib/motion";
+import { SeoHead } from "@/components/SeoHead";
+import { breadcrumbJsonLd } from "@/lib/seo";
 
 /** Cap on how many sibling pairs we list so the page stays scannable. */
 const MAX_RELATED = 12;
@@ -126,6 +128,14 @@ export function ConversionPage({ from, to }: ConversionPageProps) {
   if (!isSupported) {
     return (
       <div className="format-glyph-field">
+        <SeoHead
+          meta={{
+            title: `${fromVisual.label} to ${toVisual.label}`,
+            description: `${fromVisual.label} to ${toVisual.label} is not part of Transform's supported conversion graph.`,
+            path: `/${from}-to-${to}`,
+            noindex: true,
+          }}
+        />
         <div className="mx-auto max-w-3xl px-4 py-16 sm:px-6">
           <h1 className="font-display text-3xl font-semibold tracking-tight sm:text-4xl">
             {fromVisual.label} to {toVisual.label} is not supported
@@ -177,6 +187,20 @@ export function ConversionPage({ from, to }: ConversionPageProps) {
   /* ---------------- happy path ---------------- */
   return (
     <div className="format-glyph-field">
+      <SeoHead
+        meta={{
+          title: `${fromVisual.label} to ${toVisual.label} Converter`,
+          description: `Convert ${fromVisual.label} to ${toVisual.label} online with Transform — free, with no sign-up required.`,
+          path: `/${from}-to-${to}`,
+        }}
+        jsonLd={[
+          breadcrumbJsonLd([
+            { name: "Home", path: "/" },
+            { name: `${fromVisual.label} Converter`, path: `/${from}-converter` },
+            { name: `${fromVisual.label} to ${toVisual.label}`, path: `/${from}-to-${to}` },
+          ]),
+        ]}
+      />
       <div className="mx-auto max-w-4xl px-4 py-12 sm:px-6">
         <Reveal>
           <p className="mb-2 text-xs font-medium uppercase tracking-wider text-muted">

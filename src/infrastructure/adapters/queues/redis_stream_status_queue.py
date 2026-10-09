@@ -1,6 +1,6 @@
 import asyncio
 import logging
-from typing import AsyncIterator
+from typing import AsyncGenerator
 from redis.asyncio import Redis
 
 from .stream_names import JOB_EVENT_STREAM, qualify
@@ -60,7 +60,7 @@ class JobEventSubscriber:
         # honoured (tests and replay tools pass one).
         self.stream_name = stream_name or qualify(JOB_EVENT_STREAM)
 
-    async def iter_events(self, job_id: str) -> AsyncIterator[tuple[str, dict]]:
+    async def iter_events(self, job_id: str) -> AsyncGenerator[tuple[str, dict]]:
         """
         Yield (message_id, event_dict) pairs for a job, replaying existing
         events first and then blocking for new ones.

@@ -18,13 +18,31 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 
+from src.domain.security.exceptions.exceptions import InvalidGrantTransition
 from src.domain.security.value_object.agent_scope import AgentScope, covers
 
 
 class AgentGrantStatus(StrEnum):
-    """Lifecycle of a grant. Mirrors the stored PostgreSQL enum values."""
+    """Lifecycle of a grant.
+
+    Stored in a plain ``VARCHAR`` column (see the MCP models), so adding a value
+    here needs no migration — deliberately, because a new PostgreSQL enum value
+    cannot be used in the same transaction that adds it.
+
+    The three states answer different questions and are not interchangeable:
+
+    * ``ACTIVE`` — the user has consented and the agent may work.
+    * ``PAUSED`` — the user has *suspended* access. It is reversible by the user
+      alone, the grant's scopes are preserved, and no new authorization flow is
+      needed to undo it. This is the "stop this agent right now" control.
+    * ``REVOKED`` — consent is withdrawn. The credentials are destroyed and
+      regaining access requires a fresh OAuth consent, which is the point:
+      revocation is the answer to "I no longer trust this application", and a
+      merely-disabled flag would not be.
+    """
 
     ACTIVE = "ACTIVE"
+    PAUSED = "PAUSED"
     REVOKED = "REVOKED"
 
 
@@ -47,18 +65,54 @@ class AgentGrant:
     created_at: datetime | None = None
     last_used_at: datetime | None = None
     revoked_at: datetime | None = None
+    #: When the user last paused the grant, cleared on resume. Recorded so the
+    #: UI can say when access was suspended, and so the audit question "how long
+    #: was this agent blocked?" is answerable from the row itself.
+    paused_at: datetime | None = None
 
     def is_active(self) -> bool:
-        """Whether the grant may still be exercised."""
+        """Whether the grant may currently be exercised.
+
+        A paused grant is **not** active. This single predicate is what enforces
+        a pause: access tokens are opaque and resolved through this row on every
+        MCP call, and that resolution refuses a grant for which this is false —
+        so a pause takes effect on the very next tool call, with no reliance on
+        a short token lifetime and no way for an existing session to slip past.
+        """
         return self.status is AgentGrantStatus.ACTIVE and len(self.scopes) > 0
 
     def covers(self, scope: AgentScope) -> bool:
         """Whether this (active) grant authorizes ``scope``.
 
-        Revocation is enforced here as well as in the repository so a stale
-        in-memory instance can never be the weak link.
+        Revocation and pausing are enforced here as well as in the repository so
+        a stale in-memory instance can never be the weak link.
         """
         return self.is_active() and covers(self.scopes, scope)
+
+    def pause(self, *, now: datetime) -> None:
+        """Suspend the grant without destroying it. Idempotent.
+
+        Refuses to move a revoked grant: revocation is terminal by design, and
+        a pause that silently "resurrected" a revoked grant into a resumable
+        state would make ``resume`` a way back in without a new consent.
+        """
+        if self.status is AgentGrantStatus.REVOKED:
+            raise InvalidGrantTransition("A revoked grant cannot be paused.")
+        if self.status is not AgentGrantStatus.PAUSED:
+            self.status = AgentGrantStatus.PAUSED
+            self.paused_at = now
+
+    def resume(self) -> None:
+        """Undo a pause, restoring exactly the scopes already granted.
+
+        Never widens access: the scope tuple is untouched, so a resume after a
+        re-consent that narrowed the scopes cannot bring the old ones back.
+        """
+        if self.status is AgentGrantStatus.REVOKED:
+            raise InvalidGrantTransition("A revoked grant cannot be resumed.")
+        if self.status is AgentGrantStatus.PAUSED:
+            self.status = AgentGrantStatus.ACTIVE
+            self.paused_at = None
 
     def revoke(self, *, now: datetime) -> None:
         """Mark the grant revoked. Idempotent.

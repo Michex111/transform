@@ -19,6 +19,10 @@ export function ToolSteps({ steps }: { steps: AssistantStep[] }) {
 
   const count = steps.length;
   const noun = count === 1 ? "step" : "steps";
+  // "Activity", not "steps": the panel answers "what did it actually do?", and
+  // the count is carried in the accessible name so the visible label can stay
+  // short without hiding the number from a screen reader.
+  const label = open ? "Hide activity" : "View activity";
 
   return (
     <div className="space-y-1.5">
@@ -27,6 +31,7 @@ export function ToolSteps({ steps }: { steps: AssistantStep[] }) {
         onClick={() => setOpen((value) => !value)}
         aria-expanded={open}
         aria-controls={panelId}
+        aria-label={`${label}, ${count} ${noun}`}
         className="inline-flex items-center gap-1.5 rounded-md px-1 py-0.5 text-xs text-muted transition-colors hover:text-on-background pointer-coarse:min-h-11"
       >
         <CaretDown
@@ -35,7 +40,10 @@ export function ToolSteps({ steps }: { steps: AssistantStep[] }) {
           aria-hidden
           className={`shrink-0 transition-transform ${open ? "rotate-180" : ""}`}
         />
-        <span>{open ? "Hide steps" : `Show ${count} ${noun}`}</span>
+        <span>{label}</span>
+        <span className="text-muted/70" aria-hidden>
+          {count}
+        </span>
       </button>
 
       <ol id={panelId} hidden={!open} className="space-y-1.5 border-l border-outline pl-3">

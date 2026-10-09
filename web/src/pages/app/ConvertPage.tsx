@@ -532,6 +532,15 @@ export function ConvertPage() {
                     const retrying = retryingId === job.job_id;
                     const name = job.fileName ?? job.input_file;
                     const failed = job.status === "FAILED";
+                    // The file the Download button will actually save — derived
+                    // from the object the worker produced, not from the row's
+                    // name. `name` is the SOURCE file, so announcing it here
+                    // told a screen-reader user they were downloading
+                    // `invoice #2024 (final).pdf` when the button fetches the
+                    // `.docx` the conversion produced (extension included). The
+                    // same helper the download path uses, so the label cannot
+                    // drift from the file it names.
+                    const downloadName = jobOutputFilename(job);
 
                     // Whether this job's *output* can be rendered in-page. Read
                     // from `jobOutputFilename`, never `target_format`: a
@@ -572,7 +581,7 @@ export function ConvertPage() {
                         type="button"
                         onClick={() => void downloadJob(job)}
                         disabled={busy}
-                        aria-label={downloading ? `Downloading ${name}` : `Download ${name}`}
+                        aria-label={downloading ? `Downloading ${downloadName}` : `Download ${downloadName}`}
                         title={downloading ? "Downloading…" : "Download"}
                         className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary text-on-primary transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-50 pointer-coarse:min-h-11 pointer-coarse:min-w-11"
                       >

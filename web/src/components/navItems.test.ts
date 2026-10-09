@@ -10,7 +10,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { MORE, NAV, PRIMARY, SUPPORT_LINKS } from "@/components/navItems";
+import { MORE, NAV, NAV_GROUPS, PRIMARY, SUPPORT_LINKS } from "@/components/navItems";
 import { HISTORY_TIMELINE_STATE_KEY, timelineFromNavigationState } from "@/lib/historyFilters";
 
 describe("navigation model", () => {
@@ -76,6 +76,51 @@ describe("other destinations", () => {
     // would make this model an unreliable description of intent.
     const withState = NAV.filter((item) => item.state !== undefined).map((item) => item.to);
     expect(withState).toEqual(["/app/history"]);
+  });
+});
+
+describe("sidebar groups", () => {
+  it("cover every destination exactly once", () => {
+    // The desktop sidebar renders NAV_GROUPS, not NAV. A destination present in
+    // NAV but missing from the groups would be unreachable on desktop while the
+    // phone bar still showed it — so this pins the two lists to each other.
+    const grouped = NAV_GROUPS.flatMap((group) => group.items.map((item) => item.to));
+    expect(grouped).toHaveLength(NAV.length);
+    expect(new Set(grouped).size).toBe(NAV.length);
+    expect([...grouped].sort()).toEqual(NAV.map((item) => item.to).sort());
+  });
+
+  it("give every group a label and at least one destination", () => {
+    for (const group of NAV_GROUPS) {
+      expect(group.label.length).toBeGreaterThan(0);
+      expect(group.items.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("name the stored-files destination Drive, not Files", () => {
+    // The route stays `/app/files` (renaming it would break existing links), but
+    // the label must match the page, which calls itself "My Drive".
+    expect(NAV.find((item) => item.to === "/app/files")?.label).toBe("Drive");
+  });
+
+  it("place Developer last, as its own section", () => {
+    const last = NAV_GROUPS[NAV_GROUPS.length - 1];
+    expect(last.label).toBe("Developer");
+    // The two Developer pages are separate destinations, not one merged view:
+    // API request logs and MCP agent activity answer different questions.
+    expect(last.items.map((item) => item.to)).toEqual([
+      "/app/developer/api-logs",
+      "/app/developer/mcp-activity",
+    ]);
+  });
+
+  it("reach the Developer pages from the phone bar's overflow", () => {
+    // The desktop sidebar renders NAV_GROUPS, but a phone only renders
+    // PRIMARY + MORE — so a Developer route absent from NAV would be
+    // unreachable on a phone.
+    for (const to of ["/app/developer/api-logs", "/app/developer/mcp-activity"]) {
+      expect(MORE.some((item) => item.to === to)).toBe(true);
+    }
   });
 });
 

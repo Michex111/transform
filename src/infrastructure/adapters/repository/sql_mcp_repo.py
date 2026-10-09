@@ -26,6 +26,7 @@ from src.application.ports.mcp_oauth_port import (
     TokenRecord,
 )
 from src.domain.security.enitities.agent_grant import AgentGrant, AgentGrantStatus
+from src.domain.security.exceptions.exceptions import InvalidGrantTransition
 from src.domain.security.value_object.agent_scope import normalize_scopes
 from src.infrastructure.database.models import (
     MCPAgentGrantModel,
@@ -144,8 +145,12 @@ class SQLMCPRepository:
             row.status = AgentGrantStatus.ACTIVE.value
             row.resource = grant.resource
             # A fresh consent clears the previous revocation, because the user
-            # has just explicitly re-approved the application.
+            # has just explicitly re-approved the application. It clears a
+            # pause for the same reason: re-consenting is a stronger act than
+            # resuming, and leaving the row paused would silently deny access
+            # the user just granted.
             row.revoked_at = None
+            row.paused_at = None
         await self._session.commit()
         stored = await self.get_grant_for_user_client(grant.user_id, grant.client_id)
         assert stored is not None  # just written
@@ -188,6 +193,44 @@ class SQLMCPRepository:
             row.status = AgentGrantStatus.REVOKED.value
             row.revoked_at = datetime.now(UTC)
             await self._session.commit()
+        return self._to_grant(row)
+
+    async def set_grant_status(
+        self, grant_id: str, user_id: int, status: AgentGrantStatus, now: datetime
+    ) -> AgentGrant | None:
+        """Move a grant to ``status``, scoped to its owner.
+
+        One method for pause and resume rather than two, because the transition
+        rules live on the entity (:meth:`AgentGrant.pause` / ``resume``) and
+        duplicating them in two near-identical SQL methods is how the two paths
+        drift apart.
+
+        Scoped by ``user_id`` in the same statement that loads the row, so a
+        guessed grant id belonging to another account is indistinguishable from
+        one that does not exist — there is no ownership oracle.
+
+        **Revocation is terminal.** A stored ``REVOKED`` grant is never moved
+        back to ``PAUSED``/``ACTIVE`` here; that requires a fresh OAuth consent
+        (``upsert_grant``), which is the whole point of the distinction.
+        """
+        result = await self._session.execute(
+            select(MCPAgentGrantModel).where(
+                MCPAgentGrantModel.id == grant_id,
+                MCPAgentGrantModel.user_id == user_id,
+            )
+        )
+        row = result.scalars().first()
+        if row is None:
+            return None
+        if row.status == AgentGrantStatus.REVOKED.value:
+            raise InvalidGrantTransition("A revoked grant cannot be paused or resumed.")
+        if row.status == status.value:
+            # Idempotent: a repeated pause/resume keeps the original timestamp
+            # so the audit trail records when access actually changed.
+            return self._to_grant(row)
+        row.status = status.value
+        row.paused_at = now if status is AgentGrantStatus.PAUSED else None
+        await self._session.commit()
         return self._to_grant(row)
 
     async def touch_grant(self, grant_id: str, used_at: datetime) -> None:
@@ -357,6 +400,7 @@ class SQLMCPRepository:
             created_at=_aware(row.created_at),
             last_used_at=_aware(row.last_used_at),
             revoked_at=_aware(row.revoked_at),
+            paused_at=_aware(row.paused_at),
         )
 
 

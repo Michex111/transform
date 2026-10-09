@@ -2,6 +2,7 @@ import { Link, Outlet, useLocation } from "react-router-dom";
 import { useEffect, useState } from "react";
 import { motion } from "motion/react";
 import { List, X } from "@phosphor-icons/react";
+import { API_ORIGIN } from "@/api/client";
 import { useAuth } from "@/auth/AuthContext";
 import { ProfileMenu } from "@/components/ProfileMenu";
 import { Logo } from "@/components/ui";
@@ -38,8 +39,13 @@ function PublicHeader() {
     setMenuOpen(false);
   }, [location.pathname]);
 
+  // The public nav surfaces the whole platform, not just the converter. The
+  // product is conversion + AI + Drive + a developer surface; a conversion-only
+  // nav made the other three invisible to every prospect.
   const navLinks = [
     { to: "/convert", label: "Convert" },
+    { to: "/developers", label: "Developers" },
+    { to: "/mcp", label: "AI agents" },
     { to: "/pricing", label: "Pricing" },
     { to: "/security", label: "Security" },
   ];
@@ -151,7 +157,8 @@ function PublicHeader() {
 
 function PublicFooter() {
   const linkClass = "text-sm text-muted hover:text-on-background";
-  const Col = ({ title, links }: { title: string; links: { label: string; to?: string }[] }) => (
+  type FooterLink = { label: string; to?: string; href?: string };
+  const Col = ({ title, links }: { title: string; links: FooterLink[] }) => (
     <div>
       <p className="mb-3 text-sm font-semibold text-on-background">{title}</p>
       <ul className="space-y-2">
@@ -161,6 +168,13 @@ function PublicFooter() {
               <Link to={it.to} className={linkClass}>
                 {it.label}
               </Link>
+            ) : it.href ? (
+              /* An absolute URL (the API reference and status live on the API
+                 origin, not this host). Opened in a new tab like the Support
+                 page's links, so the SPA is not replaced. */
+              <a href={it.href} target="_blank" rel="noreferrer" className={linkClass}>
+                {it.label}
+              </a>
             ) : (
               /* No real route exists yet — render as inert, non-clickable text
                  instead of a dead `href="#"` link. */
@@ -180,31 +194,59 @@ function PublicFooter() {
 
   return (
     <footer className="border-t border-outline">
-      <div className="mx-auto grid max-w-6xl grid-cols-2 gap-8 px-4 py-12 sm:grid-cols-4 sm:px-6">
+      <div className="mx-auto grid max-w-6xl grid-cols-2 gap-8 px-4 py-12 sm:grid-cols-3 sm:px-6 lg:grid-cols-5">
         <Col
           title="Product"
           links={[
             { label: "Convert", to: "/convert" },
-            { label: "Format catalog", to: "/#format-catalog" },
-            { label: "Queue", to: "/app/queue" },
             { label: "Pricing", to: "/pricing" },
-            { label: "API keys" },
+            { label: "Security", to: "/security" },
+            { label: "Format catalog", to: "/#format-catalog" },
           ]}
         />
-        <Col title="Company" links={[{ label: "About" }, { label: "Blog" }, { label: "Careers" }, { label: "Contact" }]} />
+        <Col
+          title="Platform"
+          links={[
+            { label: "Developers", to: "/developers" },
+            { label: "AI agents", to: "/mcp" },
+            { label: "API reference", href: `${API_ORIGIN}/docs` },
+          ]}
+        />
+        {/* Real conversion pages, so the public site links into the format
+            layer instead of leaving it orphaned from `/`. */}
+        <Col
+          title="Popular conversions"
+          links={[
+            { label: "PDF converter", to: "/pdf-converter" },
+            { label: "DOCX converter", to: "/docx-converter" },
+            { label: "JPG converter", to: "/jpg-converter" },
+            { label: "MP3 converter", to: "/mp3-converter" },
+          ]}
+        />
+        <Col
+          title="Company"
+          links={[
+            { label: "About" },
+            { label: "Blog" },
+            { label: "Contact" },
+            { label: "Status", href: `${API_ORIGIN}/health` },
+          ]}
+        />
         <Col
           title="Legal"
           links={[
             { label: "Privacy" },
             { label: "Terms" },
-            { label: "Security", to: "/security" },
             { label: "GDPR" },
+            { label: "Security", to: "/security" },
           ]}
         />
-        <div>
-          <p className="mb-3 text-sm font-semibold text-on-background">Transform</p>
+      </div>
+      <div className="border-t border-outline">
+        <div className="mx-auto max-w-6xl px-4 py-6 sm:px-6">
           <p className="text-sm text-muted">
-            Fast, dependable file conversion with a live queue.
+            Transform is an AI-powered document platform — convert, store, and automate your
+            documents.
           </p>
         </div>
       </div>

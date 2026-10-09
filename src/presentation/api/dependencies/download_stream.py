@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from typing import Any
 
 from src.infrastructure.adapters.security.encryption import (
@@ -20,7 +20,7 @@ async def iter_decrypted_object(
     key: str,
     encryption_service: FileEncryptionService,
     user_id: str,
-) -> AsyncIterator[bytes]:
+) -> AsyncGenerator[bytes]:
     """
     Stream a stored object while decrypting it chunk by chunk.
 

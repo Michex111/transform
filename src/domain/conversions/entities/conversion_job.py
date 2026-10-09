@@ -48,6 +48,14 @@ class ConversionJob:
     # or not reported", which the UI shows as indeterminate rather than as an
     # empty 0% bar.
     progress: int = 0
+    # Groups the jobs created by one batch request, when this job came from one.
+    # `None` for the ordinary single conversion, which is most of them. See the
+    # ORM column for why there is no parent batch entity.
+    batch_id: str | None = None
+    # The saved workflow that produced this job, when it came from a run. Held as
+    # a plain id rather than a relationship: the user's conversion history must
+    # survive the deletion of the shortcut that created it.
+    workflow_id: str | None = None
 
     def pending_processing(self):
         if self.status != JobStatus.AWAITING_UPLOAD:

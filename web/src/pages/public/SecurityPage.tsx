@@ -13,6 +13,8 @@ import {
   ShieldCheck,
   Trash,
 } from "@phosphor-icons/react";
+import { SeoHead } from "@/components/SeoHead";
+import { breadcrumbJsonLd } from "@/lib/seo";
 import { Button, Card } from "@/components/ui";
 import { Stagger, Item, Reveal, PopIn } from "@/lib/motion";
 
@@ -81,6 +83,20 @@ const ISMS_COVERAGE = [
 export function SecurityPage() {
   return (
     <div className="format-glyph-field">
+      <SeoHead
+        meta={{
+          title: "Security",
+          description:
+            "How Transform protects your documents: AES-256-GCM encryption at rest, encryption in transit, scoped access control, and a documented ISO/IEC 27001:2022-aligned management system.",
+          path: "/security",
+        }}
+        jsonLd={[
+          breadcrumbJsonLd([
+            { name: "Home", path: "/" },
+            { name: "Security", path: "/security" },
+          ]),
+        ]}
+      />
       {/* Hero */}
       <section className="mx-auto max-w-6xl px-4 py-16 sm:px-6">
         <Reveal className="max-w-3xl">

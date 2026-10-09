@@ -40,6 +40,8 @@ class SQLConversionJobRepository:
             progress=job_data.progress,
             data_key_wrapped=job_data.data_key_wrapped,
             client_encrypted=job_data.client_encrypted,
+            batch_id=job_data.batch_id,
+            workflow_id=job_data.workflow_id,
             # Stored as the enum's plain string value. The column is a
             # String(16), not a native enum, so this is what keeps a future
             # origin from needing a schema migration.
@@ -52,6 +54,13 @@ class SQLConversionJobRepository:
         """
         Persist progress updates for an existing job (status, output, errors,
         compute time and credits consumed).
+
+        ``batch_id``/``workflow_id`` are included because the batch path stamps
+        them *after* the job is created (see ``ConversionService._create_batch_item``),
+        so this UPDATE is the only place they are ever written for a new job.
+        Leaving them out silently produced batches whose members could never be
+        found again — the grouping columns stayed NULL and every batch read back
+        empty.
         """
         stmt = (
             update(ConversionJobModel)
@@ -68,6 +77,8 @@ class SQLConversionJobRepository:
                 progress=job.progress,
                 data_key_wrapped=job.data_key_wrapped,
                 client_encrypted=job.client_encrypted,
+                batch_id=job.batch_id,
+                workflow_id=job.workflow_id,
                 updated_at=datetime.now(UTC),
             )
         )
@@ -237,6 +248,87 @@ class SQLConversionJobRepository:
         )
         rows = (await self.session.execute(rows_q)).scalars().all()
         return [self._to_entity(r) for r in rows], total
+
+    async def list_by_batch(self, batch_id: str, user_id: int) -> list[ConversionJob]:
+        """Every job a batch created, oldest first.
+
+        Scoped by ``user_id`` even though a batch id is a random UUID: the scope
+        is what makes the ownership rule a property of the query rather than of
+        the caller remembering to check. A batch id guessed or leaked from
+        another account therefore returns nothing here.
+
+        Ordered by creation so the list reads in the order the user selected the
+        files, which is the order the batch UI shows them in.
+        """
+        stmt = (
+            select(ConversionJobModel)
+            .where(
+                ConversionJobModel.batch_id == batch_id,
+                ConversionJobModel.user_id == user_id,
+            )
+            .order_by(ConversionJobModel.created_at.asc())
+        )
+        rows = (await self.session.execute(stmt)).scalars().all()
+        return [self._to_entity(r) for r in rows]
+
+    async def list_batch_ids_for_workflow(
+        self, workflow_id: str, user_id: int, *, limit: int = 20
+    ) -> list[str]:
+        """Distinct batch ids produced by one workflow, newest run first.
+
+        This is how "previous runs" is answered without a runs table: a run *is*
+        a batch, and the jobs already record both. The ``DISTINCT`` plus the
+        id-ordered scan is what collapses N jobs into N/⟨files-per-run⟩ runs.
+        """
+        stmt = (
+            select(ConversionJobModel.batch_id)
+            .where(
+                ConversionJobModel.workflow_id == workflow_id,
+                ConversionJobModel.user_id == user_id,
+                ConversionJobModel.batch_id.is_not(None),
+            )
+            .distinct()
+        )
+        batch_ids = [row for row in (await self.session.execute(stmt)).scalars().all() if row]
+        return batch_ids[:limit]
+
+    async def count_batches_for_workflow(self, workflow_id: str, user_id: int) -> int:
+        """How many runs a workflow has had, for the workflow list's badge."""
+        stmt = (
+            select(func.count(func.distinct(ConversionJobModel.batch_id)))
+            .where(
+                ConversionJobModel.workflow_id == workflow_id,
+                ConversionJobModel.user_id == user_id,
+                ConversionJobModel.batch_id.is_not(None),
+            )
+        )
+        return int((await self.session.execute(stmt)).scalar_one() or 0)
+
+    async def count_batches_for_workflows(
+        self, workflow_ids: list[str], user_id: int
+    ) -> dict[str, int]:
+        """Run counts for several workflows at once, keyed by workflow id.
+
+        One grouped query rather than a count per row: the workflow list renders
+        every workflow, so a per-row count would be N+1 round trips for a number
+        that is only ever a badge.
+        """
+        if not workflow_ids:
+            return {}
+        stmt = (
+            select(
+                ConversionJobModel.workflow_id,
+                func.count(func.distinct(ConversionJobModel.batch_id)),
+            )
+            .where(
+                ConversionJobModel.workflow_id.in_(workflow_ids),
+                ConversionJobModel.user_id == user_id,
+                ConversionJobModel.batch_id.is_not(None),
+            )
+            .group_by(ConversionJobModel.workflow_id)
+        )
+        rows = (await self.session.execute(stmt)).all()
+        return {workflow_id: int(count) for workflow_id, count in rows if workflow_id}
 
     async def count_by_status(self, user_id: int) -> dict[str, int]:
         """Count jobs grouped by status for a user."""
@@ -462,6 +554,8 @@ class SQLConversionJobRepository:
             input_size_bytes=job_model.input_size_bytes,
             output_size_bytes=job_model.output_size_bytes,
             progress=job_model.progress,
+            batch_id=job_model.batch_id,
+            workflow_id=job_model.workflow_id,
             # Defensive: a row written before 0021 defaults to WEB server-side,
             # but any unrecognised value still degrades to WEB rather than
             # raising on a history read.

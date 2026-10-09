@@ -19,7 +19,7 @@ response itself.
 import asyncio
 import json
 import logging
-from collections.abc import AsyncGenerator, AsyncIterator, Iterator
+from collections.abc import AsyncGenerator, AsyncGenerator, Iterator
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
@@ -214,7 +214,7 @@ def _document_audit(user_id: int, event: AssistantEvent) -> None:
 
 async def _stream_frames(
     first: AssistantEvent,
-    generator: AsyncIterator[AssistantEvent],
+    generator: AsyncGenerator[AssistantEvent],
     request: Request,
     user_id: int,
 ) -> AsyncGenerator[str, None]:

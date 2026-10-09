@@ -96,6 +96,10 @@ class MCPAgentGrantModel(Base):
     )
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    #: When the user last suspended this connection, cleared on resume. The
+    #: ``status`` column carries the authoritative state; this is the audit
+    #: timestamp beside it (and lets the UI say *when* an agent was paused).
+    paused_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
 
 class MCPAuthorizationCodeModel(Base):

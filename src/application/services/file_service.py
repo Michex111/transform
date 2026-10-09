@@ -57,6 +57,10 @@ class FileRepositoryPort(Protocol):
 
     async def get_by_id(self, file_id: str) -> UserFileModel | None: ...
 
+    async def list_by_ids(self, user_id: int, file_ids: list[str]) -> list[UserFileModel]:
+        """Many of a user's files in one query, scoped to ``user_id``."""
+        ...
+
     async def find_by_key(
         self, user_id: int, file_key: str,
     ) -> UserFileModel | None: ...
@@ -304,6 +308,34 @@ class FileService:
         if row is None or row.user_id != user_id:
             raise FileRecordNotFoundError()
         return row
+
+    async def get_owned_files(
+        self, user_id: int, file_ids: list[str]
+    ) -> list[UserFileModel]:
+        """Resolve a selection of ids to the caller's own files, in order.
+
+        One query instead of one per id, which is what keeps a batch's fan-out
+        bounded by its size rather than by the number of round trips.
+
+        Two properties the batch and workflow paths depend on:
+
+        * **Ownership is applied by the query**, not by the caller. An id that
+          belongs to another account is simply absent from the result, so it
+          cannot be converted and its existence is not confirmed.
+        * **The caller's order is preserved** (and duplicates collapsed), so
+          the items in a response line up with the files the user selected
+          rather than with whatever order the database returned.
+
+        Missing and not-owned ids are omitted rather than raising: a batch
+        reports them per item, and a caller that needs an error should use
+        :meth:`get_file`.
+        """
+        unique_ids = list(dict.fromkeys(file_ids))
+        if not unique_ids:
+            return []
+        rows = await self._files.list_by_ids(user_id, unique_ids)
+        by_id = {row.id: row for row in rows}
+        return [by_id[file_id] for file_id in unique_ids if file_id in by_id]
 
     async def list_files(
         self, user_id: int, folder_id: str | None = None, *, offset: int = 0, limit: int = 20,

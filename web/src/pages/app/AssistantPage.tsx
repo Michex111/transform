@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { Info, List, Paperclip, Sparkle, X } from "@phosphor-icons/react";
+import { Info, List, Paperclip, SidebarSimple, Sparkle, X } from "@phosphor-icons/react";
 import type { AssistantAttachment, AssistantConversation, AssistantStatus } from "@/api/types";
 import { ASSISTANT_NOT_AVAILABLE_FOR_TIER } from "@/api/types";
 import { useAuth } from "@/auth/AuthContext";
@@ -22,6 +22,7 @@ import {
 } from "@/lib/assistantAttachments";
 import { createAssistantChatStore, type AssistantChatStore } from "@/lib/assistantChatStore";
 import { fileNameExtension } from "@/lib/format";
+import { readRailCollapsed, writeRailCollapsed } from "@/lib/layoutPrefs";
 import { useAssistantChat } from "@/lib/useAssistantChat";
 
 /** Navigation state the Files page uses to hand a file question to the assistant. */
@@ -66,6 +67,10 @@ export function AssistantPage() {
   const [deleteTarget, setDeleteTarget] = useState<AssistantConversation | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  // Desktop-only: whether the conversation rail is showing. Read once from the
+  // browser's stored preference, then written back on every change so the
+  // workspace keeps the shape the user gave it.
+  const [railCollapsed, setRailCollapsed] = useState(readRailCollapsed);
   // Seed for the empty-state suggestions; reseeded on mount (the initializer)
   // and on every `newChat()` so a fresh chat never repeats the last set.
   const [suggestSeed, setSuggestSeed] = useState(newSuggestSeed);
@@ -175,6 +180,14 @@ export function AssistantPage() {
     if (prefill.fileId) setContext({ fileId: prefill.fileId, fileName: prefill.fileName });
   }, [prefill]);
 
+  // ---- Rail preference ----
+  // Written on change rather than read-then-written, so the stored value always
+  // matches what is on screen. Storage failures are swallowed by `writeRailCollapsed`;
+  // a layout preference is never worth interrupting the user for.
+  useEffect(() => {
+    writeRailCollapsed(railCollapsed);
+  }, [railCollapsed]);
+
   // ---- Mobile drawer focus + Escape ----
   useEffect(() => {
     if (!drawerOpen) return;
@@ -217,8 +230,7 @@ export function AssistantPage() {
     sendTurn(text, { attachments: outgoing, context: location.pathname });
   }
 
-  function newChat() {
-    resetChat();
+  function newChat() {    resetChat();
     setActiveId(null);
     setInput("");
     setAttachments([]);
@@ -279,7 +291,6 @@ export function AssistantPage() {
   const assistantDisabled = tierBlocked || status?.enabled === false;
   const usage = usageLabel(status);
   const usageFull = usageTitle(status);
-  const activeConversation = conversations.find((entry) => entry.id === activeId) ?? null;
   const isEmpty = chat.messages.length === 0 && !chat.streaming && !historyLoading;
 
   return (
@@ -304,17 +315,22 @@ export function AssistantPage() {
     // These values must track `AppShell` (`main`'s padding, the header and the
     // bottom nav). That is noted there as well, from the other side.
     <div className="mx-auto flex h-[calc(100dvh-10rem-env(safe-area-inset-bottom))] min-h-[24rem] max-w-5xl gap-4 lg:h-[calc(100dvh-2.5rem)]">
-      {/* Desktop rail */}
-      <aside className="hidden w-64 shrink-0 overflow-hidden rounded-xl border border-outline bg-surface lg:flex">
-        <ConversationList
-          conversations={conversations}
-          activeId={activeId}
-          loading={conversationsLoading}
-          onSelect={(id) => void openConversation(id)}
-          onNew={newChat}
-          onRequestDelete={setDeleteTarget}
-        />
-      </aside>
+      {/* Desktop rail. Collapsing it hands the whole width to the
+          conversation, which is the point: on a laptop the transcript is what
+          the user is reading. Hidden entirely on small screens, where the
+          drawer plays this role. */}
+      {!railCollapsed && (
+        <aside className="hidden w-64 shrink-0 overflow-hidden rounded-xl border border-outline bg-surface lg:flex">
+          <ConversationList
+            conversations={conversations}
+            activeId={activeId}
+            loading={conversationsLoading}
+            onSelect={(id) => void openConversation(id)}
+            onNew={newChat}
+            onRequestDelete={setDeleteTarget}
+          />
+        </aside>
+      )}
 
       <section className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-outline bg-surface">
         <header className="flex shrink-0 items-center gap-3 border-b border-outline px-3 py-3 sm:px-4">
@@ -329,12 +345,29 @@ export function AssistantPage() {
           >
             <List size={18} />
           </button>
+          {/* Desktop counterpart of the drawer trigger: it gives the transcript
+              the full width (or brings the history back). `aria-pressed` states
+              the toggle's condition rather than just naming the action. */}
+          <button
+            type="button"
+            onClick={() => setRailCollapsed((value) => !value)}
+            aria-pressed={railCollapsed}
+            aria-label={railCollapsed ? "Show conversation history" : "Hide conversation history"}
+            title={railCollapsed ? "Show conversation history" : "Hide conversation history"}
+            className="-ml-1 hidden shrink-0 rounded-lg p-2.5 text-muted transition-colors hover:bg-surface-variant hover:text-on-background lg:inline-flex"
+          >
+            <SidebarSimple size={18} />
+          </button>
           <Sparkle size={18} weight="fill" className="shrink-0 text-primary" aria-hidden />
           <div className="min-w-0 flex-1">
             <h1 className="font-display text-base font-semibold leading-tight">Transform AI</h1>
-            <p className="truncate text-xs text-muted">
-              {activeConversation?.title || "Ask about your files, or get format advice."}
-            </p>
+            {/* A stable descriptor, deliberately not the conversation's title.
+                A conversation's title is derived from its opening question, so
+                echoing it here only repeated the first message already visible
+                in the transcript below. The header stays constant across a
+                conversation; the rail (and the mobile drawer) is where a
+                conversation names itself. */}
+            <p className="truncate text-xs text-muted">Your document assistant</p>
           </div>
           {status?.backend === "echo" && <EchoBadge />}
           {usage && (

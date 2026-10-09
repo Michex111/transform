@@ -3,6 +3,7 @@ import { motion, useReducedMotion } from "motion/react";
 import { Sparkle, PencilSimple } from "@phosphor-icons/react";
 import type { AssistantAttachment } from "@/api/types";
 import type { AssistantChatMessage } from "@/lib/assistantChat";
+import { isImeComposing } from "@/lib/keyboard";
 import { toolStepLabel } from "@/lib/assistantTranscript";
 import { ArtifactChips } from "@/components/assistant/ArtifactChips";
 import { AttachmentChips } from "@/components/assistant/AttachmentChips";
@@ -200,6 +201,9 @@ function MessageEditor({
           rows={3}
           onChange={(event) => setText(event.target.value)}
           onKeyDown={(event) => {
+            // Enter confirms an IME candidate, so a composition must never be
+            // read as "resend" — the same rule the composer follows.
+            if (isImeComposing(event.nativeEvent)) return;
             if (event.key === "Enter" && !event.shiftKey) {
               event.preventDefault();
               resend();

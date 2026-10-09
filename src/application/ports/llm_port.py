@@ -13,7 +13,7 @@ format). The OpenAI wire format is a transport detail of one adapter, and
 stored history, so the port stays a stable description of "a chat turn".
 """
 
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncGenerator, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, runtime_checkable
 
@@ -125,7 +125,7 @@ class LlmPort(Protocol):
         *,
         messages: Sequence[LlmMessage],
         tools: Sequence[LlmToolSpec],
-    ) -> AsyncIterator[LlmStreamChunk]:
+    ) -> AsyncGenerator[LlmStreamChunk]:
         """Stream one completion for ``messages`` with ``tools`` available.
 
         Declared as a plain ``def`` returning an async iterator (not ``async

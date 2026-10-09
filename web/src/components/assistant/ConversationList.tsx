@@ -1,7 +1,8 @@
-import { Plus, Trash } from "@phosphor-icons/react";
+import { useId, useState } from "react";
+import { MagnifyingGlass, Plus, Trash, X } from "@phosphor-icons/react";
 import type { AssistantConversation } from "@/api/types";
 import { Button, Skeleton } from "@/components/ui";
-import { groupConversations, relativeTimeLabel } from "@/lib/conversationGroups";
+import { filterConversations, groupConversations, relativeTimeLabel } from "@/lib/conversationGroups";
 
 /**
  * The conversation rail: start a new chat, or reopen an old one.
@@ -26,7 +27,16 @@ export function ConversationList({
   onNew: () => void;
   onRequestDelete: (conversation: AssistantConversation) => void;
 }) {
-  const groups = groupConversations(conversations);
+  const [query, setQuery] = useState("");
+  // Unique, because the rail and the mobile drawer render this component at the
+  // same time and a shared id would point both labels at one input.
+  const searchId = useId();
+  // Titles only. The list is fetched whole (no pagination on the endpoint), so
+  // this filter is complete rather than partial — and nothing indexes message
+  // bodies, which is why the placeholder says "titles" and claims nothing more.
+  const matches = filterConversations(conversations, query);
+  const groups = groupConversations(matches);
+  const searching = query.trim().length > 0;
 
   // `min-w-0` on the root is load-bearing. As the flex item of the `w-64` rail
   // it inherits `min-width: auto`, which resolves to the min-content width of a
@@ -40,6 +50,38 @@ export function ConversationList({
         <Button className="w-full" onClick={onNew}>
           <Plus size={16} weight="bold" /> New chat
         </Button>
+        {/* Offered only once there is something to search, so an empty account
+            is not greeted with a filter that can never match. */}
+        {conversations.length > 0 && (
+          <div className="relative mt-2">
+            <MagnifyingGlass
+              size={14}
+              aria-hidden
+              className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-muted"
+            />
+            <label htmlFor={`${searchId}-conversation-search`} className="sr-only">
+              Search conversation titles
+            </label>
+            <input
+              id={`${searchId}-conversation-search`}
+              type="search"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder="Search titles…"
+              className="w-full rounded-lg border border-outline bg-surface-variant/40 py-1.5 pl-8 pr-8 text-sm text-on-background placeholder:text-muted focus:border-primary focus:outline-none focus:ring-2 focus:ring-primary/25"
+            />
+            {searching && (
+              <button
+                type="button"
+                onClick={() => setQuery("")}
+                aria-label="Clear conversation search"
+                className="absolute right-1 top-1/2 -translate-y-1/2 rounded-md p-1.5 text-muted hover:text-on-background pointer-coarse:min-h-11 pointer-coarse:min-w-11"
+              >
+                <X size={13} />
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       <nav aria-label="Conversations" className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
@@ -52,6 +94,12 @@ export function ConversationList({
         ) : conversations.length === 0 ? (
           <p className="px-3 py-6 text-center text-sm text-muted">
             Your conversations will appear here.
+          </p>
+        ) : matches.length === 0 ? (
+          // Distinct from "no conversations at all": the account has history,
+          // this search just does not match any of it.
+          <p className="px-3 py-6 text-center text-sm text-muted">
+            No conversations match “{query.trim()}”.
           </p>
         ) : (
           <div className="space-y-4">
@@ -79,7 +127,14 @@ export function ConversationList({
                               : "border-transparent text-on-background hover:bg-surface-variant"
                           }`}
                         >
-                          <span className="block truncate text-sm font-medium">{title}</span>
+                          {/* Truncation must never be the only way to read a
+                              title, and hover must never be the only way to
+                              recover it: `title` carries the full name for a
+                              pointer, and the text itself is always in the DOM
+                              for a screen reader and for text selection. */}
+                          <span className="block truncate text-sm font-medium" title={title}>
+                            {title}
+                          </span>
                           {time && (
                             <span
                               className={`block text-xs ${active ? "text-on-primary-container/70" : "text-muted"}`}

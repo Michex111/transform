@@ -55,6 +55,26 @@ class ConversionJobRepositoryPort(ConversionJobWriteRepositoryPort, Protocol):
         removed; False when the job is missing or not owned by the caller."""
         ...
 
+    async def list_by_batch(self, batch_id: str, user_id: int) -> list[ConversionJob]:
+        """Every job a batch created, oldest first, scoped to ``user_id``.
+
+        The scope is part of the contract rather than a caller's responsibility:
+        a batch id belonging to another account must return nothing.
+        """
+        ...
+
+    async def list_batch_ids_for_workflow(
+        self, workflow_id: str, user_id: int, *, limit: int = 20
+    ) -> list[str]:
+        """Distinct batch ids produced by one workflow, newest run first."""
+        ...
+
+    async def count_batches_for_workflows(
+        self, workflow_ids: list[str], user_id: int
+    ) -> dict[str, int]:
+        """Run counts for several workflows at once, keyed by workflow id."""
+        ...
+
     async def list_user_active_jobs(
         self,
         user_id: int,

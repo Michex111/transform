@@ -21,9 +21,14 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
-from src.infrastructure.database.models import ConversionJobModel, UserFileModel
+from src.infrastructure.database.models import (
+    ApiRequestEventModel,
+    ConversionJobModel,
+    McpToolInvocationModel,
+    UserFileModel,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +61,7 @@ class CleanupWorker:
         guest_file_retention_hours: int = 24,
         temp_file_retention_hours: int = 1,
         job_archive_days: int = 30,
+        telemetry_retention_days: int = 30,
     ):
         self._storage = storage
         self._db_factory = db_session_factory
@@ -64,6 +70,10 @@ class CleanupWorker:
         self._guest_file_retention = timedelta(hours=guest_file_retention_hours)
         self._temp_retention = timedelta(hours=temp_file_retention_hours)
         self._archive_after = timedelta(days=job_archive_days)
+        # Developer observability retention. Explicit and bounded: request
+        # metadata is not kept indefinitely, and the window is the same
+        # setting the API advertises as its maximum query range.
+        self._telemetry_retention = timedelta(days=telemetry_retention_days)
         self._running = False
         # Woken by ``stop()`` so a shutdown request does not have to wait out a
         # (potentially 6-hour) inter-cycle sleep.
@@ -112,6 +122,7 @@ class CleanupWorker:
         expired_files = await self._cleanup_expired_files()
         temp_objects = await self._cleanup_temp_files()
         archived_jobs = await self._archive_old_jobs()
+        telemetry_rows = await self._cleanup_telemetry()
 
         elapsed = (datetime.now(UTC) - cycle_start).total_seconds()
         # One summary line per cycle so a worker that runs but frees nothing is
@@ -119,12 +130,14 @@ class CleanupWorker:
         # logger used to have no handler, so none of this was visible).
         logger.info(
             "Cleanup cycle completed in %.2f seconds "
-            "(guest_jobs=%d, expired_files=%d, temp_objects=%d, archived_jobs=%d)",
+            "(guest_jobs=%d, expired_files=%d, temp_objects=%d, archived_jobs=%d, "
+            "telemetry_rows=%d)",
             elapsed,
             guest_jobs,
             expired_files,
             temp_objects,
             archived_jobs,
+            telemetry_rows,
         )
 
     # ------------------------------------------------------------------
@@ -237,6 +250,37 @@ class CleanupWorker:
         if cleaned > 0:
             logger.info("Cleaned up %d stale temp objects", cleaned)
         return cleaned
+
+    async def _cleanup_telemetry(self) -> int:
+        """Delete request events and MCP tool invocations past retention.
+
+        A single indexed ``DELETE`` on ``created_at`` per table, which is what
+        the ``(account_id, created_at)`` index's second column serves. Nothing
+        is archived first: this is metadata, and the product's promise is a
+        bounded window rather than indefinite history.
+
+        Returns the number of rows removed across both tables.
+        """
+        cutoff = datetime.now(UTC) - self._telemetry_retention
+        removed = 0
+
+        async with self._db_factory() as session:
+            events = await session.execute(
+                delete(ApiRequestEventModel).where(ApiRequestEventModel.created_at < cutoff)
+            )
+            invocations = await session.execute(
+                delete(McpToolInvocationModel).where(McpToolInvocationModel.created_at < cutoff)
+            )
+            await session.commit()
+            removed = int(events.rowcount or 0) + int(invocations.rowcount or 0)
+
+        if removed > 0:
+            logger.info(
+                "Removed %d telemetry rows older than %d days",
+                removed,
+                self._telemetry_retention.days,
+            )
+        return removed
 
     async def _archive_old_jobs(self) -> int:
         """

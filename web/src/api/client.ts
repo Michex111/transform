@@ -13,6 +13,11 @@ import {
   normalizeAssistantStatus,
   normalizeAssistantStreamEvent,
   normalizeAssistantSummary,
+  normalizeBatchConversion,
+  normalizeBatchStatus,
+  normalizeWorkflow,
+  normalizeWorkflowList,
+  normalizeWorkflowRun,
   normalizeApiKeyList,
   normalizeBatchDelete,
   normalizeConnectedAppList,
@@ -59,6 +64,21 @@ import {
   normalizeUser,
   normalizeVerifyEmail,
 } from './normalize'
+import {
+  normalizeApiLogDetail,
+  normalizeApiLogList,
+  normalizeApiMetrics,
+  normalizeMcpActivityList,
+  normalizeMcpConnections,
+  normalizeMcpControl,
+  normalizeMcpSummary,
+} from './developerNormalize'
+import type {
+  ApiLogFilters,
+  ApiLogRange,
+  ApiMetricsResponse,
+  McpActivityFilters,
+} from './developerTypes'
 import type {
   APIKeyCreateRequest,
   AssistantChatRequest,
@@ -69,6 +89,7 @@ import type {
   ChangePasswordRequest,
   ChangePlanRequest,
   ConversionJobResponse,
+  CreateWorkflowRequest,
   CreditPurchaseRequest,
   CreateConversionJobRequest,
   CreateLibraryConversionRequest,
@@ -762,6 +783,69 @@ export class ApiClient {
     this.request<unknown>(`/conversions/jobs/${id}/retry`, { method: 'POST' }).then(normalizeConversionJob)
 
   /**
+   * Convert several library files into one target format in a single request.
+   *
+   * Returns a per-item outcome rather than all-or-nothing: an item that could
+   * not start carries its own reason, and the rest still begin. The response's
+   * `batch_id` is what the caller uses to re-read the batch later (see
+   * `batchStatus`), so a reload or a closed tab does not lose it.
+   *
+   * Deliberately NOT cached: this is a write, and the shared request cache
+   * invalidates itself on every write anyway, so caching it would only add a
+   * way for a stale body to be replayed.
+   */
+  batchConvert = (fileIds: string[], targetFormat: string) =>
+    this.request<unknown>('/conversions/batch', {
+      method: 'POST',
+      body: JSON.stringify({ file_ids: fileIds, target_format: targetFormat }),
+    }).then(normalizeBatchConversion)
+
+  /**
+   * Re-read a batch and its items from the jobs that carry its id.
+   *
+   * This is what lets a batch survive a page reload: the client asks for the
+   * batch instead of having to have kept the job ids it was handed at creation.
+   * An unknown or unowned id comes back as an empty batch, not an error.
+   */
+  batchStatus = (batchId: string) =>
+    this.request<unknown>(`/conversions/batches/${encodeURIComponent(batchId)}`).then(
+      normalizeBatchStatus,
+    )
+
+  // ---- Saved workflows ----
+
+  listWorkflows = () =>
+    this.request<unknown>('/v1/workflows').then(normalizeWorkflowList)
+
+  createWorkflow = (body: CreateWorkflowRequest) =>
+    this.request<unknown>('/v1/workflows', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }).then(normalizeWorkflow)
+
+  updateWorkflow = (id: string, body: CreateWorkflowRequest) =>
+    this.request<unknown>(`/v1/workflows/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }).then(normalizeWorkflow)
+
+  deleteWorkflow = (id: string) =>
+    this.request<void>(`/v1/workflows/${encodeURIComponent(id)}`, { method: 'DELETE' })
+
+  /**
+   * Run a saved workflow against files chosen now.
+   *
+   * The files are named per run and never stored in the workflow, so a saved
+   * workflow cannot outlive the access the user had when they saved it: the
+   * server re-resolves and re-authorizes every file on each run.
+   */
+  runWorkflow = (id: string, fileIds: string[]) =>
+    this.request<unknown>(`/v1/workflows/${encodeURIComponent(id)}/runs`, {
+      method: 'POST',
+      body: JSON.stringify({ file_ids: fileIds }),
+    }).then(normalizeWorkflowRun)
+
+  /**
    * Run the full "normal conversion" flow with a file: create the job, open an
    * upload session, PUT the bytes to the presigned URL, then verify/enqueue.
    *
@@ -1270,6 +1354,21 @@ export class ApiClient {
       normalizeFileList,
     )
   getFile = (id: string) => this.request<unknown>(`/v1/files/${id}`).then(normalizeFile)
+  /**
+   * Search the caller's own files by name, across every folder.
+   *
+   * Backs the composer's `@` document picker. Deliberately NOT cached: the
+   * client cache is keyed on the path, so a cached search would replay one
+   * query's results for a different one, and the picker issues a fresh request
+   * per debounced keystroke anyway.
+   *
+   * The server scopes results to the caller and answers a blank query with
+   * nothing, so an empty box can never list the whole drive.
+   */
+  searchFiles = (query: string, page = 1, pageSize = 20) =>
+    this.request<unknown>(
+      `/v1/files/search?q=${encodeURIComponent(query)}&page=${page}&page_size=${pageSize}`,
+    ).then(normalizeFileList)
   deleteFile = (id: string) => this.request<void>(`/v1/files/${id}`, { method: 'DELETE' })
   renameFile = (id: string, name: string) =>
     this.request<unknown>(`/v1/files/${id}`, {
@@ -1655,6 +1754,198 @@ export class ApiClient {
       token ? { Authorization: `Bearer ${token}` } : {},
     )
   }
+
+  // ---- Developer: API Logs -----------------------------------------------
+
+  /**
+   * Aggregates for the API Logs chart and its summary cards.
+   *
+   * Every number in the response is computed **server-side** from the stored
+   * request events. The SPA never derives a rate or a percentile: doing so would
+   * let the chart and the cards disagree, and there is exactly one right place
+   * for that arithmetic.
+   */
+  apiLogMetrics = (filters: ApiLogFilters) =>
+    this.request<unknown>(`/v1/developer/api-logs/metrics${apiLogQuery(filters)}`).then(
+      normalizeApiMetrics,
+    )
+
+  /** One page of request logs. Paging is keyset via `next_cursor`. */
+  apiLogs = (filters: ApiLogFilters) =>
+    this.request<unknown>(`/v1/developer/api-logs${apiLogQuery(filters)}`).then(
+      normalizeApiLogList,
+    )
+
+  /** One request's detail, including the derivation status sentence. */
+  apiLogDetail = (eventId: string) =>
+    this.request<unknown>(`/v1/developer/api-logs/${encodeURIComponent(eventId)}`).then(
+      normalizeApiLogDetail,
+    )
+
+  /**
+   * Live metric updates over SSE.
+   *
+   * Read through `fetch` rather than `EventSource`: `EventSource` cannot send an
+   * `Authorization` header, and putting the bearer token in the query string —
+   * the only alternative it allows — would leak a credential into browser
+   * history, proxy logs and `Referer` headers. This is the same reader the job
+   * progress stream uses.
+   *
+   * Returns a cleanup function that aborts the stream; the caller must invoke it
+   * on unmount, on disabling Live, and on a session change.
+   */
+  subscribeApiMetrics(
+    filters: ApiLogFilters,
+    handlers: {
+      onMetrics: (metrics: ApiMetricsResponse) => void
+      onError: (message: string) => void
+      onOpen?: () => void
+    },
+  ): () => void {
+    const controller = new AbortController()
+    const token = this.token
+
+    void (async () => {
+      try {
+        const res = await fetch(
+          `${API_BASE}/v1/developer/api-logs/stream${apiLogQuery(filters)}`,
+          {
+            headers: {
+              Accept: 'text/event-stream',
+              ...(token ? { Authorization: `Bearer ${token}` } : {}),
+            },
+            signal: controller.signal,
+          },
+        )
+        if (!res.ok || !res.body) {
+          handlers.onError(
+            res.status === 503
+              ? 'Too many live connections. Close another dashboard or try again shortly.'
+              : `Live stream unavailable (${res.status})`,
+          )
+          return
+        }
+        handlers.onOpen?.()
+
+        const reader = res.body.getReader()
+        const decoder = new TextDecoder()
+        let buffer = ''
+
+        for (;;) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buffer += decoder.decode(value, { stream: true })
+          const blocks = buffer.split('\n\n')
+          buffer = blocks.pop() ?? ''
+          for (const block of blocks) {
+            let eventName = 'message'
+            const dataLines: string[] = []
+            for (const line of block.split('\n')) {
+              if (line.startsWith('event:')) eventName = line.slice(6).trim()
+              else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim())
+            }
+            if (!dataLines.length) continue
+            if (eventName === 'metrics') {
+              try {
+                handlers.onMetrics(normalizeApiMetrics(JSON.parse(dataLines.join('\n'))))
+              } catch {
+                /* a single malformed frame must not end a healthy stream */
+              }
+            } else if (eventName === 'error') {
+              try {
+                handlers.onError(
+                  (JSON.parse(dataLines.join('\n')) as { message?: string }).message ??
+                    'Live metrics unavailable.',
+                )
+              } catch {
+                handlers.onError('Live metrics unavailable.')
+              }
+            }
+          }
+        }
+      } catch (err) {
+        // An abort is the component unmounting or Live being switched off.
+        if ((err as Error).name !== 'AbortError') {
+          handlers.onError((err as Error).message)
+        }
+      }
+    })()
+
+    return () => controller.abort()
+  }
+
+  // ---- Developer: MCP Activity -------------------------------------------
+
+  /** The account's authorized AI-agent connections. */
+  mcpConnections = (range: ApiLogRange) =>
+    this.request<unknown>(`/v1/developer/mcp/connections?range=${range}`).then(
+      normalizeMcpConnections,
+    )
+
+  /** Header counts for the MCP Activity page. */
+  mcpActivitySummary = (range: ApiLogRange) =>
+    this.request<unknown>(`/v1/developer/mcp/summary?range=${range}`).then(normalizeMcpSummary)
+
+  /** The MCP tool-call log. */
+  mcpActivity = (filters: McpActivityFilters) =>
+    this.request<unknown>(`/v1/developer/mcp/activity${mcpActivityQuery(filters)}`).then(
+      normalizeMcpActivityList,
+    )
+
+  /**
+   * Pause / resume / revoke a connection.
+   *
+   * All three return the **authoritative** connection from the server, so the
+   * UI updates from the confirmed state instead of from an optimistic guess —
+   * a control that only looks applied is worse than one that visibly failed.
+   */
+  pauseMcpConnection = (id: string) =>
+    this.request<unknown>(
+      `/v1/developer/mcp/connections/${encodeURIComponent(id)}/pause`,
+      { method: 'POST' },
+    ).then(normalizeMcpControl)
+
+  resumeMcpConnection = (id: string) =>
+    this.request<unknown>(
+      `/v1/developer/mcp/connections/${encodeURIComponent(id)}/resume`,
+      { method: 'POST' },
+    ).then(normalizeMcpControl)
+
+  revokeMcpConnection = (id: string) =>
+    this.request<unknown>(
+      `/v1/developer/mcp/connections/${encodeURIComponent(id)}/revoke`,
+      { method: 'POST' },
+    ).then(normalizeMcpControl)
+}
+
+/**
+ * Build the query string for an API Logs request.
+ *
+ * Only defined values are sent, so an unset filter is *absent* rather than sent
+ * as the literal string `"undefined"` — which the server would treat as a real
+ * filter and return nothing for.
+ */
+function apiLogQuery(filters: ApiLogFilters): string {
+  const params = new URLSearchParams({ range: filters.range })
+  if (filters.apiKeyId) params.set('api_key_id', filters.apiKeyId)
+  if (filters.method) params.set('method', filters.method)
+  if (filters.status) params.set('status', filters.status)
+  if (filters.route) params.set('route', filters.route)
+  if (filters.requestId) params.set('request_id', filters.requestId)
+  if (filters.outcome) params.set('outcome', filters.outcome)
+  if (filters.cursor) params.set('cursor', filters.cursor)
+  if (filters.limit !== undefined) params.set('limit', String(filters.limit))
+  return `?${params.toString()}`
+}
+
+function mcpActivityQuery(filters: McpActivityFilters): string {
+  const params = new URLSearchParams({ range: filters.range })
+  if (filters.connectionId) params.set('connection_id', filters.connectionId)
+  if (filters.toolName) params.set('tool_name', filters.toolName)
+  if (filters.outcome) params.set('outcome', filters.outcome)
+  if (filters.cursor) params.set('cursor', filters.cursor)
+  if (filters.limit !== undefined) params.set('limit', String(filters.limit))
+  return `?${params.toString()}`
 }
 
 /**

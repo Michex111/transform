@@ -146,3 +146,38 @@ def log_permission_denied(resource: str, **fields: Any) -> None:
 
 def log_data_access(user_id: str, action: str, resource: str, **fields: Any) -> None:
     audit_logger.info("data_access", {**fields, "user_id": user_id, "action": action, "resource": resource})
+
+
+def log_connection_control(
+    action: str,
+    user_id: str,
+    grant_id: str,
+    *,
+    success: bool,
+    client_id: str | None = None,
+    **fields: Any,
+) -> None:
+    """Record a user's pause/resume/revoke of an AI-agent connection.
+
+    An ISO 27001 A.8.16 monitoring event: access-control decisions must be
+    reviewable. The record answers *who* acted, *when* (the log timestamp),
+    *which* connection was affected, and *whether* it succeeded — the four
+    things an auditor asks, and the four things that make a "my agent stopped
+    working" report diagnosable from the log alone.
+
+    Deliberately carries only identifiers and the outcome. No token, no secret,
+    no scope-inflated detail: an audit record that could leak a credential would
+    be a liability rather than evidence.
+    """
+    level = audit_logger.info if success else audit_logger.warning
+    level(
+        "mcp_connection_control",
+        {
+            **fields,
+            "action": action,
+            "user_id": user_id,
+            "grant_id": grant_id,
+            "client_id": client_id,
+            "success": success,
+        },
+    )

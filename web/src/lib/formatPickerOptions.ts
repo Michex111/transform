@@ -43,3 +43,29 @@ export function isPickableFormat(allowed: readonly string[] | undefined, ext: st
   const wanted = ext.toLowerCase();
   return allowed.some((candidate) => candidate.toLowerCase() === wanted);
 }
+
+/**
+ * The id of the category that contains `ext`, or `null` when nothing does.
+ *
+ * This is which category the picker opens on. Seeding the active category from
+ * `categories[0]` instead made the panel always open on whichever category sorts
+ * first — "Archive" — so opening the picker to change an existing PDF showed a
+ * grid of BZ2/GZ/TAR and the user had to go looking for "Document".
+ *
+ * The match is case-insensitive for the same reason `isPickableFormat` is: a
+ * stored value can be `"PDF"`, and a case-sensitive lookup would answer "no
+ * category" for a format the picker is perfectly able to show.
+ */
+export function categoryForFormat(
+  ext: string,
+  categories: FormatCategories = FORMAT_CATEGORIES,
+): string | null {
+  const wanted = ext.trim().toLowerCase();
+  if (!wanted) return null;
+  for (const category of categories) {
+    if (category.formats.some((format) => format.ext.toLowerCase() === wanted)) {
+      return category.id;
+    }
+  }
+  return null;
+}

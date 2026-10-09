@@ -82,3 +82,17 @@ class GrantRevokedError(MCPAccessError):
             "invalid_grant",
             "The user has revoked this application's access.",
         )
+
+
+class ConnectionStateError(MCPAccessError):
+    """A pause/resume was asked for on a grant whose state forbids it.
+
+    The concrete case is a **revoked** grant: revocation is terminal, so it can
+    be neither paused nor resumed. Returning ``invalid_request`` (a 400) rather
+    than a 404 is deliberate — the connection exists and is the caller's, it is
+    simply not in a state that can transition, and the UI should say so instead
+    of implying the connection vanished.
+    """
+
+    def __init__(self, description: str) -> None:
+        super().__init__("invalid_request", description)

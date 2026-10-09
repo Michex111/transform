@@ -16,6 +16,9 @@ import { Stagger, Item } from "@/lib/motion";
 import { describePlanChange, planChangeFailure, tierRank } from "@/lib/planChange";
 import { planCta } from "@/lib/pricingPlans";
 import { embeddedCheckoutEnabled } from "@/lib/stripeCheckout";
+import { SeoHead } from "@/components/SeoHead";
+import { breadcrumbJsonLd, faqJsonLd } from "@/lib/seo";
+import { PRICING_FAQS } from "@/lib/pricingFaq";
 
 export function PricingPage() {
   const { api: client, isAuthenticated, isLoading: authLoading } = useAuth();
@@ -164,6 +167,21 @@ export function PricingPage() {
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-16 sm:px-6">
+      <SeoHead
+        meta={{
+          title: "Pricing",
+          description:
+            "Transform plans: a free tier with 5 GB of storage and 50 conversions a month, plus Pro and Pro Plus for heavier document work.",
+          path: "/pricing",
+        }}
+        jsonLd={[
+          faqJsonLd(PRICING_FAQS.map((faq) => ({ question: faq.q, answer: faq.a }))),
+          breadcrumbJsonLd([
+            { name: "Home", path: "/" },
+            { name: "Pricing", path: "/pricing" },
+          ]),
+        ]}
+      />
       <PricingHero />
 
       <section aria-label="Plans">

@@ -19,3 +19,13 @@ class InvalidPhoneNumber(SecurityDomainError):
     that mapping must not depend on a bare builtin being raised anywhere in the
     call path.
     """
+
+
+class InvalidGrantTransition(SecurityDomainError):
+    """Raised on an MCP grant state change the lifecycle does not allow.
+
+    Currently one case: trying to pause or resume a grant that has already been
+    revoked. Revocation is terminal — regaining access requires a fresh consent
+    — so allowing a pause/resume to move a revoked grant would quietly provide
+    a way back in that skips the authorization flow entirely.
+    """

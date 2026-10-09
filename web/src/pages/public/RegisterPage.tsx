@@ -14,6 +14,7 @@ import {
   type RegisterFieldErrors,
 } from "@/lib/registerForm";
 import { Button, Field, Logo } from "@/components/ui";
+import { SeoHead } from "@/components/SeoHead";
 
 export function RegisterPage() {
   const { register } = useAuth();
@@ -122,6 +123,14 @@ export function RegisterPage() {
 
   return (
     <div className="format-glyph-field flex min-h-[70vh] items-center justify-center px-4 py-12">
+      <SeoHead
+        meta={{
+          title: "Create your account",
+          description: "Create a free Transform account.",
+          path: "/register",
+          noindex: true,
+        }}
+      />
       <motion.div
         className="w-full max-w-sm rounded-2xl border border-outline bg-surface p-8"
         initial={{ opacity: 0, y: 16, scale: 0.98 }}

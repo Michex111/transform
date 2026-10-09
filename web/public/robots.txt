@@ -1,0 +1,16 @@
+# Transform — robots.txt
+#
+# The public marketing and format pages are open. Account and auth surfaces have
+# no crawl value and are excluded so they do not compete with the pages that do.
+
+User-agent: *
+Allow: /
+
+Disallow: /login
+Disallow: /register
+Disallow: /verify-email
+Disallow: /forgot-password
+Disallow: /reset-password
+Disallow: /app/
+
+Sitemap: https://transform-to.com/sitemap.xml

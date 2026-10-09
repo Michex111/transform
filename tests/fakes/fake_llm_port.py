@@ -7,7 +7,7 @@ out, a short "All done." answer is returned so a test that only cares about one
 step still finishes the turn.
 """
 
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncGenerator, Sequence
 
 from src.application.ports.llm_port import (
     LlmMessage,
@@ -63,7 +63,7 @@ class FakeLlmPort:
         *,
         messages: Sequence[LlmMessage],
         tools: Sequence[LlmToolSpec],
-    ) -> AsyncIterator[LlmStreamChunk]:
+    ) -> AsyncGenerator[LlmStreamChunk]:
         self.calls.append((tuple(messages), tuple(tools)))
         response = (
             self._responses.pop(0) if self._responses else text_response("All done.")

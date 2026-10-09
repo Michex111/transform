@@ -18,7 +18,7 @@ Two deliberate design choices:
 
 import json
 import logging
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncGenerator, Sequence
 from typing import Any
 from uuid import uuid4
 
@@ -358,7 +358,7 @@ class AssistantService:
         file_ids: list[str] | None = None,
         context: str | None = None,
         origin: JobOrigin = JobOrigin.WEB,
-    ) -> AsyncIterator[AssistantEvent]:
+    ) -> AsyncGenerator[AssistantEvent]:
         """Run one turn, yielding deltas, tool events and a terminal event.
 
         Raises (before the first yield, so the router can still answer with a

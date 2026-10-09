@@ -119,6 +119,30 @@ class SQLUserFileRepository:
         )
         return result.scalar_one_or_none()
 
+    async def list_by_ids(self, user_id: int, file_ids: list[str]) -> list[UserFileModel]:
+        """Fetch many of a user's files in one query.
+
+        The batch and workflow-run paths resolve the whole selection before they
+        start, so a per-id lookup would be exactly the N+1 the batch design is
+        meant to avoid. Scoped by ``user_id`` here rather than by each caller:
+        the ownership rule belongs to the query, so no caller can widen it by
+        forgetting to filter the result.
+
+        The returned order is whatever the database chooses; callers that need
+        the caller's selection order must re-order against the ids they hold
+        (see ``file_service.get_owned_files``).
+        """
+        unique_ids = list(dict.fromkeys(file_ids))
+        if not unique_ids:
+            return []
+        result = await self._session.execute(
+            select(UserFileModel).where(
+                UserFileModel.user_id == user_id,
+                UserFileModel.id.in_(unique_ids),
+            )
+        )
+        return list(result.scalars().all())
+
     async def find_by_key(self, user_id: int, file_key: str) -> UserFileModel | None:
         """Fetch a user's file record for a given object key, if any.
 

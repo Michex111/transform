@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol
 
-from src.domain.security.enitities.agent_grant import AgentGrant
+from src.domain.security.enitities.agent_grant import AgentGrant, AgentGrantStatus
 from src.domain.security.value_object.agent_scope import AgentScope
 
 
@@ -97,6 +97,18 @@ class MCPRepositoryPort(Protocol):
     async def list_grants(self, user_id: int) -> list[AgentGrant]: ...
 
     async def revoke_grant(self, grant_id: str, user_id: int) -> AgentGrant | None: ...
+
+    async def set_grant_status(
+        self, grant_id: str, user_id: int, status: AgentGrantStatus, now: datetime
+    ) -> AgentGrant | None:
+        """Move an owned grant to ``PAUSED`` or ``ACTIVE``.
+
+        Scoped by ``user_id`` so one user can never pause another user's
+        connection, and refuses to move a revoked grant (revocation is terminal
+        — regaining access needs a fresh consent). Returns ``None`` for a grant
+        that does not exist or is not the caller's.
+        """
+        ...
 
     async def touch_grant(self, grant_id: str, used_at: datetime) -> None: ...
 

@@ -4,9 +4,10 @@ Mirrors the SQL adapter's *semantics* rather than just its shape, because the
 semantics are what the tests are about:
 
 * ``take_code`` is single-use (the second call returns ``None``);
-* ``upsert_grant`` replaces the scope set and clears a previous revocation;
+* ``upsert_grant`` replaces the scope set and clears a previous revocation *and*
+  a previous pause (re-consenting is a stronger act than resuming);
 * ``revoke_grant`` is scoped by ``user_id`` and returns ``None`` for a foreign
-  grant.
+  grant, and is terminal — ``set_grant_status`` refuses to move a revoked grant.
 """
 
 from datetime import UTC, datetime
@@ -17,6 +18,7 @@ from src.application.ports.mcp_oauth_port import (
     TokenRecord,
 )
 from src.domain.security.enitities.agent_grant import AgentGrant, AgentGrantStatus
+from src.domain.security.exceptions.exceptions import InvalidGrantTransition
 
 
 class FakeMCPRepository:
@@ -45,6 +47,7 @@ class FakeMCPRepository:
                 existing.status = AgentGrantStatus.ACTIVE
                 existing.resource = grant.resource
                 existing.revoked_at = None
+                existing.paused_at = None
                 return existing
         self.grants[grant.id] = grant
         return grant
@@ -70,6 +73,32 @@ class FakeMCPRepository:
 
     async def touch_grant(self, grant_id: str, used_at: datetime) -> None:
         self.touched.append((grant_id, used_at))
+
+    async def set_grant_status(
+        self,
+        grant_id: str,
+        user_id: int,
+        status: AgentGrantStatus,
+        now: datetime,
+    ) -> AgentGrant | None:
+        """Pause or resume, scoped to the owner and refusing a revoked grant.
+
+        Delegates the transition to the entity so the fake cannot diverge from
+        the rule the SQL adapter enforces — a fake that quietly permits
+        something production refuses hides exactly the bug a test should catch.
+        """
+        grant = self.grants.get(grant_id)
+        if grant is None or grant.user_id != user_id:
+            return None
+        if grant.status is AgentGrantStatus.REVOKED:
+            raise InvalidGrantTransition("A revoked grant cannot be paused or resumed.")
+        if grant.status is status:
+            return grant
+        if status is AgentGrantStatus.PAUSED:
+            grant.pause(now=now)
+        else:
+            grant.resume()
+        return grant
 
     # -- codes --------------------------------------------------------
     async def save_code(self, code: AuthorizationCodeRecord) -> None:

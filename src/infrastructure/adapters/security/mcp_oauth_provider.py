@@ -25,7 +25,7 @@ leaves the endpoint public, so they are intentionally the same object.
 """
 
 import contextlib
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, Callable
 from contextlib import AbstractAsyncContextManager
 from typing import Any, cast
 
@@ -84,7 +84,7 @@ class MCPOAuthProvider(
     # ------------------------------------------------------------------
 
     @contextlib.asynccontextmanager
-    async def _service(self) -> AsyncIterator[MCPAccessService]:
+    async def _service(self) -> AsyncGenerator[MCPAccessService]:
         async with self._session_scope() as session:
             yield MCPAccessService(
                 repository=SQLMCPRepository(session),

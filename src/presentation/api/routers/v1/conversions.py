@@ -9,12 +9,19 @@ from fastapi.responses import StreamingResponse
 from src.domain.conversions.entities.conversion_job import ConversionJob
 from src.domain.conversions.exceptions import InvalidConversion
 from src.domain.conversions.value_object.conversion_type import ConversionType
+from src.domain.conversions.value_object.job_status import JobStatus
+from src.domain.subscriptions.value_object.tier import SubscriptionTier
 from src.application.exceptions.conversion_job_exception import InvalidConversionJobError
 from src.application.exceptions.file_system_exceptions import FileSystemError
-from src.application.services.conversion_service import ConversionService
+from src.application.services.conversion_service import (
+    BatchItemRequest,
+    BatchOutcome,
+    ConversionService,
+)
 from src.application.services.file_service import FileService
 from src.application.services.file_transfer_service import TransferService
 from src.infrastructure.adapters.repository.sql_conversion_job_repo import SQLConversionJobRepository
+from src.infrastructure.adapters.repository.sql_subscription_repo import SQLSubscriptionRepository
 from src.infrastructure.adapters.security.encryption import FileEncryptionService
 from src.infrastructure.adapters.storage.minio_storage_adapter import MinioFileStorageAdapter
 from src.infrastructure.adapters.storage.sanitize import (
@@ -35,6 +42,7 @@ from src.presentation.api.dependencies.service_dependencies import (
     get_encryption_service,
     get_file_service,
     get_minio_download_adapter,
+    get_subscription_repository,
     get_transfer_service,
 )
 from src.presentation.schemas.conversion import (
@@ -43,6 +51,12 @@ from src.presentation.schemas.conversion import (
     ConversionMapResponse,
     CreateConversionJobRequest,
     SupportedConversionResponse,
+)
+from src.presentation.schemas.workflow import (
+    BatchConversionRequest,
+    BatchConversionResponse,
+    BatchItemResult,
+    BatchStatusResponse,
 )
 from src.presentation.schemas.auth import (
     DeleteHistoryPreviewResponse,
@@ -83,6 +97,101 @@ def _to_response(job: ConversionJob, download_url: str | None = None) -> Convers
         client_encrypted=job.client_encrypted,
         origin=str(job.origin),
     )
+
+
+def _to_batch_response(
+    outcome: BatchOutcome,
+    *,
+    extra_problems: list[BatchItemResult] | None = None,
+) -> BatchConversionResponse:
+    """Shape a batch outcome for the wire, with pre-flight problems first.
+
+    Items that never became a job (an inaccessible file, an unknown source
+    format) are placed before the ones that did, because they are the ones the
+    user has to do something about.
+
+    The status is recomputed here rather than taken from ``outcome.status``,
+    because that property is derived from the items the *service* saw and knows
+    nothing about these pre-flight problems. A batch where the only file was
+    inaccessible has no service items at all, so the service calls it a success
+    — which would report "nothing went wrong" for the one case where everything
+    did.
+    """
+    problems = extra_problems or []
+    items = [
+        BatchItemResult(
+            file_id=item.file_id,
+            file_name=item.file_name,
+            job=_to_response(item.job) if item.job is not None else None,
+            error=item.error,
+        )
+        for item in outcome.outcomes
+    ]
+    created_count = outcome.created_count
+    failed_count = outcome.failed_count + len(problems)
+
+    if failed_count == 0:
+        batch_status = "success"
+    elif created_count == 0:
+        batch_status = "failed"
+    else:
+        batch_status = "partial"
+
+    return BatchConversionResponse(
+        batch_id=outcome.batch_id,
+        status=batch_status,
+        created_count=created_count,
+        failed_count=failed_count,
+        items=[*problems, *items],
+        workflow_id=outcome.workflow_id,
+    )
+
+
+def _to_batch_status(batch_id: str, jobs: list[ConversionJob]) -> BatchStatusResponse:
+    """An aggregate computed from the batch's own jobs.
+
+    Nothing here is stored: `completed_count` and friends are counted from the
+    children on every read, so a batch's summary can never disagree with the
+    jobs it summarises. Terminal states are counted the way the rest of the app
+    counts them (`JobStatus`), not re-derived.
+    """
+    completed = sum(1 for job in jobs if job.status == JobStatus.COMPLETED)
+    failed = sum(1 for job in jobs if job.status == JobStatus.FAILED)
+    active = len(jobs) - completed - failed
+    if not jobs:
+        batch_status = "empty"
+    elif active:
+        batch_status = "running"
+    elif failed == 0:
+        batch_status = "success"
+    elif completed == 0:
+        batch_status = "failed"
+    else:
+        batch_status = "partial"
+
+    return BatchStatusResponse(
+        batch_id=batch_id,
+        status=batch_status,
+        total=len(jobs),
+        completed_count=completed,
+        failed_count=failed,
+        active_count=active,
+        items=[_to_response(job) for job in jobs],
+        workflow_id=next((job.workflow_id for job in jobs if job.workflow_id), None),
+    )
+
+
+async def _tier_for(subscriptions, user_id: int) -> SubscriptionTier:
+    """The caller's plan, for queue priority.
+
+    Defaults to FREE when the tier cannot be resolved: an unreadable
+    subscription must not fail the user's conversion, and FREE is the queue a
+    plan-less account belongs on anyway.
+    """
+    try:
+        return await subscriptions.get_tier_for_user(user_id)
+    except Exception:  # noqa: BLE001 - a lookup failure is not the user's problem
+        return SubscriptionTier.FREE
 
 
 def _safe_display_name(value: str) -> str:
@@ -311,6 +420,109 @@ async def delete_conversion_history(
     if not deleted:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post(
+    "/batch",
+    response_model=BatchConversionResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def create_batch_conversion(
+    payload: BatchConversionRequest,
+    current_user: CurrentUser,
+    origin: RequestOrigin,
+    conversion_service: Annotated[ConversionService, Depends(get_conversion_service)],
+    file_service: Annotated[FileService, Depends(get_file_service)],
+    subscriptions: Annotated[SQLSubscriptionRepository, Depends(get_subscription_repository)],
+) -> BatchConversionResponse:
+    """Convert several of the caller's library files into one target format.
+
+    Returns ``202`` with a per-item outcome rather than all-or-nothing: an
+    unsupported or inaccessible file fails *its own item* and the rest still
+    start. That is what makes partial success a real result instead of a
+    rollback, and it is the behaviour the batch UI is built on ("3 of 5
+    started").
+
+    Every job is created through the same service method a single conversion
+    uses, so credits, tier routing, per-job SSE progress, retry and download are
+    unchanged — a batch is a *grouping*, not a second conversion engine.
+
+    ``workflow_id`` is accepted but is NOT trusted from the body: a workflow run
+    goes through ``POST /workflows/{id}/runs``, which resolves the id against the
+    caller's own workflows. A batch posted directly here always records no
+    workflow, so a caller cannot attribute their jobs to someone else's saved
+    workflow (or forge a run count).
+    """
+    target_format = payload.target_format.strip().lstrip(".").lower()
+
+    # One query for the whole selection (see `get_owned_files`), which is also
+    # what enforces ownership: ids belonging to another account never appear,
+    # so they are reported as unavailable rather than converted.
+    rows = await file_service.get_owned_files(current_user.id, payload.file_ids)
+    resolved_ids = {row.id for row in rows}
+    missing = [file_id for file_id in payload.file_ids if file_id not in resolved_ids]
+
+    items: list[BatchItemRequest] = []
+    problems: list[BatchItemResult] = []
+    for file_id in payload.file_ids:
+        if file_id in missing:
+            problems.append(
+                BatchItemResult(
+                    file_id=file_id,
+                    file_name="",
+                    error="That file is no longer available.",
+                )
+            )
+
+    for row in rows:
+        source_format = extension_from_filename(row.file_name)
+        if not source_format:
+            problems.append(
+                BatchItemResult(
+                    file_id=row.id,
+                    file_name=row.file_name,
+                    error="Could not infer a source format from the file name.",
+                )
+            )
+            continue
+        items.append(
+            BatchItemRequest(
+                file_id=row.id,
+                file_name=row.file_name,
+                object_key=row.file_key,
+                source_format=source_format,
+                target_format=target_format,
+            )
+        )
+
+    outcome = await conversion_service.create_batch(
+        items=items,
+        user_id=current_user.id,
+        tier=await _tier_for(subscriptions, current_user.id),
+        origin=origin,
+    )
+
+    return _to_batch_response(outcome, extra_problems=problems)
+
+
+@router.get("/batches/{batch_id}", response_model=BatchStatusResponse)
+async def get_batch(
+    batch_id: str,
+    current_user: CurrentUser,
+    conversion_service: Annotated[ConversionService, Depends(get_conversion_service)],
+) -> BatchStatusResponse:
+    """Re-read a batch and its items from the jobs that carry its id.
+
+    This is what lets a batch survive a reload or a closed tab: the client asks
+    for the batch rather than having to have kept the job ids it was handed at
+    creation. The aggregate counts are computed here, from the children, so they
+    cannot drift from the jobs they describe.
+
+    An unknown id, or one belonging to another account, is an empty batch rather
+    than a 404 — the same non-disclosure the rest of this API keeps.
+    """
+    jobs = await conversion_service.list_batch(batch_id, current_user.id)
+    return _to_batch_status(batch_id, jobs)
 
 
 @router.post("/jobs", response_model=ConversionJobResponse, status_code=status.HTTP_202_ACCEPTED)

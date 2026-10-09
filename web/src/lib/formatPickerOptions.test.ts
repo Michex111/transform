@@ -7,7 +7,11 @@
 
 import { describe, expect, it } from "vitest";
 import { FORMAT_CATEGORIES } from "@/lib/formatCatalog";
-import { isPickableFormat, restrictFormatCategories } from "@/lib/formatPickerOptions";
+import {
+  categoryForFormat,
+  isPickableFormat,
+  restrictFormatCategories,
+} from "@/lib/formatPickerOptions";
 
 const ALL_EXTS = FORMAT_CATEGORIES.flatMap((category) =>
   category.formats.map((format) => format.ext),
@@ -64,5 +68,35 @@ describe("isPickableFormat", () => {
 
   it("rejects the current selection when nothing is allowed yet", () => {
     expect(isPickableFormat([], "pdf")).toBe(false);
+  });
+});
+
+describe("categoryForFormat", () => {
+  it("finds the category holding a format", () => {
+    // The defect this exists for: the picker opened on `categories[0]`
+    // ("Archive"), so changing an existing PDF showed BZ2/GZ/TAR.
+    expect(categoryForFormat("pdf")).toBe("document");
+    expect(categoryForFormat("jpg")).toBe("image");
+    expect(categoryForFormat("zip")).toBe("archive");
+  });
+
+  it("matches case-insensitively", () => {
+    // A stored value can be "PDF"; a case-sensitive lookup would answer "no
+    // category" for a format the picker can display perfectly well.
+    expect(categoryForFormat("PDF")).toBe("document");
+    expect(categoryForFormat("  Pdf  ")).toBe("document");
+  });
+
+  it("returns null for a format in no category", () => {
+    expect(categoryForFormat("not-a-format")).toBeNull();
+    expect(categoryForFormat("")).toBeNull();
+  });
+
+  it("honours a restricted category list", () => {
+    // The picker passes its *restricted* categories, so a format whose category
+    // was filtered out must report no category rather than a hidden one.
+    const restricted = restrictFormatCategories(["pdf", "docx"]);
+    expect(categoryForFormat("pdf", restricted)).toBe("document");
+    expect(categoryForFormat("zip", restricted)).toBeNull();
   });
 });

@@ -21,7 +21,7 @@ answer immediately.
 
 import json
 import re
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncGenerator, Sequence
 from typing import Any
 
 from src.application.ports.llm_port import (
@@ -188,7 +188,7 @@ class EchoLlmAdapter:
         *,
         messages: Sequence[LlmMessage],
         tools: Sequence[LlmToolSpec],
-    ) -> AsyncIterator[LlmStreamChunk]:
+    ) -> AsyncGenerator[LlmStreamChunk]:
         """Answer from the rule engine, or ask for one more tool call."""
         available = {tool.name for tool in tools}
         call = self._decide(messages, available)

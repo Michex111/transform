@@ -27,7 +27,7 @@ Configuration that is load-bearing rather than cosmetic:
   balancer.
 """
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -176,7 +176,7 @@ class LazyMCPMount:
         self._app: Any | None = None
 
     @asynccontextmanager
-    async def run(self) -> AsyncIterator[None]:
+    async def run(self) -> AsyncGenerator[None]:
         """Build the server, start its session manager, and clear it afterwards."""
         server = create_mcp_server()
         self._app = build_mcp_asgi_app(server)

@@ -31,6 +31,7 @@ from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from src.application.exceptions.mcp_exceptions import (
+    ConnectionStateError,
     GrantRevokedError,
     InvalidGrantError,
     InvalidRedirectUriError,
@@ -45,6 +46,7 @@ from src.application.ports.mcp_oauth_port import (
     TokenRecord,
 )
 from src.domain.security.enitities.agent_grant import AgentGrant, AgentGrantStatus
+from src.domain.security.exceptions.exceptions import InvalidGrantTransition
 from src.domain.security.value_object.agent_scope import (
     ALL_SCOPES,
     DEFAULT_SCOPES,
@@ -52,6 +54,7 @@ from src.domain.security.value_object.agent_scope import (
     is_subset,
     normalize_scopes,
 )
+from src.infrastructure.logging.audit import log_connection_control
 
 #: Token discriminators. Plain strings so the application layer stays free of
 #: the ORM's enum while the repository can persist them directly.
@@ -380,10 +383,74 @@ class MCPAccessService:
         now = self._clock()
         grant = await self._repository.revoke_grant(grant_id, user_id)
         if grant is None:
+            log_connection_control(
+                "revoke", str(user_id), grant_id, success=False, reason="not_found"
+            )
             return None
         # Kill the credentials too, so nothing that was already issued can be
         # revived by flipping the grant back on.
         await self._repository.revoke_tokens_for_grant(grant.id, now)
+        log_connection_control(
+            "revoke",
+            str(user_id),
+            grant.id,
+            success=True,
+            client_id=grant.client_id,
+        )
+        return grant
+
+    async def pause_connection(self, user_id: int, grant_id: str) -> AgentGrant | None:
+        """Suspend an application's access without revoking it.
+
+        Takes effect on the next MCP request, not at token expiry: access tokens
+        are opaque and resolved through the grant row, and
+        :meth:`load_access_token` refuses a grant whose :meth:`is_active` is
+        false — which a paused grant is. An already-open MCP session therefore
+        cannot keep working by virtue of holding a live token.
+
+        In-flight tool calls are **not** cancelled. A call already executing
+        reads its data through the toolbox at the moment it runs; there is no
+        cooperative cancellation point to interrupt it safely, and claiming
+        otherwise would be a false promise. What is guaranteed is that no
+        *subsequent* call succeeds. Returns ``None`` if the grant is not the
+        caller's.
+        """
+        return await self._set_status(user_id, grant_id, AgentGrantStatus.PAUSED)
+
+    async def resume_connection(self, user_id: int, grant_id: str) -> AgentGrant | None:
+        """Undo a pause, restoring exactly the scopes already granted.
+
+        Refuses a revoked grant: revocation is terminal and regaining access
+        requires a fresh authorization flow. Never widens access — the stored
+        scope set is untouched.
+        """
+        return await self._set_status(user_id, grant_id, AgentGrantStatus.ACTIVE)
+
+    async def _set_status(
+        self, user_id: int, grant_id: str, status: AgentGrantStatus
+    ) -> AgentGrant | None:
+        action = "pause" if status is AgentGrantStatus.PAUSED else "resume"
+        try:
+            grant = await self._repository.set_grant_status(
+                grant_id, user_id, status, self._clock()
+            )
+        except InvalidGrantTransition as exc:
+            log_connection_control(
+                action, str(user_id), grant_id, success=False, reason="revoked"
+            )
+            raise ConnectionStateError(str(exc)) from exc
+        if grant is None:
+            log_connection_control(
+                action, str(user_id), grant_id, success=False, reason="not_found"
+            )
+            return None
+        log_connection_control(
+            action,
+            str(user_id),
+            grant.id,
+            success=True,
+            client_id=grant.client_id,
+        )
         return grant
 
     # ------------------------------------------------------------------

@@ -4,7 +4,7 @@ import { motion } from "motion/react";
 import { MagnifyingGlass, CaretDown, CaretRight, Check } from "@phosphor-icons/react";
 import { FORMAT_CATEGORIES } from "@/lib/formatCatalog";
 import { formatTint, formatVisual } from "@/lib/formatVisual";
-import { isPickableFormat, restrictFormatCategories } from "@/lib/formatPickerOptions";
+import { isPickableFormat, restrictFormatCategories, categoryForFormat } from "@/lib/formatPickerOptions";
 import { useMediaQuery } from "@/lib/useMediaQuery";
 
 /**
@@ -70,7 +70,13 @@ export function FormatPicker({
 }: FormatPickerProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
-  const [activeCat, setActiveCat] = useState(categories[0]?.id ?? "");
+  // The category the user has explicitly clicked, or `null` while they have not
+  // chosen one. Deliberately NOT seeded with `categories[0].id`: that made the
+  // picker always open on whichever category sorts first ("Archive"), so
+  // changing an existing PDF showed a grid of BZ2/GZ/TAR. `null` means "no
+  // opinion yet", and the active category is then derived from the current
+  // value — which is the category the user is most likely to want.
+  const [pickedCat, setPickedCat] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   // Also covers the portalled overlay, which is NOT inside `rootRef` — without
   // this, clicking inside the panel on a phone would count as an outside click
@@ -110,16 +116,31 @@ export function FormatPicker({
     };
   }, [open]);
 
-  // Focus the search box when opening.
+  // Focus the search box when opening, and forget any category the user picked
+  // last time so the panel opens on the current value's own category.
   useEffect(() => {
     if (open) {
       setQuery("");
+      setPickedCat(null);
       window.setTimeout(() => searchRef.current?.focus(), 50);
     }
   }, [open]);
 
+  // Which category holds the current value. Derived rather than stored so it
+  // cannot go stale: a stored copy would still point at the old category after
+  // a value change, and keeping it in sync needs an effect that runs (and
+  // re-focuses the search box) on every render.
+  const valueCategoryId = useMemo(
+    () => categoryForFormat(value, restrictedCategories),
+    [restrictedCategories, value],
+  );
+
+  // Explicit choice wins; otherwise follow the current value; otherwise the
+  // first category, so there is always something to render.
   const activeCategory =
-    restrictedCategories.find((c) => c.id === activeCat) ?? restrictedCategories[0];
+    restrictedCategories.find((c) => c.id === pickedCat) ??
+    restrictedCategories.find((c) => c.id === valueCategoryId) ??
+    restrictedCategories[0];
 
   const visibleFormats = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -252,7 +273,7 @@ export function FormatPicker({
                       <button
                         key={cat.id}
                         onClick={() => {
-                          setActiveCat(cat.id);
+                          setPickedCat(cat.id);
                           setQuery("");
                         }}
                         className={`flex w-full items-center justify-between px-3 py-2 text-left text-sm transition-colors ${

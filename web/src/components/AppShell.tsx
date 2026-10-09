@@ -5,7 +5,7 @@ import { DotsThree } from "@phosphor-icons/react";
 import { Logo } from "@/components/ui";
 import { ProfileMenu } from "@/components/ProfileMenu";
 import { AssistantLauncher } from "@/components/assistant/AssistantLauncher";
-import { MORE, NAV, PRIMARY } from "@/components/navItems";
+import { MORE, NAV_GROUPS, PRIMARY } from "@/components/navItems";
 import { PHONE_MENU, SIDEBAR_MENU } from "@/lib/profileMenu";
 
 export function AppShell() {
@@ -39,36 +39,45 @@ export function AppShell() {
         <div className="flex h-16 shrink-0 items-center border-b border-outline px-5">
           <Logo />
         </div>
-        <nav className="flex-1 space-y-1 overflow-y-auto p-3" aria-label="Main">
-          {NAV.map(({ to, label, icon: Icon, state }, i) => (
-            <NavLink
-              key={to}
-              to={to}
-              state={state}
-              className={({ isActive }) =>
-                `group relative flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors ${
-                  isActive
-                    ? "bg-primary-container text-on-primary-container"
-                    : "text-muted hover:bg-surface-variant hover:text-on-background"
-                }`
-              }
-            >
-              {({ isActive }) => (
-                <motion.span
-                  className="flex w-full items-center gap-3"
-                  initial={{ x: -8, opacity: 0 }}
-                  animate={{ x: 0, opacity: 1 }}
-                  transition={{ delay: 0.05 * i, duration: 0.3 }}
-                >
-                  <Icon
-                    size={20}
-                    weight={isActive ? "fill" : "regular"}
-                    className={isActive ? "text-on-primary-container" : ""}
-                  />
-                  {label}
-                </motion.span>
-              )}
-            </NavLink>
+        <nav className="flex-1 overflow-y-auto p-3" aria-label="Main">
+          {NAV_GROUPS.map((group, groupIndex) => (
+            <div key={group.label} className={groupIndex > 0 ? "mt-5" : undefined}>
+              <p className="px-3 pb-1.5 text-xs font-medium uppercase tracking-wider text-muted">
+                {group.label}
+              </p>
+              <div className="space-y-1">
+                {group.items.map(({ to, label, icon: Icon, state }, i) => (
+                  <NavLink
+                    key={to}
+                    to={to}
+                    state={state}
+                    className={({ isActive }) =>
+                      `group relative flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors ${
+                        isActive
+                          ? "bg-primary-container text-on-primary-container"
+                          : "text-muted hover:bg-surface-variant hover:text-on-background"
+                      }`
+                    }
+                  >
+                    {({ isActive }) => (
+                      <motion.span
+                        className="flex w-full items-center gap-3"
+                        initial={{ x: -8, opacity: 0 }}
+                        animate={{ x: 0, opacity: 1 }}
+                        transition={{ delay: 0.05 * i, duration: 0.3 }}
+                      >
+                        <Icon
+                          size={20}
+                          weight={isActive ? "fill" : "regular"}
+                          className={isActive ? "text-on-primary-container" : ""}
+                        />
+                        {label}
+                      </motion.span>
+                    )}
+                  </NavLink>
+                ))}
+              </div>
+            </div>
           ))}
         </nav>
         <div className="shrink-0 border-t border-outline p-3">

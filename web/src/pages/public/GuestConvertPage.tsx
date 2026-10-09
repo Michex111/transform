@@ -12,6 +12,7 @@ import { friendlyErrorMessage } from "@/lib/errorMessages";
 import { useConversionMap } from "@/lib/useConversionMap";
 import { useGuestHistory } from "@/lib/useGuestHistory";
 import { jobProgress } from "@/jobs/jobStore";
+import { SeoHead } from "@/components/SeoHead";
 import type { GuestHistoryItem } from "@/api/types";
 
 const MAX_BYTES = 100 * 1024 * 1024; // 100 MB
@@ -190,6 +191,14 @@ export function GuestConvertPage() {
 
   return (
     <div className="format-glyph-field">
+      <SeoHead
+        meta={{
+          title: "Convert a file online — no sign-up",
+          description:
+            "Convert PDF, DOCX, XLSX, images, audio, and more with a live queue and real progress. No account required.",
+          path: "/convert",
+        }}
+      />
       <div className="mx-auto max-w-4xl space-y-6 px-4 py-12 sm:px-6">
         <div>
           <p className="mb-2 inline-flex items-center gap-2 rounded-full border border-outline-strong px-3 py-1 text-xs font-medium uppercase tracking-wider text-muted">

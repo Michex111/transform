@@ -66,7 +66,11 @@ export function ConnectedAppsSection() {
     }
   }
 
-  const active = apps.filter((a) => a.status !== "REVOKED");
+  const active = apps.filter((a) => a.status === "ACTIVE");
+  // A paused connection is neither working nor revoked: it keeps its scopes and
+  // the user can resume it, so it must not be shown as "Active" (which would
+  // contradict the Developer > MCP Activity page) nor as "Revoked".
+  const paused = apps.filter((a) => a.status === "PAUSED");
   const revoked = apps.filter((a) => a.status === "REVOKED");
 
   return (
@@ -94,13 +98,16 @@ export function ConnectedAppsSection() {
           <p className="text-sm text-muted">No applications are connected.</p>
         ) : (
           <ul className="divide-y divide-outline">
-            {[...active, ...revoked].map((app) => {
-              const isActive = app.status !== "REVOKED";
+            {[...active, ...paused, ...revoked].map((app) => {
+              const isRevoked = app.status === "REVOKED";
+              const isPaused = app.status === "PAUSED";
               return (
                 <li key={app.id} className="flex items-start gap-3 py-3">
                   <Plugs
                     size={16}
-                    className={`mt-1 shrink-0 ${isActive ? "text-success" : "text-muted"}`}
+                    className={`mt-1 shrink-0 ${
+                      isRevoked ? "text-muted" : isPaused ? "text-warning" : "text-success"
+                    }`}
                     aria-hidden="true"
                   />
                   <div className="min-w-0 flex-1">
@@ -109,17 +116,20 @@ export function ConnectedAppsSection() {
                       {app.scopes.map((scope) => (
                         <Badge key={scope}>{scopeLabel(scope)}</Badge>
                       ))}
-                      {!isActive && <Badge>Revoked</Badge>}
+                      {isPaused && <Badge>Paused</Badge>}
+                      {isRevoked && <Badge>Revoked</Badge>}
                     </div>
                     <p className="mt-1 text-xs text-muted">
-                      {isActive
-                        ? app.last_used_at
-                          ? `Last used ${new Date(app.last_used_at).toLocaleDateString()}`
-                          : "Not used yet"
-                        : "Access revoked"}
+                      {isRevoked
+                        ? "Access revoked"
+                        : isPaused
+                          ? "Paused — requests from this application are refused"
+                          : app.last_used_at
+                            ? `Last used ${new Date(app.last_used_at).toLocaleDateString()}`
+                            : "Not used yet"}
                     </p>
                   </div>
-                  {isActive && (
+                  {!isRevoked && (
                     <button
                       type="button"
                       onClick={() => setRevokeTarget(app)}

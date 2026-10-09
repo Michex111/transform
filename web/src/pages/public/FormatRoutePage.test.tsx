@@ -75,7 +75,9 @@ describe("FormatRoutePage", () => {
 describe("LandingPage", () => {
   it("renders the hero, the converter card and the format catalogue anchor", () => {
     const html = renderAt("/", <LandingPage />);
-    expect(html).toContain("Convert anything.");
+    // The repositioned hero states the product, not just the converter.
+    expect(html).toContain("Turn file work into");
+    expect(html).toContain("AI-powered document platform");
     expect(html).toContain('id="format-catalog"');
     // The converter card exposes the source → target pair as one labelled group.
     expect(html).toContain('role="group"');

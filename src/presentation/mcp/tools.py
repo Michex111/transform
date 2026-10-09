@@ -22,7 +22,7 @@ make Transform read or write something the user never authorized.
 """
 
 import contextlib
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from typing import Any
 
 from mcp.server import MCPServer
@@ -31,6 +31,7 @@ from mcp.types import ToolAnnotations
 
 from src.application.services.mcp_toolbox import MCPToolBox, MCPToolContext
 from src.domain.security.value_object.agent_scope import normalize_scopes
+from src.presentation.mcp.activity import instrument_tool
 from src.presentation.mcp.dependencies import open_mcp_scope
 
 #: Shown to the agent on initialize. Kept short and factual: it states the
@@ -58,7 +59,7 @@ Notes:
 
 
 @contextlib.asynccontextmanager
-async def _tool_scope() -> AsyncIterator[tuple[MCPToolBox, MCPToolContext]]:
+async def _tool_scope() -> AsyncGenerator[tuple[MCPToolBox, MCPToolContext]]:
     """Resolve the verified caller and the services for this tool call.
 
     The identity is taken from the OAuth access token the SDK validated and
@@ -105,6 +106,7 @@ def register_tools(mcp: MCPServer) -> None:
         ),
         structured_output=True,
     )
+    @instrument_tool("get_supported_conversions")
     async def get_supported_conversions(source_format: str | None = None) -> dict[str, Any]:
         """List the file conversions this service can perform.
 
@@ -137,6 +139,7 @@ def register_tools(mcp: MCPServer) -> None:
         ),
         structured_output=True,
     )
+    @instrument_tool("list_files")
     async def list_files(
         query: str | None = None,
         extension: str | list[str] | None = None,
@@ -185,6 +188,7 @@ def register_tools(mcp: MCPServer) -> None:
         ),
         structured_output=True,
     )
+    @instrument_tool("get_file")
     async def get_file(file_id: str) -> dict[str, Any]:
         """Get the metadata of one file the user owns.
 
@@ -215,6 +219,7 @@ def register_tools(mcp: MCPServer) -> None:
         ),
         structured_output=True,
     )
+    @instrument_tool("get_conversion_status")
     async def get_conversion_status(job_id: str) -> dict[str, Any]:
         """Check the progress of a conversion started by convert_file.
 
@@ -252,6 +257,7 @@ def register_tools(mcp: MCPServer) -> None:
         ),
         structured_output=True,
     )
+    @instrument_tool("convert_file")
     async def convert_file(file_id: str, target_format: str) -> dict[str, Any]:
         """Start converting one of the user's files into another format.
 
@@ -287,6 +293,7 @@ def register_tools(mcp: MCPServer) -> None:
         ),
         structured_output=True,
     )
+    @instrument_tool("save_file")
     async def save_file(
         job_id: str,
         folder_id: str | None = None,
@@ -330,6 +337,7 @@ def register_tools(mcp: MCPServer) -> None:
         ),
         structured_output=True,
     )
+    @instrument_tool("delete_file")
     async def delete_file(file_id: str) -> dict[str, Any]:
         """Permanently delete one of the user's files. This cannot be undone.
 

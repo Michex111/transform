@@ -1,3 +1,6 @@
+import logging
+from dataclasses import dataclass, field
+from typing import Sequence
 from uuid import uuid4
 
 from src.application.exceptions.conversion_job_exception import InvalidConversionJobError
@@ -5,12 +8,71 @@ from src.application.ports.database_port import ConversionJobRepositoryPort
 from src.application.ports.queue_port import JobQueuePort
 from src.application.services.priority_queue_dispatcher import PriorityQueueDispatcher
 from src.domain.conversions.entities.conversion_job import ConversionJob
+from src.domain.conversions.exceptions import InvalidConversion
 from src.domain.conversions.policies.conversion_policy import is_supported
 from src.domain.conversions.policies.job_ownership import is_job_owner
 from src.domain.conversions.value_object.conversion_type import ConversionType
 from src.domain.conversions.value_object.job_origin import JobOrigin
 from src.domain.subscriptions.value_object.tier import SubscriptionTier
 from src.infrastructure.converters.converter_registry import get_registry
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class BatchItemRequest:
+    """One file to convert, already resolved and authorized by the caller.
+
+    ``object_key`` and ``source_format`` are resolved from the file record
+    *before* the batch starts (see the router), so this layer needs no
+    knowledge of the file repository and the ownership check has already
+    happened by the time a job is created.
+    """
+
+    file_id: str
+    file_name: str
+    object_key: str
+    source_format: str
+    target_format: str
+
+
+@dataclass
+class BatchItemOutcome:
+    """What happened to one item: either a job, or a reason there is not one."""
+
+    file_id: str
+    file_name: str
+    job: ConversionJob | None = None
+    error: str | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.job is not None
+
+
+@dataclass
+class BatchOutcome:
+    """The result of a batch request, per item."""
+
+    batch_id: str
+    outcomes: list[BatchItemOutcome] = field(default_factory=list)
+    created_count: int = 0
+    failed_count: int = 0
+    workflow_id: str | None = None
+
+    @property
+    def status(self) -> str:
+        """The batch's own outcome, derived from its items rather than stored.
+
+        ``success`` / ``partial`` / ``failed`` are computed on every read, so
+        they cannot disagree with the jobs they describe.
+        """
+        if self.failed_count == 0:
+            return "success"
+        if self.created_count == 0:
+            return "failed"
+        return "partial"
+
 
 
 class ConversionService:
@@ -223,4 +285,140 @@ class ConversionService:
         else:
             await self.queue_port.publish_job(job)
         return job
+
+    async def list_batch(self, batch_id: str, user_id: int) -> list[ConversionJob]:
+        """Every job a batch created, scoped to its owner.
+
+        An unknown or another account's batch id yields an empty list rather
+        than an error: the caller cannot distinguish "no such batch" from "not
+        yours" that way, which is the same non-disclosure the rest of the
+        conversion API keeps.
+        """
+        return await self.db_repository.list_by_batch(batch_id, user_id)
+
+    async def count_workflow_runs(self, workflow_ids: list[str], user_id: int) -> dict[str, int]:
+        """Run counts per workflow, for the workflow list's badges."""
+        return await self.db_repository.count_batches_for_workflows(workflow_ids, user_id)
+
+    async def list_workflow_run_batch_ids(
+        self, workflow_id: str, user_id: int, *, limit: int = 20
+    ) -> list[str]:
+        """The batch ids a workflow produced, newest run first."""
+        return await self.db_repository.list_batch_ids_for_workflow(
+            workflow_id, user_id, limit=limit
+        )
+
+    async def create_batch(
+        self,
+        *,
+        items: Sequence[BatchItemRequest],
+        user_id: int,
+        tier: SubscriptionTier = SubscriptionTier.FREE,
+        batch_id: str | None = None,
+        workflow_id: str | None = None,
+        origin: JobOrigin = JobOrigin.WEB,
+    ) -> BatchOutcome:
+        """Create and enqueue one conversion job per item.
+
+        This is the whole of "batch conversion": the group is a ``batch_id``
+        stamped on independent jobs, not a new kind of job. Everything that
+        already works for one conversion therefore keeps working per item —
+        progress streaming, retry, download, history, credits — with nothing to
+        re-implement and no second lifecycle to keep in step.
+
+        Per-item outcomes, not all-or-nothing. One unsupported file (or one the
+        caller does not own) fails *that item* and leaves the rest to run, which
+        is what makes partial success a first-class result instead of a
+        rollback. The caller gets a per-item reason it can show against the row
+        that failed.
+
+        **Sequential, deliberately.** The obvious implementation is an
+        ``asyncio.gather`` over a semaphore, and it is wrong here: the
+        repositories share one ``AsyncSession`` per request, and a SQLAlchemy
+        session is a single connection with a single transaction. Using it from
+        concurrent tasks raises "this session is provisioning a new connection;
+        concurrent operations are not permitted" — and it does so
+        *intermittently*, only for batches of more than one file, which is
+        exactly the shape of bug that reaches production. Bounding the fan-out
+        to one is the only correct choice for this session model.
+
+        That is not a loss. The work here is a DB write and a queue publish, so
+        the parallelism that matters is the *workers* draining the queue, which
+        the tier stream already governs. What must not happen is one request
+        blocking on N conversions to finish — and it does not: this returns as
+        soon as every job is enqueued, leaving the conversions to run
+        asynchronously and be observed on the per-job progress stream.
+        """
+        effective_batch_id = batch_id or str(uuid4())
+
+        outcomes = [
+            await self._create_batch_item(
+                item,
+                user_id=user_id,
+                tier=tier,
+                batch_id=effective_batch_id,
+                workflow_id=workflow_id,
+                origin=origin,
+            )
+            for item in items
+        ]
+
+        created = [outcome for outcome in outcomes if outcome.job is not None]
+        return BatchOutcome(
+            batch_id=effective_batch_id,
+            outcomes=outcomes,
+            created_count=len(created),
+            failed_count=len(outcomes) - len(created),
+            workflow_id=workflow_id,
+        )
+
+    async def _create_batch_item(
+        self,
+        item: BatchItemRequest,
+        *,
+        user_id: int,
+        tier: SubscriptionTier,
+        batch_id: str,
+        workflow_id: str | None,
+        origin: JobOrigin,
+    ) -> BatchItemOutcome:
+        """Create one batch item's job, turning every failure into an outcome.
+
+        Deliberately total: it never raises. A raise would lose the per-item
+        reason the batch response is built on, and would leave the other items
+        unaccounted for. Returning an outcome keeps the batch's failure model
+        honest: every item is reported, whatever went wrong.
+        """
+        try:
+            job = await self.convert_library_file(
+                file_name=item.file_name,
+                source_format=item.source_format,
+                target_format=item.target_format,
+                object_key=item.object_key,
+                user_id=user_id,
+                tier=tier,
+                origin=origin,
+            )
+        except (InvalidConversion, InvalidConversionJobError) as exc:
+            return BatchItemOutcome(file_id=item.file_id, file_name=item.file_name, error=str(exc))
+        except Exception as exc:  # noqa: BLE001 - see the docstring
+            # Anything else (a queue outage, a transient DB error) is reported
+            # against this item rather than taking down the batch. The message is
+            # kept generic: a driver-level string can carry connection details.
+            logger.warning("Batch item %s failed to enqueue: %s", item.file_id, exc)
+            return BatchItemOutcome(
+                file_id=item.file_id,
+                file_name=item.file_name,
+                error="Could not start this conversion. Please try again.",
+            )
+
+        # Stamp the grouping columns after creation: `convert_library_file` is
+        # shared with the single-conversion path and stays unaware of batches.
+        job.batch_id = batch_id
+        job.workflow_id = workflow_id
+        await self.update_conversion_job(job)
+        return BatchItemOutcome(
+            file_id=item.file_id, file_name=item.file_name, job=job
+        )
+
 

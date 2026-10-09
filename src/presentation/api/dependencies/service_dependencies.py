@@ -13,8 +13,12 @@ from src.application.services.conversion_service import ConversionService
 from src.application.services.file_service import FileService
 from src.application.services.file_transfer_service import TransferService
 from src.application.services.mcp_access_service import MCPAccessService
+from src.application.services.mcp_activity_service import McpActivityService
+from src.application.services.api_telemetry_service import ApiTelemetryService
 from src.application.services.priority_queue_dispatcher import PriorityQueueDispatcher
 from src.application.services.queue_priority_router import QueuePriorityRouter
+from src.application.services.workflow_service import WorkflowService
+from src.presentation.schemas.workflow import MAX_BATCH_FILES
 from src.application.ports.assistant_account_port import AssistantAccountPort
 from src.application.ports.assistant_model_port import AssistantModelResolver
 from src.application.ports.assistant_repository_port import AssistantQuotaPort
@@ -31,6 +35,7 @@ from src.infrastructure.adapters.payment.stripe_service import StripeService
 from src.infrastructure.adapters.queues.redis_stream_job_queue import JobStream
 from src.infrastructure.adapters.queues.redis_stream_status_queue import JobEventSubscriber
 from src.infrastructure.adapters.repository.sql_api_key_repo import SQLAPIKeyRepository
+from src.infrastructure.adapters.repository.sql_api_telemetry_repo import SQLTelemetryRepository
 from src.infrastructure.adapters.repository.sql_assistant_account_adapter import (
     SQLAssistantAccountAdapter,
 )
@@ -38,6 +43,9 @@ from src.infrastructure.adapters.repository.sql_conversation_repo import SQLConv
 from src.infrastructure.adapters.repository.sql_conversion_job_repo import SQLConversionJobRepository
 from src.infrastructure.adapters.repository.sql_credit_repo import SQLCreditRepository
 from src.infrastructure.adapters.repository.sql_mcp_repo import SQLMCPRepository
+from src.infrastructure.adapters.repository.sql_saved_workflow_repo import (
+    SQLSavedWorkflowRepository,
+)
 from src.infrastructure.adapters.repository.sql_subscription_repo import SQLSubscriptionRepository
 from src.infrastructure.adapters.repository.sql_user_file_repo import SQLUserFileRepository
 from src.infrastructure.adapters.repository.sql_user_folder_repo import SQLUserFolderRepository
@@ -103,6 +111,22 @@ def get_subscription_repository(
     db: Annotated[AsyncSession, Depends(get_db_session)],
 ) -> SQLSubscriptionRepository:
     return SQLSubscriptionRepository(session=db)
+
+
+def get_workflow_service(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> WorkflowService:
+    """The saved-workflow service, over the SQL repository.
+
+    The batch cap is the schema's own ``MAX_BATCH_FILES`` rather than a second
+    constant: that value is what the batch and run endpoints enforce when they
+    validate a request, so sharing it is what stops a workflow run from being
+    able to start more work than a manual batch would be allowed to.
+    """
+    return WorkflowService(
+        SQLSavedWorkflowRepository(session=db),
+        max_batch_files=MAX_BATCH_FILES,
+    )
 
 
 def get_credit_repository(
@@ -308,6 +332,45 @@ def get_mcp_access_service(
         access_token_ttl_minutes=settings.MCP_ACCESS_TOKEN_TTL_MINUTES,
         refresh_token_ttl_days=settings.MCP_REFRESH_TOKEN_TTL_DAYS,
         authorization_code_ttl_minutes=settings.MCP_AUTHORIZATION_CODE_TTL_MINUTES,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Developer observability
+# ---------------------------------------------------------------------------
+
+
+def get_telemetry_repository(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> SQLTelemetryRepository:
+    """The telemetry read/write repository for this request's session.
+
+    Also used by the ingestion flusher, which builds this itself from the
+    process's session factory rather than through FastAPI — the write path has
+    no request to depend on.
+    """
+    return SQLTelemetryRepository(session=db)
+
+
+def get_api_telemetry_service(
+    repository: Annotated[SQLTelemetryRepository, Depends(get_telemetry_repository)],
+) -> ApiTelemetryService:
+    settings = get_settings()
+    return ApiTelemetryService(
+        repository=repository,
+        max_range_days=settings.TELEMETRY_MAX_RANGE_DAYS,
+        current_window_seconds=settings.TELEMETRY_CURRENT_WINDOW_SECONDS,
+    )
+
+
+def get_mcp_activity_service(
+    repository: Annotated[SQLTelemetryRepository, Depends(get_telemetry_repository)],
+    db: Annotated[AsyncSession, Depends(get_db_session)],
+) -> McpActivityService:
+    """MCP activity + connection management, on the request's session."""
+    return McpActivityService(
+        mcp_repository=SQLMCPRepository(session=db),
+        telemetry_repository=repository,
     )
 
 

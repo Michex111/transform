@@ -104,3 +104,29 @@ export function relativeTimeLabel(
     ...(new Date(time).getFullYear() === new Date(now).getFullYear() ? {} : { year: "numeric" }),
   });
 }
+
+/**
+ * The conversations whose title contains `query`, case-insensitively.
+ *
+ * Titles only, and it is a client-side filter on purpose: the conversation list
+ * is fetched whole (the API returns the caller's conversations in one response
+ * with no pagination), so filtering it in the browser is complete rather than
+ * partial. The alternative — a search endpoint — would have to be built, and
+ * would not find anything this does not. Message *content* is NOT searched:
+ * nothing indexes it, so the placeholder says "titles" and the empty state does
+ * not promise more than it delivers.
+ *
+ * A blank query returns the list unchanged (identity, not a copy): an empty
+ * search box means "no filter", not "no results".
+ */
+export function filterConversations(
+  conversations: readonly AssistantConversation[],
+  query: string,
+): readonly AssistantConversation[] {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return conversations;
+  return conversations.filter((conversation) =>
+    (conversation.title ?? "").toLowerCase().includes(needle),
+  );
+}
+

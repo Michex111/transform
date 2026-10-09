@@ -1337,3 +1337,96 @@ export interface McpConsentApprovalResponse {
   /** Absolute URL (the application's callback) the browser must be sent to. */
   redirect_url: string
 }
+
+// ---- Batch conversions ----
+
+/**
+ * One item of a batch: either the job it started, or why it did not start.
+ *
+ * The two are mutually exclusive in practice — a successful item has a `job`
+ * and a failed one has an `error` — and the UI renders them differently rather
+ * than inventing a placeholder job for a file that never got one.
+ */
+export interface BatchItemResult {
+  file_id: string
+  file_name: string
+  job: ConversionJobResponse | null
+  error: string | null
+}
+
+export interface BatchConversionRequest {
+  file_ids: string[]
+  target_format: string
+}
+
+export interface BatchConversionResponse {
+  batch_id: string
+  /** `success` | `partial` | `failed`, derived server-side from the items. */
+  status: string
+  created_count: number
+  failed_count: number
+  items: BatchItemResult[]
+  workflow_id?: string | null
+}
+
+/** A batch re-read from its jobs, so it survives a reload or a closed tab. */
+export interface BatchStatusResponse {
+  batch_id: string
+  status: string
+  total: number
+  completed_count: number
+  failed_count: number
+  active_count: number
+  items: ConversionJobResponse[]
+  workflow_id?: string | null
+}
+
+// ---- Saved workflows ----
+
+/**
+ * One step of a workflow.
+ *
+ * `convert` is the only operation today. The type is a discriminated string
+ * rather than a union of interfaces because the server validates the set — this
+ * mirrors it, it does not define it.
+ */
+export interface WorkflowOperation {
+  type: "convert"
+  target_format: string
+}
+
+export interface WorkflowDefinition {
+  source?: string
+  operations: WorkflowOperation[]
+}
+
+export interface SavedWorkflow {
+  workflow_id: string
+  name: string
+  description: string
+  definition: WorkflowDefinition
+  run_count: number
+  created_at?: string | null
+  updated_at?: string | null
+}
+
+export interface WorkflowListResponse {
+  workflows: SavedWorkflow[]
+}
+
+export interface CreateWorkflowRequest {
+  name: string
+  description?: string | null
+  definition: WorkflowDefinition
+}
+
+export interface WorkflowRunResponse {
+  workflow_id: string
+  batch_id: string
+  status: string
+  created_count: number
+  failed_count: number
+  items: BatchItemResult[]
+  /** Files rejected before a job existed, for the same reason `items` carries. */
+  problems: Array<Record<string, unknown>>
+}
