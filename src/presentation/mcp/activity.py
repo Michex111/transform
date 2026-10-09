@@ -26,11 +26,15 @@ Outcome classification:
 
 Recording goes through the same bounded ingestion queue as API request events,
 so it is fire-and-forget: a telemetry failure can never break an agent's tool
-call.
+call. The failure is *logged* rather than swallowed silently — a swallowed
+instrumentation error is indistinguishable from "nobody called the tools", and
+that made one outage take a full trace to diagnose. The tool call still returns
+normally either way.
 """
 
 import functools
 import inspect
+import logging
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -43,6 +47,8 @@ from src.domain.telemetry.entities.api_request_event import McpToolInvocation, T
 from src.infrastructure.telemetry.ingestion import get_telemetry_ingestion
 
 F = TypeVar("F", bound=Callable[..., Awaitable[Any]])
+
+logger = logging.getLogger(__name__)
 
 #: Exception type names that mean "the caller asked for something that is not
 #: theirs or does not exist". Mapped to a category rather than stored verbatim.
@@ -100,6 +106,10 @@ def _record(
         )
         get_telemetry_ingestion().record_invocation(invocation)
     except Exception:  # noqa: BLE001 — instrumentation must never break a tool call
+        # The tool call itself must still succeed, but an operator debugging
+        # "why is the activity page empty?" needs the reason. Only the exception
+        # type and repr are logged — never tool arguments or results.
+        logger.warning("MCP invocation telemetry dropped for %s", tool_name, exc_info=True)
         return
 
 

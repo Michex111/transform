@@ -19,6 +19,7 @@ import { Button } from "@/components/ui";
 import { CodeBlock } from "@/components/CodeBlock";
 import { Eyebrow, Section, SectionHeading } from "@/components/marketing/Section";
 import { SeoHead } from "@/components/SeoHead";
+import { MCP_AGENT_PROMPT } from "@/lib/mcpAgentPrompt";
 import { Item, Reveal, Stagger } from "@/lib/motion";
 import { breadcrumbJsonLd, faqJsonLd } from "@/lib/seo";
 
@@ -325,6 +326,31 @@ export function McpPage() {
     }
   }
 }`}
+          />
+        </div>
+      </Section>
+
+      {/* Agent prompt */}
+      <Section>
+        <SectionHeading
+          eyebrow="For agents"
+          title="Hand your agent the instructions"
+          intro="Some clients configure themselves from the endpoint alone. For any that need to be told what they are connecting to, copy this into the agent."
+        />
+        <div className="mt-8">
+          {/* The prompt lives in `lib/mcpAgentPrompt.ts` and
+              `docs/mcp-agent-prompt.md` deliberately points back at it rather
+              than repeating it, so the instructions a visitor copies cannot
+              drift from the ones the repository documents.
+              `CodeBlock` supplies the copy control. */}
+          <CodeBlock
+            language="text"
+            label="Agent prompt"
+            code={MCP_AGENT_PROMPT}
+            // The prompt is ~160 lines; uncapped it is a ~4000px column that
+            // buries the rest of the page. Capped and scrollable, with the copy
+            // control pinned in the header above it.
+            maxHeightClass="max-h-[28rem]"
           />
         </div>
       </Section>

@@ -313,6 +313,7 @@ def get_telemetry_ingestion() -> TelemetryIngestion:
     global _INGESTION
     if _INGESTION is None:
         from src.infrastructure.config.settings import get_settings
+        from src.infrastructure.database.session import get_session_factory
 
         settings = get_settings()
         _INGESTION = TelemetryIngestion(
@@ -320,6 +321,23 @@ def get_telemetry_ingestion() -> TelemetryIngestion:
             max_queue=settings.TELEMETRY_INGEST_MAX_QUEUE,
             flush_interval_seconds=settings.TELEMETRY_INGEST_FLUSH_SECONDS,
             enabled=settings.TELEMETRY_ENABLED,
+            # The process's real session factory, created lazily here rather
+            # than imported at module scope (see the class docstring). Without
+            # this the writer took its "no storage wired" branch and counted
+            # every batch as written WITHOUT persisting it — so the API Logs and
+            # MCP Activity pages were always empty, and the Prometheus
+            # ``written`` counter reported success. The failure was invisible
+            # because that branch deliberately counts as written for unit tests.
+            #
+            # Called twice on purpose: this field's contract is "a zero-argument
+            # callable returning an async context manager", and
+            # ``get_session_factory`` returns a *sessionmaker* — the maker is
+            # what you construct a session from, so it has to be invoked.
+            # Passing the accessor itself raises
+            # "async_sessionmaker object does not support the asynchronous
+            # context manager protocol" on the first flush. This is the same
+            # double call ``session.py`` uses.
+            session_factory=lambda: get_session_factory()(),
         )
     return _INGESTION
 

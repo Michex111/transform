@@ -23,11 +23,23 @@ export function CodeBlock({
   code,
   language = "text",
   label,
+  maxHeightClass,
 }: {
   code: string;
   language?: string;
   /** A short caption shown in the header (e.g. "Python", "cURL"). */
   label?: string;
+  /**
+   * A max-height utility (e.g. `"max-h-[28rem]"`) that turns the body into its
+   * own scroll container.
+   *
+   * Opt-in, because the two cases genuinely differ: a 20-line config snippet
+   * should show in full, while a 160-line instruction document dropped into a
+   * page becomes a ~4000px column that pushes everything else out of reach.
+   * The header stays outside the scroll area, so the capture control never
+   * scrolls away from the content it copies.
+   */
+  maxHeightClass?: string;
 }) {
   const [copied, setCopied] = useState(false);
   const tokens = tokenizeCode(code, language);
@@ -55,7 +67,14 @@ export function CodeBlock({
           {copied ? "Copied" : "Copy"}
         </button>
       </figcaption>
-      <pre className="overflow-x-auto p-4 text-left">
+      <pre
+        className={`overflow-x-auto p-4 text-left ${
+          // `overflow-y-auto` only alongside a cap: without one there is nothing
+          // to scroll, and an always-scrollable box would show a scrollbar on
+          // short snippets for no reason.
+          maxHeightClass ? `${maxHeightClass} overflow-y-auto` : ""
+        }`}
+      >
         <code className="font-mono text-[13px] leading-relaxed">
           {tokens.map((token, index) => (
             <span key={index} className={TOKEN_CLASS[token.type]}>

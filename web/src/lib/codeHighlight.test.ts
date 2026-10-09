@@ -101,3 +101,31 @@ describe("normaliseLanguage", () => {
     expect(normaliseLanguage("Rust")).toBe("rust");
   });
 });
+
+describe("plain text", () => {
+  // Prose rendered through CodeBlock (the MCP agent prompt) must not be
+  // recoloured as source: an unknown language used to fall back to the
+  // TypeScript keyword list, and `//` inside a URL was treated as a comment.
+  it("does not colour ordinary words as keywords", () => {
+    const tokens = tokenizeCode("type return const interface", "text");
+    expect(tokens.every((t) => t.type === "plain")).toBe(true);
+  });
+
+  it("does not treat // inside a URL as a comment", () => {
+    const line = "endpoint: https://transform-api-7b3g.onrender.com/mcp";
+    const tokens = tokenizeCode(line, "text");
+    expect(tokens.some((t) => t.type === "comment")).toBe(false);
+    expect(tokens.map((t) => t.text).join("")).toBe(line);
+  });
+
+  it("still treats a real // as a comment in a language that has one", () => {
+    // Guards against 'fix plain text' accidentally disabling comments entirely.
+    const tokens = tokenizeCode("const x = 1; // note", "typescript");
+    expect(tokens.some((t) => t.type === "comment")).toBe(true);
+  });
+
+  it("never alters the text, whatever the language", () => {
+    const code = "https://a.example/x?y=1&z=2 // trailing";
+    expect(tokenizeCode(code, "text").map((t) => t.text).join("")).toBe(code);
+  });
+});

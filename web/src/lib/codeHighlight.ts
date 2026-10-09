@@ -37,6 +37,12 @@ const KEYWORDS: Record<string, string[]> = {
   json: [],
   bash: [],
   shell: [],
+  // Plain text: no keywords and (below) no comment marker. Without an entry
+  // here an unknown language falls back to the TypeScript keyword list, which
+  // recolours ordinary prose, and the `//` inside any URL would be treated as a
+  // line comment — so a block of instructions rendered as source code.
+  text: [],
+  plain: [],
 };
 
 /** Normalise the many spellings of a language into a key in `KEYWORDS`. */
@@ -52,7 +58,9 @@ export function normaliseLanguage(language: string): string {
 function lineCommentMarker(language: string): string | null {
   const lang = normaliseLanguage(language);
   if (lang === "python" || lang === "bash") return "#";
-  if (lang === "json") return null;
+  // Prose carries `//` inside URLs (`https://…`), so treating it as a comment
+  // marker would grey out the rest of every link-bearing line.
+  if (lang === "json" || lang === "text" || lang === "plain") return null;
   return "//";
 }
 
