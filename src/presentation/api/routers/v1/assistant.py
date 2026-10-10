@@ -37,6 +37,13 @@ from src.application.exceptions.file_system_exceptions import FileSystemError
 from src.application.ports.assistant_model_port import AssistantModelResolver
 from src.application.ports.assistant_repository_port import AssistantQuotaPort
 from src.application.ports.llm_port import LlmUnavailableError
+from src.infrastructure.adapters.ai import LlmRequestError
+from src.presentation.api.error_responses import (
+    AI_BUSY_CODE,
+    AI_BUSY_MESSAGE,
+    AI_PROVIDER_ERROR_CODE,
+    AI_PROVIDER_ERROR_MESSAGE,
+)
 from src.application.services.assistant_service import (
     AssistantConversationNotFound,
     AssistantService,
@@ -376,15 +383,28 @@ async def chat(
             detail={"code": "QUOTA_EXCEEDED", "message": str(exc)},
         ) from exc
     except LlmUnavailableError as exc:
-        # Same transient condition as the in-stream case, caught here because a
-        # failure before the first event can still be answered with a status.
-        # 503, not 500: the request was fine and retrying is the right response.
+        # Same transient condition as the in-stream case, caught locally so the
+        # broad `except Exception` below cannot claim it first and mislabel a
+        # throttled provider as an internal error. The payload itself comes from
+        # the shared module, so this and the application-wide handler registered
+        # in `main.py` cannot drift apart.
         logger.warning("Assistant provider temporarily unavailable: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"code": AI_BUSY_CODE, "message": AI_BUSY_MESSAGE},
+        ) from exc
+    except LlmRequestError as exc:
+        # The provider refused the request outright, so a retry cannot help. Named
+        # explicitly for the same reason as the clause above: without it the broad
+        # `except Exception` below would report a configuration fault (a retired
+        # model, a rejected key) as an internal error and invite a retry that is
+        # guaranteed to fail.
+        logger.error("Assistant provider rejected the request: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
             detail={
-                "code": "AI_BUSY",
-                "message": "The assistant is busy right now. Please try again in a moment.",
+                "code": AI_PROVIDER_ERROR_CODE,
+                "message": AI_PROVIDER_ERROR_MESSAGE,
             },
         ) from exc
     except Exception as exc:
@@ -393,7 +413,6 @@ async def chat(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={"code": "INTERNAL_ERROR", "message": "The assistant is unavailable."},
         ) from exc
-
     return StreamingResponse(
         _stream_frames(first, generator, request, current_user.id),
         media_type="text/event-stream",

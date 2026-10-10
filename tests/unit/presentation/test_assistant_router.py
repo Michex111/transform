@@ -11,6 +11,7 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 
 import src.presentation.api.main as api_main
@@ -21,8 +22,13 @@ from src.application.dtos.assistant_dto import (
     AssistantTextDelta,
     AssistantToolEvent,
     DeletionOutcome,
+    RecommendationItem,
+    RecommendationResult,
+    SummaryResult,
 )
 from src.application.ports.llm_port import LlmUnavailableError
+from src.infrastructure.adapters.ai import LlmRequestError
+from src.infrastructure.config.settings import get_settings
 from src.application.services.assistant_service import AssistantConversationNotFound
 from src.domain.assistant.exceptions.assistant_exceptions import (
     AssistantAttachmentLimitExceeded,
@@ -217,9 +223,13 @@ class StubAssistantService:
         error: Exception | None = None,
         *,
         deletion_error: Exception | None = None,
+        read_error: Exception | None = None,
     ) -> None:
         self.error = error
         self.deletion_error = deletion_error
+        #: Raised from ``summarize_file``/``recommend`` — the provider failures
+        #: those endpoints have no model-facing fallback for.
+        self.read_error = read_error
         self.resolved: list[tuple[str, str, bool]] = []
 
     async def stream_chat(
@@ -254,10 +264,18 @@ class StubAssistantService:
             state="deleted" if approve else "cancelled",
         )
 
-    async def summarize_file(self, *, user_id: int, file_id: str):
+    async def summarize_file(self, *, user_id: int, tier: SubscriptionTier, file_id: str):
+        del user_id, tier, file_id
+        if self.read_error is not None:
+            raise self.read_error
         raise AssertionError("not used in this test")
 
-    async def recommend(self, *, user_id: int, file_id, source_format, use_case):
+    async def recommend(
+        self, *, user_id: int, tier: SubscriptionTier, file_id, source_format, use_case
+    ):
+        del user_id, tier, file_id, source_format, use_case
+        if self.read_error is not None:
+            raise self.read_error
         raise AssertionError("not used in this test")
 
 
@@ -517,3 +535,149 @@ def test_resolve_deletion_requires_a_file_id() -> None:
             "/api/v1/assistant/conversations/conv-1/deletions", json={"approve": True}
         )
     assert response.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Provider failures on /summarize and /recommend
+# ---------------------------------------------------------------------------
+#
+# WHY these exist: `/chat` mapped a provider failure to a user-facing status
+# while `/summarize` and `/recommend` did not, and nothing compared the three —
+# so the same upstream condition produced "the assistant is busy" on one and a
+# bare 500 on the others until production reported it. The pair is pinned
+# together now.
+
+
+def test_summarize_reports_a_throttled_provider_as_busy_not_broken() -> None:
+    stub = StubAssistantService(read_error=LlmUnavailableError("429 rate limit"))
+    with _client(SubscriptionTier.PRO, stub) as client:
+        response = client.post("/api/v1/assistant/summarize", json={"file_id": "f1"})
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "AI_BUSY"
+
+
+def test_summarize_reports_a_rejected_provider_request_as_a_gateway_error() -> None:
+    """A permanent refusal must NOT invite a retry that cannot work."""
+    stub = StubAssistantService(read_error=LlmRequestError("400 model not found"))
+    with _client(SubscriptionTier.PRO, stub) as client:
+        response = client.post("/api/v1/assistant/summarize", json={"file_id": "f1"})
+    assert response.status_code == 502
+    assert response.json()["detail"]["code"] == "AI_PROVIDER_ERROR"
+
+
+def test_recommend_reports_a_throttled_provider_as_busy_not_broken() -> None:
+    stub = StubAssistantService(read_error=LlmUnavailableError("503 upstream"))
+    with _client(SubscriptionTier.PRO, stub) as client:
+        response = client.post("/api/v1/assistant/recommend", json={"file_id": "f1"})
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "AI_BUSY"
+
+
+def test_recommend_reports_a_rejected_provider_request_as_a_gateway_error() -> None:
+    stub = StubAssistantService(read_error=LlmRequestError("401 bad key"))
+    with _client(SubscriptionTier.PRO, stub) as client:
+        response = client.post("/api/v1/assistant/recommend", json={"file_id": "f1"})
+    assert response.status_code == 502
+    assert response.json()["detail"]["code"] == "AI_PROVIDER_ERROR"
+
+
+def test_chat_reports_a_rejected_provider_request_as_a_gateway_error() -> None:
+    """``/chat``'s broad ``except Exception`` used to label this an internal error.
+
+    It was never wrong enough to notice (the user still got a 5xx and a
+    sentence), but "something went wrong on our side" sends an operator looking
+    for a bug that is really a rejected model name or key.
+    """
+    stub = StubAssistantService(error=LlmRequestError("400 model not found"))
+    with _client(SubscriptionTier.PRO, stub) as client:
+        response = client.post("/api/v1/assistant/chat", json={"message": "hi"})
+    assert response.status_code == 502
+    assert response.json()["detail"]["code"] == "AI_PROVIDER_ERROR"
+
+
+def test_a_provider_failure_keeps_its_cors_header() -> None:
+    """A handled failure must stay readable by the browser.
+
+    This is the half of the production report that made it hard to diagnose: the
+    page said "failed to fetch", not "the assistant is busy". An *unhandled* 500
+    is produced outside ``CORSMiddleware``, so the browser discards the response
+    and the real error is never shown. A handled failure travels the normal path
+    and keeps the header.
+    """
+    origins = get_settings().ALLOWED_ORIGINS
+    if not origins:
+        pytest.skip("no CORS origins configured in this environment")
+    origin = origins[0]
+    stub = StubAssistantService(read_error=LlmUnavailableError("429 rate limit"))
+    with _client(SubscriptionTier.PRO, stub) as client:
+        response = client.post(
+            "/api/v1/assistant/summarize",
+            json={"file_id": "f1"},
+            headers={"Origin": origin},
+        )
+    assert response.status_code == 503
+    assert response.headers.get("access-control-allow-origin") == origin
+
+
+# ---------------------------------------------------------------------------
+# The success paths
+# ---------------------------------------------------------------------------
+#
+# WHY these exist: nothing exercised a *successful* summarize/recommend through
+# the router, so when both endpoints were found to be mapping every provider
+# failure to a 500 there was no passing counterpart to prove the normal path was
+# unaffected. The stub raises `AssertionError` by default, which is why the gap
+# survived — these two make the difference visible.
+
+
+class SummarizingAssistant(StubAssistantService):
+    """A stub that succeeds, for the happy paths."""
+
+    async def summarize_file(self, *, user_id: int, tier: SubscriptionTier, file_id: str):
+        del user_id, tier
+        return SummaryResult(
+            file_id=file_id,
+            file_name="report.pdf",
+            summary="A short summary.",
+            key_points=["First point", "Second point"],
+            model="test-model",
+        )
+
+    async def recommend(
+        self, *, user_id: int, tier: SubscriptionTier, file_id, source_format, use_case
+    ):
+        del user_id, tier, file_id, source_format, use_case
+        return RecommendationResult(
+            source_format="pdf",
+            use_case=None,
+            recommendations=[
+                RecommendationItem(
+                    target_format="docx",
+                    label="Word document",
+                    category="document",
+                    reason="Editable text.",
+                    confidence=0.9,
+                )
+            ],
+        )
+
+
+def test_summarize_returns_the_summary_when_the_provider_works() -> None:
+    with _client(SubscriptionTier.PRO, SummarizingAssistant()) as client:
+        response = client.post("/api/v1/assistant/summarize", json={"file_id": "f1"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["summary"] == "A short summary."
+    assert body["key_points"] == ["First point", "Second point"]
+    assert body["model"] == "test-model"
+
+
+def test_recommend_returns_the_suggestions_when_the_provider_works() -> None:
+    with _client(SubscriptionTier.PRO, SummarizingAssistant()) as client:
+        response = client.post("/api/v1/assistant/recommend", json={"file_id": "f1"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["source_format"] == "pdf"
+    assert body["recommendations"][0]["target_format"] == "docx"

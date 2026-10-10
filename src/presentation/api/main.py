@@ -23,6 +23,13 @@ from src.infrastructure.config.settings import get_settings
 from src.infrastructure.database.initializer import initialize_database
 from src.infrastructure.database.session import get_engine
 from src.infrastructure.adapters.storage.cors import apply_bucket_cors
+from src.application.ports.llm_port import LlmUnavailableError
+from src.infrastructure.adapters.ai import LlmRequestError
+from src.presentation.api.error_responses import (
+    assistant_busy_response,
+    assistant_provider_error_response,
+    internal_error_response,
+)
 from src.infrastructure.telemetry.ingestion import get_telemetry_ingestion
 from src.presentation.api.middleware.api_telemetry import api_telemetry_middleware
 from src.presentation.api.middleware.rate_limit import build_rate_limit_middleware
@@ -229,6 +236,69 @@ async def handle_request_validation_error(
         status_code=422,
         content={"detail": validation_error_detail(exc)},
     )
+
+
+# --- Assistant provider failures -------------------------------------------
+#
+# Registered on the APPLICATION rather than repeated in each assistant endpoint.
+# They used to be handled only inside `/chat`, which is why the identical
+# provider failure produced a clean "busy, try again" there and a bare 500 from
+# `/summarize` and `/recommend`.
+#
+# These two are handled by Starlette's `ExceptionMiddleware`, which sits INSIDE
+# `CORSMiddleware`, so the response keeps its CORS headers and the SPA can show
+# the message. (Compare `handle_unhandled_exception` below, which cannot be.)
+
+
+@app.exception_handler(LlmUnavailableError)
+async def handle_assistant_busy(
+    _request: Request, exc: LlmUnavailableError
+) -> JSONResponse:
+    """The provider is throttling us or briefly failing. Retrying will help.
+
+    Logged as a warning, not an error: nothing is broken, and the provider's raw
+    body (which names the upstream org and an upsell URL) must not reach the
+    user either way.
+    """
+    logger.warning("Assistant provider temporarily unavailable: %s", exc)
+    return assistant_busy_response()
+
+
+@app.exception_handler(LlmRequestError)
+async def handle_assistant_provider_error(
+    _request: Request, exc: LlmRequestError
+) -> JSONResponse:
+    """The provider refused the request outright, so a retry will fail the same way.
+
+    This is the ADAPTER's hard-failure type — raised for a non-retryable status
+    such as a retired model name or a rejected key. It is a configuration fault,
+    which is why the answer is 502 (a bad upstream) rather than 503: telling the
+    user to try again would be advice that cannot work.
+
+    Logged as an error WITH the provider body, because an operator has to see
+    which model or key was rejected. The body is deliberately not returned to
+    the caller.
+    """
+    logger.error("Assistant provider rejected the request: %s", exc)
+    return assistant_provider_error_response()
+
+
+@app.exception_handler(Exception)
+async def handle_unhandled_exception(request: Request, exc: Exception) -> JSONResponse:
+    """Last resort for a bug: a JSON 500 that the browser can actually read.
+
+    Starlette runs this handler in `ServerErrorMiddleware`, which is OUTSIDE
+    `CORSMiddleware` — so unlike the two handlers above, nothing downstream can
+    add the CORS headers, and without them the browser discards the response and
+    reports a network failure. That is what turned a reported 500 in the request
+    log into "failed to fetch" on the Files page. `internal_error_response` adds
+    the headers itself; see its docstring.
+
+    The traceback is logged here because supplying a handler replaces Starlette's
+    own logging for this path.
+    """
+    logger.exception("Unhandled error handling %s %s", request.method, request.url.path)
+    return internal_error_response(request, get_settings().ALLOWED_ORIGINS)
 
 
 def _metric_path(request: Request) -> str:
