@@ -264,7 +264,14 @@ class StubAssistantService:
             state="deleted" if approve else "cancelled",
         )
 
-    async def summarize_file(self, *, user_id: int, tier: SubscriptionTier, file_id: str):
+    async def summarize_file(
+        self, *, user_id: int, tier: SubscriptionTier, file_id: str
+    ) -> SummaryResult:
+        # Annotated rather than left to inference: the body only raises, so the
+        # inferred return is `None`, and `SummarizingAssistant` below returns a
+        # real DTO. Declaring the contract here makes that a valid override
+        # instead of a type error (which is how this shipped broken once — the
+        # type check was last run before the subclass existed).
         del user_id, tier, file_id
         if self.read_error is not None:
             raise self.read_error
@@ -272,7 +279,7 @@ class StubAssistantService:
 
     async def recommend(
         self, *, user_id: int, tier: SubscriptionTier, file_id, source_format, use_case
-    ):
+    ) -> RecommendationResult:
         del user_id, tier, file_id, source_format, use_case
         if self.read_error is not None:
             raise self.read_error
@@ -633,7 +640,9 @@ def test_a_provider_failure_keeps_its_cors_header() -> None:
 class SummarizingAssistant(StubAssistantService):
     """A stub that succeeds, for the happy paths."""
 
-    async def summarize_file(self, *, user_id: int, tier: SubscriptionTier, file_id: str):
+    async def summarize_file(
+        self, *, user_id: int, tier: SubscriptionTier, file_id: str
+    ) -> SummaryResult:
         del user_id, tier
         return SummaryResult(
             file_id=file_id,
@@ -645,7 +654,7 @@ class SummarizingAssistant(StubAssistantService):
 
     async def recommend(
         self, *, user_id: int, tier: SubscriptionTier, file_id, source_format, use_case
-    ):
+    ) -> RecommendationResult:
         del user_id, tier, file_id, source_format, use_case
         return RecommendationResult(
             source_format="pdf",
