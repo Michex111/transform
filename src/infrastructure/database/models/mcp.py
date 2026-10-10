@@ -91,6 +91,28 @@ class MCPAgentGrantModel(Base):
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     #: RFC 8707 resource indicator this consent was given for (our MCP URL).
     resource: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    #: ``ALL`` or ``FOLDER``. A plain string for the same reason as ``status``
+    #: above, and read through ``coerce_folder_access`` so an unreadable value
+    #: fails closed to the restricted reading rather than to full access.
+    folder_access: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="ALL"
+    )
+    #: The folder a ``FOLDER`` grant is confined to.
+    #:
+    #: Deliberately **not** a foreign key, for two reasons. A constraint cannot
+    #: be added to an existing SQLite table by ``ALTER`` at all, so one here
+    #: would put the model and the migration out of step; and the constraint
+    #: would buy nothing, because enforcement already denies whenever the
+    #: referenced folder cannot be resolved (see ``folder_scope_is_usable``). A
+    #: hard ``ON DELETE SET NULL`` would additionally couple the grant's
+    #: lifecycle to the folder's, which is the opposite of what we want: the
+    #: user's record of what they consented to should outlive a folder they
+    #: tidied up, and the denial is what keeps that safe.
+    folder_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    #: ``AGENT`` or ``ALL`` — how much conversion history this grant may read.
+    history_scope: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="AGENT"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
     )

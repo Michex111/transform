@@ -27,6 +27,10 @@ from src.application.ports.mcp_oauth_port import (
 )
 from src.domain.security.enitities.agent_grant import AgentGrant, AgentGrantStatus
 from src.domain.security.exceptions.exceptions import InvalidGrantTransition
+from src.domain.security.value_object.agent_access_scope import (
+    coerce_folder_access,
+    coerce_history_scope,
+)
 from src.domain.security.value_object.agent_scope import normalize_scopes
 from src.infrastructure.database.models import (
     MCPAgentGrantModel,
@@ -136,6 +140,9 @@ class SQLMCPRepository:
                     scopes=scope_string,
                     status=AgentGrantStatus.ACTIVE.value,
                     resource=grant.resource,
+                    folder_access=grant.folder_access.value,
+                    folder_id=grant.folder_id,
+                    history_scope=grant.history_scope.value,
                     created_at=grant.created_at or datetime.now(UTC),
                 )
             )
@@ -144,6 +151,14 @@ class SQLMCPRepository:
             row.scopes = scope_string
             row.status = AgentGrantStatus.ACTIVE.value
             row.resource = grant.resource
+            # The folder binding and history scope are replaced, not merged,
+            # for the same reason the scopes are: a user who re-consents and
+            # moves the agent to a folder must actually confine it there, and
+            # leaving the previous binding in place would keep access the user
+            # just took away.
+            row.folder_access = grant.folder_access.value
+            row.folder_id = grant.folder_id
+            row.history_scope = grant.history_scope.value
             # A fresh consent clears the previous revocation, because the user
             # has just explicitly re-approved the application. It clears a
             # pause for the same reason: re-consenting is a stronger act than
@@ -397,6 +412,13 @@ class SQLMCPRepository:
             scopes=normalize_scopes(row.scopes.split()),
             status=status,
             resource=row.resource,
+            # Coerced rather than read raw: a value we cannot parse must fail
+            # closed to the *restricted* reading. Casting straight to the enum
+            # would raise here, on every MCP request, for a row that only needs
+            # to be treated conservatively.
+            folder_access=coerce_folder_access(row.folder_access),
+            folder_id=row.folder_id,
+            history_scope=coerce_history_scope(row.history_scope),
             created_at=_aware(row.created_at),
             last_used_at=_aware(row.last_used_at),
             revoked_at=_aware(row.revoked_at),

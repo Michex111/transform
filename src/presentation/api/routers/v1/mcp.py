@@ -32,8 +32,14 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 
+from src.application.exceptions.file_system_exceptions import (
+    FileSystemError,
+    FolderNameConflictError,
+)
 from src.application.exceptions.mcp_exceptions import MCPAccessError
+from src.application.services.file_service import FileService
 from src.application.services.mcp_access_service import MCPAccessService
+from src.domain.security.value_object.agent_access_scope import FolderAccess
 from src.domain.security.value_object.agent_scope import (
     DESTRUCTIVE_SCOPES,
     SCOPE_DESCRIPTIONS,
@@ -41,7 +47,10 @@ from src.domain.security.value_object.agent_scope import (
     normalize_scopes,
 )
 from src.presentation.api.dependencies.auth_dependencies import CurrentUser
-from src.presentation.api.dependencies.service_dependencies import get_mcp_access_service
+from src.presentation.api.dependencies.service_dependencies import (
+    get_file_service,
+    get_mcp_access_service,
+)
 from src.presentation.mcp.server import (
     build_authorization_server_metadata,
     build_protected_resource_metadata,
@@ -51,7 +60,10 @@ from src.presentation.schemas.mcp import (
     ConnectedAppResponse,
     ConsentApprovalRequest,
     ConsentApprovalResponse,
+    ConsentFolderOption,
     ConsentRequestResponse,
+    FolderAccessEntry,
+    FolderAccessResponse,
     ScopeDescription,
 )
 
@@ -63,6 +75,29 @@ well_known_router = APIRouter(tags=["mcp"], include_in_schema=False)
 router = APIRouter(prefix="/api/v1/mcp", tags=["mcp"])
 
 MCPService = Annotated[MCPAccessService, Depends(get_mcp_access_service)]
+FileServiceDep = Annotated[FileService, Depends(get_file_service)]
+
+#: Upper bound on the folders the consent screen offers.
+#:
+#: The consent screen is a picker, not a file browser, and a large Drive can
+#: hold thousands of folders. Listing them all would make the response (and the
+#: query behind it) unbounded for the largest accounts, so the router caps the
+#: list at this many root folders — enough that a typical user sees everything,
+#: and the screen can still add a search or an explicit "new folder" affordance
+#: for the rest without the endpoint ever growing with the account.
+_MAX_CONSENT_FOLDERS = 100
+
+#: How many root folders the new-folder duplicate-name check scans. The picker
+#: only shows ``_MAX_CONSENT_FOLDERS``, so a folder beyond this window is not
+#: offered to the user in the first place; scanning further would make consent
+#: unbounded.
+#:
+#: The check exists because the sibling-uniqueness constraint cannot be relied on
+#: on its own here: it is keyed on ``(user_id, parent_id, name)``, and both
+#: SQLite and PostgreSQL treat a NULL ``parent_id`` as distinct — so the database
+#: would happily allow two root folders with the same name. A consent flow that
+#: always creates at the root therefore needs its own look.
+_MAX_FOLDER_NAME_SCAN = 500
 
 
 # ---------------------------------------------------------------------------
@@ -123,10 +158,88 @@ def _scope_descriptions(
     ]
 
 
+async def _resolve_consent_folder(
+    file_service: FileService,
+    user_id: int,
+    *,
+    folder_access: FolderAccess,
+    folder_id: str | None,
+    new_folder_name: str | None,
+) -> str | None:
+    """Resolve the folder a consent should bind, performing the folder I/O.
+
+    Lives in the router (not the access service) because it needs ``FileService``
+    and the access service is deliberately kept free of file/folder logic. The
+    returned id is the only thing the service persists; every path here has
+    already proven the folder is the caller's.
+
+    Returns ``None`` for whole-Drive consent. Raises ``HTTPException`` with an
+    actionable detail for anything a user can fix.
+    """
+    if folder_access is FolderAccess.ALL:
+        # Whole-Drive consent carries no folder binding. A folder id supplied
+        # alongside it is discarded so a tampered page cannot bind a folder
+        # while claiming full access (constraining an agent is the user's
+        # choice, never the page's).
+        return None
+
+    if new_folder_name is not None:
+        name = new_folder_name.strip()
+        if not name:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Enter a name for the new folder.",
+            )
+        existing, _total = await file_service.list_root_folders(
+            user_id, offset=0, limit=_MAX_FOLDER_NAME_SCAN,
+        )
+        if any(folder.name == name for folder in existing):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"A folder named '{name}' already exists. "
+                    "Choose a different name, or pick that folder instead."
+                ),
+            )
+        try:
+            folder = await file_service.create_folder(user_id, name)
+        except FolderNameConflictError as exc:
+            # The files router surfaces this as 409; on the consent screen a
+            # duplicate is a field-level mistake the user can immediately
+            # correct, so it is a 400 with a sentence that says what to do.
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"A folder named '{name}' already exists. "
+                    "Choose a different name, or pick that folder instead."
+                ),
+            ) from exc
+        except FileSystemError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=exc.http_detail()) from exc
+        return folder.id
+
+    if folder_id:
+        try:
+            folder = await file_service.get_folder(user_id, folder_id)
+        except FileSystemError as exc:
+            # get_folder raises FolderNotFoundError (404) for a folder that is
+            # missing *or* owned by somebody else, so a foreign id is
+            # indistinguishable from a nonexistent one — no ownership oracle.
+            # Surface it as the error's own status (404), never a 500.
+            raise HTTPException(status_code=exc.status_code, detail=exc.http_detail()) from exc
+        return folder.id
+
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail="Choose a folder, or allow access to your whole Drive.",
+    )
+
+
 @router.get("/authorize", response_model=ConsentRequestResponse)
 async def describe_consent_request(
     current_user: CurrentUser,
     access: MCPService,
+    file_service: FileServiceDep,
     client_id: str,
     redirect_uri: str,
     scope: str = "",
@@ -136,7 +249,9 @@ async def describe_consent_request(
 
     Every value is re-validated against the client's registration, so the page
     can only ever render a request that would in fact be approvable — the screen
-    cannot show a scope that the approve call would then reject.
+    cannot show a scope that the approve call would then reject. Alongside the
+    scopes it reports the user's current binding (folder and history scope) and
+    the folders they may choose, so the screen reflects the existing decision.
     """
     try:
         view = await access.describe_authorization(
@@ -152,12 +267,24 @@ async def describe_consent_request(
         # surface both to the user as "the connection could not be started".
         code = status.HTTP_404_NOT_FOUND if "not registered" in exc.description else 400
         raise HTTPException(status_code=code, detail=exc.description) from exc
+
+    folder_rows, _total = await file_service.list_root_folders(
+        int(current_user.id), offset=0, limit=_MAX_CONSENT_FOLDERS,
+    )
     return ConsentRequestResponse(
         client_id=view.client_id,
         client_name=view.client_name,
         redirect_uri=view.redirect_uri,
         resource=view.resource,
         scopes=_scope_descriptions(view.requested_scopes, view.already_granted),
+        folders=[
+            ConsentFolderOption(folder_id=folder.id, name=folder.name)
+            for folder in folder_rows
+        ],
+        folder_access=view.folder_access,
+        folder_id=view.folder_id,
+        history_scope=view.history_scope,
+        can_choose_history_scope=True,
     )
 
 
@@ -165,6 +292,7 @@ async def describe_consent_request(
 async def approve_consent_request(
     current_user: CurrentUser,
     access: MCPService,
+    file_service: FileServiceDep,
     body: ConsentApprovalRequest,
 ) -> ConsentApprovalResponse:
     """Record the user's approval and return the client's redirect URL.
@@ -172,11 +300,13 @@ async def approve_consent_request(
     The approved set is intersected with the scopes re-derived from the original
     request, so the page cannot widen a consent beyond what it displayed; and
     the request itself (client, redirect URI, resource, PKCE challenge) is
-    re-validated before any code is minted.
+    re-validated before any code is minted. The folder binding is resolved
+    against the user's own folders here, before the grant is persisted.
     """
+    user_id = int(current_user.id)
     try:
         view = await access.describe_authorization(
-            user_id=int(current_user.id),
+            user_id=user_id,
             client_id=body.client_id,
             redirect_uri=body.redirect_uri,
             requested_scopes=body.scope.split() if body.scope else (),
@@ -195,19 +325,63 @@ async def approve_consent_request(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Select at least one permission to allow.",
             )
+    except MCPAccessError as exc:
+        code = status.HTTP_404_NOT_FOUND if "not registered" in exc.description else 400
+        raise HTTPException(status_code=code, detail=exc.description) from exc
+
+    resolved_folder_id = await _resolve_consent_folder(
+        file_service,
+        user_id,
+        folder_access=body.folder_access,
+        folder_id=body.folder_id,
+        new_folder_name=body.new_folder_name,
+    )
+
+    try:
         redirect_url = await access.approve(
-            user_id=int(current_user.id),
+            user_id=user_id,
             client_id=body.client_id,
             redirect_uri=body.redirect_uri,
             requested_scopes=[scope.value for scope in approved],
             code_challenge=body.code_challenge,
             resource=body.resource,
             state=body.state,
+            folder_access=body.folder_access,
+            folder_id=resolved_folder_id,
+            history_scope=body.history_scope,
         )
     except MCPAccessError as exc:
         code = status.HTTP_404_NOT_FOUND if "not registered" in exc.description else 400
         raise HTTPException(status_code=code, detail=exc.description) from exc
     return ConsentApprovalResponse(redirect_url=redirect_url)
+
+
+@router.get("/folder-access", response_model=FolderAccessResponse)
+async def list_active_folder_access(
+    current_user: CurrentUser, access: MCPService
+) -> FolderAccessResponse:
+    """Folders currently bound by one of the authenticated user's active agents.
+
+    The Files page uses this to mark the folders an authorized AI agent is
+    allowed to work in. Every grant is read for the *authenticated user only*
+    (``list_grants`` filters by ``user_id``), then narrowed to active grants
+    whose consent is folder-confined with a usable folder id — the same
+    condition the toolbox enforces, so the badge can never advertise a binding
+    that grants nothing.
+    """
+    grants = await access.list_connections(int(current_user.id))
+    folders: list[FolderAccessEntry] = []
+    for grant in grants:
+        folder_id = grant.folder_id
+        if folder_id and grant.is_active() and grant.folder_access is FolderAccess.FOLDER:
+            folders.append(
+                FolderAccessEntry(
+                    folder_id=folder_id,
+                    client_name=grant.client_name,
+                    grant_id=grant.id,
+                )
+            )
+    return FolderAccessResponse(folders=folders)
 
 
 # ---------------------------------------------------------------------------

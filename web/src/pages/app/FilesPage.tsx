@@ -31,6 +31,7 @@ import {
   SquaresFour,
   CheckSquare,
   Sparkle,
+  Robot,
 } from "@phosphor-icons/react";
 import { useAuth } from "@/auth/AuthContext";
 import { useToast } from "@/auth/ToastContext";
@@ -46,6 +47,8 @@ import { FilePreviewModal } from "@/components/FilePreviewModal";
 import { SummarizeModal } from "@/components/assistant/SummarizeModal";
 import { useUploads } from "@/uploads/uploadsContext";
 import { buildFolderPath } from "@/lib/folderPath";
+import { agentFolderLabel } from "@/lib/mcpFolderAccess";
+import { useAgentFolderAccess } from "@/lib/useMcpFolderAccess";
 import type { FolderResponse, FileMetadataResponse } from "@/api/types";
 
 // Custom MIME type used to identify a draggable file in the page's HTML5 DnD.
@@ -81,6 +84,10 @@ function getMovePayload(e: DragEvent<HTMLElement>): {
 export function FilesPage() {
   const { api: client } = useAuth();
   const { success, error } = useToast();
+  // Folders an active AI agent may reach, for the quiet per-folder indicator.
+  // Fails soft to an empty map, so a deployment without the endpoint renders
+  // this page exactly as it did before the feature existed.
+  const agentFolders = useAgentFolderAccess();
 
   // Path = array of folder breadcrumbs; empty array = root.
   const [path, setPath] = useState<FolderResponse[]>([]);
@@ -865,6 +872,7 @@ export function FilesPage() {
                   <Item key={folder.id} className="w-full">
                     <FolderCard
                       folder={folder}
+                      agentName={agentFolders.get(folder.id)}
                       selectionMode={selectionMode}
                       selected={selectedFolderIds.has(folder.id)}
                       onToggleSelect={() => toggleFolder(folder.id, false)}
@@ -1100,8 +1108,32 @@ function BreadcrumbDrop({
   );
 }
 
+/**
+ * A quiet "an AI agent is using this folder" marker on a folder row.
+ *
+ * Deliberately understated: a small, static robot glyph with a full-sentence
+ * accessible name (a screen reader user meeting a lone icon in a row has no
+ * other way to know what it means) and a native tooltip for pointer users. It
+ * is not a banner, not a toast, has no animation, and does not rely on colour
+ * alone — the icon and label carry the meaning.
+ */
+function AgentFolderBadge({ clientName }: { clientName: string }) {
+  const label = agentFolderLabel(clientName);
+  return (
+    <span
+      role="img"
+      aria-label={label}
+      title={label}
+      className="inline-flex shrink-0 items-center justify-center rounded-full bg-surface-variant p-1 text-primary/70"
+    >
+      <Robot size={13} weight="duotone" aria-hidden="true" />
+    </span>
+  );
+}
+
 function FolderCard({
   folder,
+  agentName,
   selectionMode,
   selected,
   onToggleSelect,
@@ -1116,6 +1148,8 @@ function FolderCard({
   onDropFolder,
 }: {
   folder: FolderResponse;
+  /** Display name of an AI agent that may reach this folder, if any. */
+  agentName?: string;
   selectionMode: boolean;
   selected: boolean;
   onToggleSelect: () => void;
@@ -1260,6 +1294,7 @@ function FolderCard({
             >
               {folder.name}
             </button>
+            {agentName && <AgentFolderBadge clientName={agentName} />}
             {!selectable && (
               <CardMenu
                 onRename={() => { setDraft(folder.name); setEditing(true); }}

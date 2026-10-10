@@ -60,6 +60,7 @@ import {
   normalizePortal,
   normalizeConnectedAppList,
   normalizeMcpConsent,
+  normalizeMcpFolderAccess,
   normalizePresignedUrls,
   normalizeResendVerification,
   normalizeResetPassword,
@@ -1597,5 +1598,59 @@ describe("normalizeMcpConsent", () => {
     // never make a permission approvable.
     expect(consent.scopes[1].requested).toBe(false);
     expect(consent.scopes[1].already_granted).toBe(false);
+  });
+
+  it("keeps a confined binding and the folder list", () => {
+    const consent = normalizeMcpConsent({
+      folder_access: "FOLDER",
+      folder_id: "f1",
+      folders: [{ folder_id: "f1", name: "Reports" }],
+      history_scope: "ALL",
+      can_choose_history_scope: true,
+    });
+
+    expect(consent.folder_access).toBe("FOLDER");
+    expect(consent.folder_id).toBe("f1");
+    expect(consent.folders).toEqual([{ folder_id: "f1", name: "Reports" }]);
+    expect(consent.history_scope).toBe("ALL");
+    expect(consent.can_choose_history_scope).toBe(true);
+  });
+
+  it("reads an absent folder field as whole-Drive rather than trapping the user", () => {
+    // An API older than folder scoping sends neither field. Reading it as
+    // FOLDER would render a picker whose folder_id that API never sent.
+    const consent = normalizeMcpConsent({});
+    expect(consent.folder_access).toBe("ALL");
+    expect(consent.folder_id).toBeNull();
+    expect(consent.folders).toEqual([]);
+  });
+
+  it("fails a present-but-unrecognised folder value closed to FOLDER", () => {
+    // A value the API did send but we do not understand is a real risk of
+    // widening access, so it reads as the least-privilege option.
+    expect(normalizeMcpConsent({ folder_access: "SOMETHING_NEW" }).folder_access).toBe("FOLDER");
+  });
+
+  it("defaults the history scope to AGENT and the choice to unavailable", () => {
+    const consent = normalizeMcpConsent({});
+    expect(consent.history_scope).toBe("AGENT");
+    expect(consent.can_choose_history_scope).toBe(false);
+  });
+});
+
+describe("normalizeMcpFolderAccess", () => {
+  it("keeps well-formed entries", () => {
+    const res = normalizeMcpFolderAccess({
+      folders: [{ folder_id: "f1", client_name: "Claude Desktop", grant_id: "g1" }],
+    });
+    expect(res.folders).toEqual([
+      { folder_id: "f1", client_name: "Claude Desktop", grant_id: "g1" },
+    ]);
+  });
+
+  it("degrades a missing body to no folders instead of throwing", () => {
+    // This backs a quiet decoration on the Files page; it must never take the
+    // page down.
+    expect(normalizeMcpFolderAccess(undefined).folders).toEqual([]);
   });
 });

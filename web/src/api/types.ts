@@ -1325,17 +1325,76 @@ export interface McpScopeDescription {
   destructive: boolean
 }
 
+/** Where an agent's consent lets it work inside the Drive. */
+export type McpFolderAccess = "ALL" | "FOLDER"
+
+/** How much conversion history an agent may read. */
+export type McpHistoryScope = "AGENT" | "ALL"
+
+/** One folder offered as a confinement choice on the consent screen. */
+export interface McpFolderOption {
+  folder_id: string
+  name: string
+}
+
 export interface McpConsentRequestResponse {
   client_id: string
   client_name: string
   redirect_uri: string
   resource: string
   scopes: McpScopeDescription[]
+  /**
+   * The user's folders, for the "only one folder" picker.
+   *
+   * Always sent (empty when there are none) so the screen can tell "no folders
+   * yet, offer to create one" apart from "the API is too old to scope".
+   */
+  folders: McpFolderOption[]
+  /** Where the agent may work. `FOLDER` confines it to `folder_id`. */
+  folder_access: McpFolderAccess
+  /** The folder a `FOLDER` grant is currently bound to, or null. */
+  folder_id: string | null
+  /** How much history the grant currently reaches. */
+  history_scope: McpHistoryScope
+  /** Whether the user may change the history scope on this screen. */
+  can_choose_history_scope: boolean
+}
+
+/**
+ * The user's decision, including the confinement chosen on the consent screen.
+ *
+ * `folder_id` and `new_folder_name` are mutually exclusive: one names an
+ * existing folder, the other asks the server to create one. The server rejects
+ * the body if neither is usable while `folder_access` is `FOLDER`.
+ */
+export interface McpConsentApprovalRequest {
+  client_id: string
+  redirect_uri: string
+  code_challenge: string
+  scope: string
+  resource?: string | null
+  state?: string | null
+  approved_scopes: string[]
+  folder_access: McpFolderAccess
+  folder_id: string | null
+  new_folder_name: string | null
+  history_scope: McpHistoryScope
 }
 
 export interface McpConsentApprovalResponse {
   /** Absolute URL (the application's callback) the browser must be sent to. */
   redirect_url: string
+}
+
+/** One folder an active agent can reach, for the Files page indicator. */
+export interface McpFolderAccessEntry {
+  folder_id: string
+  client_name: string
+  grant_id: string
+}
+
+export interface McpFolderAccessResponse {
+  folders: McpFolderAccessEntry[]
 }
 
 // ---- Batch conversions ----

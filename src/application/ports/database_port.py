@@ -1,6 +1,7 @@
 from datetime import datetime
 from typing import Protocol, Optional
 from src.domain.conversions.entities.conversion_job import ConversionJob
+from src.domain.conversions.value_object.job_origin import JobOrigin
 from src.domain.security.enitities.api_key import APIKey
 
 class ConversionJobWriteRepositoryPort(Protocol):
@@ -26,11 +27,17 @@ class ConversionJobRepositoryPort(ConversionJobWriteRepositoryPort, Protocol):
         offset: int,
         limit: int,
         since: datetime | None = None,
+        origin: JobOrigin | None = None,
     ) -> tuple[list[ConversionJob], int]:
         """Return the user's job history (newest first) plus the total count.
 
         When ``since`` is provided, only jobs created on/after that timestamp
         are returned (used for the time-range filter on the History page).
+
+        When ``origin`` is provided, only jobs recorded with that origin are
+        returned. ``None`` (the default) means unfiltered, preserving the
+        historical behaviour for every existing caller; the MCP history tool
+        passes ``JobOrigin.MCP`` to answer "what did this agent convert?".
         """
         ...
 

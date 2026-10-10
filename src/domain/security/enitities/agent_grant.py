@@ -19,6 +19,11 @@ from datetime import datetime
 from enum import StrEnum
 
 from src.domain.security.exceptions.exceptions import InvalidGrantTransition
+from src.domain.security.value_object.agent_access_scope import (
+    FolderAccess,
+    HistoryScope,
+    is_folder_restricted,
+)
 from src.domain.security.value_object.agent_scope import AgentScope, covers
 
 
@@ -62,6 +67,19 @@ class AgentGrant:
     #: RFC 8707 resource this grant is bound to (our MCP endpoint URL). A
     #: token minted from this grant may only be presented to that resource.
     resource: str | None = None
+    #: Which part of the Drive this consent reaches. ``ALL`` is the historical
+    #: behaviour; ``FOLDER`` confines every operation to :attr:`folder_id` and
+    #: everything beneath it.
+    folder_access: FolderAccess = FolderAccess.ALL
+    #: The folder a ``FOLDER`` grant is confined to. Deliberately paired with
+    #: :attr:`folder_access` rather than used on its own: a *missing* folder on a
+    #: restricted grant has to mean "deny", and a nullable column alone cannot
+    #: distinguish that from "unrestricted".
+    folder_id: str | None = None
+    #: How much conversion history the agent may read. Defaults to the agent's
+    #: own work, so an agent is never handed the user's unrelated history by
+    #: omission.
+    history_scope: HistoryScope = HistoryScope.AGENT
     created_at: datetime | None = None
     last_used_at: datetime | None = None
     revoked_at: datetime | None = None
@@ -88,6 +106,10 @@ class AgentGrant:
         a stale in-memory instance can never be the weak link.
         """
         return self.is_active() and covers(self.scopes, scope)
+
+    def is_folder_restricted(self) -> bool:
+        """Whether every operation must be proven to sit inside a folder."""
+        return is_folder_restricted(self.folder_access, self.folder_id)
 
     def pause(self, *, now: datetime) -> None:
         """Suspend the grant without destroying it. Idempotent.

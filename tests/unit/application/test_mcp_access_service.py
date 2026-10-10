@@ -22,6 +22,7 @@ from src.application.exceptions.mcp_exceptions import (
 from src.application.ports.mcp_oauth_port import OAuthClientRecord, TokenRecord
 from src.application.services.mcp_access_service import MCPAccessService
 from src.domain.security.enitities.agent_grant import AgentGrantStatus
+from src.domain.security.value_object.agent_access_scope import FolderAccess, HistoryScope
 from src.domain.security.value_object.agent_scope import (
     DEFAULT_SCOPES,
     AgentScope,
@@ -395,5 +396,124 @@ def test_an_expired_access_token_is_refused() -> None:
         _grant_id, token = await _grant_and_token(repo)
         later = _service(repo, now=_NOW + timedelta(hours=2))
         assert await later.load_access_token(token) is None
+
+    asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
+# Folder binding and history scope
+# ---------------------------------------------------------------------------
+
+
+def test_the_consent_view_defaults_to_whole_drive_and_agent_history() -> None:
+    """No prior grant means the least-access binding, not a remembered one."""
+
+    async def _run() -> None:
+        repo = FakeMCPRepository()
+        await _register(repo)
+        view = await _service(repo).describe_authorization(
+            user_id=7,
+            client_id="client-1",
+            redirect_uri=REDIRECT,
+            requested_scopes=["documents.read"],
+            resource=RESOURCE,
+        )
+        assert view.folder_access is FolderAccess.ALL
+        assert view.folder_id is None
+        assert view.history_scope is HistoryScope.AGENT
+
+    asyncio.run(_run())
+
+
+def test_approve_persists_the_folder_binding_and_history_scope() -> None:
+    async def _run() -> None:
+        repo = FakeMCPRepository()
+        service = _service(repo)
+        await _register(repo)
+        await service.approve(
+            user_id=7,
+            client_id="client-1",
+            redirect_uri=REDIRECT,
+            requested_scopes=["documents.read"],
+            code_challenge="challenge",
+            resource=RESOURCE,
+            folder_access=FolderAccess.FOLDER,
+            folder_id="folder-a",
+            history_scope=HistoryScope.ALL,
+        )
+        grant = await repo.get_grant_for_user_client(7, "client-1")
+        assert grant is not None
+        assert grant.folder_access is FolderAccess.FOLDER
+        assert grant.folder_id == "folder-a"
+        assert grant.history_scope is HistoryScope.ALL
+
+    asyncio.run(_run())
+
+
+def test_describe_reports_the_existing_binding_rather_than_resetting_it() -> None:
+    """A re-consent screen must show what the user already chose."""
+
+    async def _run() -> None:
+        repo = FakeMCPRepository()
+        service = _service(repo)
+        await _register(repo)
+        await service.approve(
+            user_id=7,
+            client_id="client-1",
+            redirect_uri=REDIRECT,
+            requested_scopes=["documents.read"],
+            code_challenge="challenge",
+            resource=RESOURCE,
+            folder_access=FolderAccess.FOLDER,
+            folder_id="folder-a",
+            history_scope=HistoryScope.ALL,
+        )
+        view = await service.describe_authorization(
+            user_id=7,
+            client_id="client-1",
+            redirect_uri=REDIRECT,
+            requested_scopes=["documents.read"],
+            resource=RESOURCE,
+        )
+        assert view.folder_access is FolderAccess.FOLDER
+        assert view.folder_id == "folder-a"
+        assert view.history_scope is HistoryScope.ALL
+
+    asyncio.run(_run())
+
+
+def test_re_consent_replaces_the_previous_binding() -> None:
+    """Moving from folder A to B must take effect, not merge with A."""
+
+    async def _run() -> None:
+        repo = FakeMCPRepository()
+        service = _service(repo)
+        await _register(repo)
+        await service.approve(
+            user_id=7,
+            client_id="client-1",
+            redirect_uri=REDIRECT,
+            requested_scopes=["documents.read"],
+            code_challenge="challenge",
+            resource=RESOURCE,
+            folder_access=FolderAccess.FOLDER,
+            folder_id="folder-a",
+            history_scope=HistoryScope.AGENT,
+        )
+        await service.approve(
+            user_id=7,
+            client_id="client-1",
+            redirect_uri=REDIRECT,
+            requested_scopes=["documents.read"],
+            code_challenge="challenge",
+            resource=RESOURCE,
+            folder_access=FolderAccess.FOLDER,
+            folder_id="folder-b",
+            history_scope=HistoryScope.ALL,
+        )
+        grant = await repo.get_grant_for_user_client(7, "client-1")
+        assert grant is not None
+        assert grant.folder_id == "folder-b"
+        assert grant.history_scope is HistoryScope.ALL
 
     asyncio.run(_run())

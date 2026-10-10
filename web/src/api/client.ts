@@ -23,6 +23,7 @@ import {
   normalizeConnectedAppList,
   normalizeMcpConsent,
   normalizeMcpConsentApproval,
+  normalizeMcpFolderAccess,
   normalizeCancelSubscription,
   normalizeChangePlan,
   normalizeCheckout,
@@ -99,6 +100,7 @@ import type {
   ForgotPasswordRequest,
   GuestJobResponse,
   HistoryDeleteRange,
+  McpConsentApprovalRequest,
   PresignedUrlsRequest,
   RefreshTokenRequest,
   RequestPhoneVerificationRequest,
@@ -1589,19 +1591,22 @@ export class ApiClient {
    * actually asked for, so this page cannot approve a permission the user was
    * never shown.
    */
-  approveMcpConsent = (body: {
-    client_id: string
-    redirect_uri: string
-    code_challenge: string
-    scope: string
-    resource?: string | null
-    state?: string | null
-    approved_scopes: string[]
-  }) =>
+  approveMcpConsent = (body: McpConsentApprovalRequest) =>
     this.request<unknown>('/v1/mcp/authorize', {
       method: 'POST',
       body: JSON.stringify(body),
     }).then(normalizeMcpConsentApproval)
+
+  /**
+   * The folders an active agent may reach, for the Files page indicator.
+   *
+   * Fail-soft on the caller's side: a deployment without the endpoint answers
+   * 404, and the Files page must simply render without the decoration.
+   */
+  mcpFolderAccess = () =>
+    this.request<unknown>('/v1/mcp/folder-access', { cacheTtlMs: 15_000 }).then(
+      normalizeMcpFolderAccess,
+    )
 
   // ---- Transform AI (assistant) ----
 

@@ -261,6 +261,7 @@ class SQLUserFileRepository:
         sort: FileSortKey = DEFAULT_FILE_SORT,
         order: FileSortOrder = DEFAULT_FILE_SORT_ORDER,
         extensions: Sequence[str] | None = None,
+        folder_ids: Sequence[str] | None = None,
     ) -> tuple[list[UserFileModel], int]:
         """Name-substring search across ALL of a user's folders, newest first.
 
@@ -273,6 +274,13 @@ class SQLUserFileRepository:
         ``sort``/``order`` apply to the *matches* (ordered before ``offset`` and
         ``limit``), so a query can be ranked as well as filtered — "my biggest
         invoice" is one call rather than a fetch-then-sort.
+
+        ``folder_ids`` narrows the search to a set of folders (no-op when
+        ``None``). It exists for the MCP folder-scope guard: an agent confined
+        to a folder subtree must not see a matching file elsewhere in the drive,
+        and filtering *here* — before the count and the page — is what keeps the
+        result honest (a post-filter would return short pages and a total that
+        counts files the caller may not see).
 
         The match is a case-insensitive substring. ``%`` and ``_`` in ``query``
         are escaped (see :func:`escape_like`) so a literal name such as
@@ -288,6 +296,8 @@ class SQLUserFileRepository:
             ),
             extensions,
         )
+        if folder_ids is not None:
+            base = base.where(UserFileModel.folder_id.in_(list(folder_ids)))
 
         count_q = select(func.count()).select_from(base.subquery())
         total = (await self._session.execute(count_q)).scalar_one()

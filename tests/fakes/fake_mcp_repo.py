@@ -46,6 +46,13 @@ class FakeMCPRepository:
                 existing.scopes = grant.scopes
                 existing.status = AgentGrantStatus.ACTIVE
                 existing.resource = grant.resource
+                # The folder binding and history scope are replaced, not merged,
+                # mirroring the SQL adapter: a re-consent that moves the agent to
+                # another folder (or back to whole-Drive) must take effect, and
+                # leaving the old binding would keep access the user just revoked.
+                existing.folder_access = grant.folder_access
+                existing.folder_id = grant.folder_id
+                existing.history_scope = grant.history_scope
                 existing.revoked_at = None
                 existing.paused_at = None
                 return existing

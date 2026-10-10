@@ -26,7 +26,7 @@ from starlette.testclient import TestClient
 import src.presentation.api.main as api_main
 import src.presentation.mcp.dependencies as mcp_deps
 from src.infrastructure.auth.jwt_provider import hash_password
-from src.infrastructure.database.models import UserFileModel, UserModel
+from src.infrastructure.database.models import UserFileModel, UserFolderModel, UserModel
 from src.infrastructure.database.session import Base, get_db_session
 from src.presentation.api.middleware.rate_limit import RateLimitMiddleware
 
@@ -105,6 +105,15 @@ class MCPEnv:
             )
         )
         return file_id
+
+    def add_folder(self, user_id: int, folder_id: str, name: str) -> str:
+        _run(
+            _insert(
+                self.db_path,
+                UserFolderModel(id=folder_id, user_id=user_id, parent_id=None, name=name),
+            )
+        )
+        return folder_id
 
     def sign_in(self, username: str = "ada") -> str:
         response = self.client.post(
@@ -514,3 +523,382 @@ def test_an_unknown_client_is_refused_at_consent(tmp_path) -> None:
             headers={"Authorization": f"Bearer {token}"},
         )
         assert response.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Folder-confined consent and history scope
+# ---------------------------------------------------------------------------
+
+CONSENT_REDIRECT = "https://agent.example.test/callback"
+
+
+def _consent_setup(
+    env: MCPEnv, *, username: str = "ada"
+) -> tuple[dict[str, Any], str, str]:
+    """Register a client, sign in and mint a PKCE challenge for a consent post."""
+    client_info = env.register_client(CONSENT_REDIRECT)
+    _verifier, challenge = _pkce()
+    token = env.sign_in(username)
+    return client_info, challenge, token
+
+
+def _post_consent(
+    env: MCPEnv,
+    *,
+    token: str,
+    client_info: dict[str, Any],
+    challenge: str,
+    scope: str = "documents.read",
+    approved: list[str] | None = None,
+    **binding: Any,
+) -> Any:
+    payload: dict[str, Any] = {
+        "client_id": client_info["client_id"],
+        "redirect_uri": CONSENT_REDIRECT,
+        "code_challenge": challenge,
+        "scope": scope,
+        "resource": "http://localhost:8000/mcp",
+        "state": "abc",
+        "approved_scopes": ["documents.read"] if approved is None else approved,
+    }
+    payload.update(binding)
+    return env.client.post(
+        "/api/v1/mcp/authorize",
+        json=payload,
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+
+def _get_consent(
+    env: MCPEnv, *, token: str, client_info: dict[str, Any], scope: str = "documents.read"
+) -> Any:
+    return env.client.get(
+        "/api/v1/mcp/authorize",
+        params={
+            "client_id": client_info["client_id"],
+            "redirect_uri": CONSENT_REDIRECT,
+            "scope": scope,
+            "resource": "http://localhost:8000/mcp",
+        },
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+
+def test_get_authorize_lists_folders_and_the_default_binding(tmp_path) -> None:
+    with mcp_env(str(tmp_path / "mcp.db")) as env:
+        user = env.seed_user()
+        env.add_folder(user, "folder-a", "Reports")
+        env.add_folder(user, "folder-b", "Receipts")
+        client_info, _challenge, token = _consent_setup(env)
+
+        response = _get_consent(env, token=token, client_info=client_info)
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert {f["folder_id"]: f["name"] for f in body["folders"]} == {
+            "folder-a": "Reports",
+            "folder-b": "Receipts",
+        }
+        # No prior grant: whole-Drive, agent-only history, and the screen is
+        # told it may offer the history choice.
+        assert body["folder_access"] == "ALL"
+        assert body["folder_id"] is None
+        assert body["history_scope"] == "AGENT"
+        assert body["can_choose_history_scope"] is True
+
+
+def test_get_authorize_shows_the_users_own_folders_only(tmp_path) -> None:
+    with mcp_env(str(tmp_path / "mcp.db")) as env:
+        alice = env.seed_user(username="alice", email="alice@example.com")
+        env.seed_user(username="bob", email="bob@example.com")
+        env.add_folder(alice, "alice-folder", "Alice Private")
+        client_info, _challenge, token = _consent_setup(env, username="bob")
+
+        body = _get_consent(env, token=token, client_info=client_info).json()
+        assert body["folders"] == []
+
+
+def test_post_with_new_folder_name_creates_and_binds_the_folder(tmp_path) -> None:
+    with mcp_env(str(tmp_path / "mcp.db")) as env:
+        env.seed_user()
+        client_info, challenge, token = _consent_setup(env)
+
+        response = _post_consent(
+            env,
+            token=token,
+            client_info=client_info,
+            challenge=challenge,
+            folder_access="FOLDER",
+            new_folder_name="Agent Sandbox",
+            history_scope="ALL",
+        )
+        assert response.status_code == 200, response.text
+
+        # The folder was actually created for the user…
+        listing = env.client.get(
+            "/api/v1/files/folders", headers={"Authorization": f"Bearer {token}"}
+        )
+        names = [f["name"] for f in listing.json()["folders"]]
+        assert "Agent Sandbox" in names
+        new_id = next(f["id"] for f in listing.json()["folders"] if f["name"] == "Agent Sandbox")
+
+        # …and the consent now reflects it (a re-consent shows the binding).
+        body = _get_consent(env, token=token, client_info=client_info).json()
+        assert body["folder_access"] == "FOLDER"
+        assert body["folder_id"] == new_id
+        assert body["history_scope"] == "ALL"
+
+
+def test_post_with_a_duplicate_new_folder_name_is_rejected(tmp_path) -> None:
+    with mcp_env(str(tmp_path / "mcp.db")) as env:
+        user = env.seed_user()
+        env.add_folder(user, "folder-a", "Agent Sandbox")
+        client_info, challenge, token = _consent_setup(env)
+
+        response = _post_consent(
+            env,
+            token=token,
+            client_info=client_info,
+            challenge=challenge,
+            folder_access="FOLDER",
+            new_folder_name="Agent Sandbox",
+        )
+        assert response.status_code == 400, response.text
+        assert "already exists" in response.json()["detail"]
+
+        # Nothing was persisted: no grant, and the consent still defaults.
+        session = {"Authorization": f"Bearer {token}"}
+        apps = env.client.get("/api/v1/mcp/connected-apps", headers=session).json()["apps"]
+        assert apps == []
+
+
+def test_post_with_an_empty_new_folder_name_is_rejected(tmp_path) -> None:
+    with mcp_env(str(tmp_path / "mcp.db")) as env:
+        env.seed_user()
+        client_info, challenge, token = _consent_setup(env)
+
+        response = _post_consent(
+            env,
+            token=token,
+            client_info=client_info,
+            challenge=challenge,
+            folder_access="FOLDER",
+            new_folder_name="   ",
+        )
+        assert response.status_code == 400, response.text
+        assert "name" in response.json()["detail"].lower()
+
+
+def test_post_with_another_users_folder_is_refused_and_not_persisted(tmp_path) -> None:
+    """The important one: a folder the caller does not own must never bind."""
+    with mcp_env(str(tmp_path / "mcp.db")) as env:
+        alice = env.seed_user(username="alice", email="alice@example.com")
+        env.seed_user(username="bob", email="bob@example.com")
+        alice_folder = env.add_folder(alice, "alice-folder", "Alice Only")
+
+        client_info, challenge, token = _consent_setup(env, username="bob")
+        response = _post_consent(
+            env,
+            token=token,
+            client_info=client_info,
+            challenge=challenge,
+            folder_access="FOLDER",
+            folder_id=alice_folder,
+        )
+        assert response.status_code in (400, 404), response.text
+
+        # No grant was created at all — the refusal happened before persistence.
+        session = {"Authorization": f"Bearer {token}"}
+        apps = env.client.get("/api/v1/mcp/connected-apps", headers=session).json()["apps"]
+        assert apps == []
+
+        # And the consent still reports the default binding, not Alice's folder.
+        body = _get_consent(env, token=token, client_info=client_info).json()
+        assert body["folder_access"] == "ALL"
+        assert body["folder_id"] is None
+
+
+def test_post_folder_access_without_a_folder_is_rejected(tmp_path) -> None:
+    with mcp_env(str(tmp_path / "mcp.db")) as env:
+        env.seed_user()
+        client_info, challenge, token = _consent_setup(env)
+
+        response = _post_consent(
+            env,
+            token=token,
+            client_info=client_info,
+            challenge=challenge,
+            folder_access="FOLDER",
+        )
+        assert response.status_code == 400, response.text
+        assert "whole Drive" in response.json()["detail"]
+
+
+def test_post_whole_drive_ignores_a_supplied_folder(tmp_path) -> None:
+    """A tampered page cannot bind a folder while claiming whole-Drive."""
+    with mcp_env(str(tmp_path / "mcp.db")) as env:
+        user = env.seed_user()
+        folder = env.add_folder(user, "folder-a", "Reports")
+        client_info, challenge, token = _consent_setup(env)
+
+        response = _post_consent(
+            env,
+            token=token,
+            client_info=client_info,
+            challenge=challenge,
+            folder_access="ALL",
+            folder_id=folder,
+        )
+        assert response.status_code == 200, response.text
+
+        body = _get_consent(env, token=token, client_info=client_info).json()
+        assert body["folder_access"] == "ALL"
+        assert body["folder_id"] is None
+
+
+def test_re_consent_moves_the_binding_and_can_widen_back_to_whole_drive(tmp_path) -> None:
+    with mcp_env(str(tmp_path / "mcp.db")) as env:
+        user = env.seed_user()
+        folder_a = env.add_folder(user, "folder-a", "A")
+        folder_b = env.add_folder(user, "folder-b", "B")
+        client_info, challenge, token = _consent_setup(env)
+
+        first = _post_consent(
+            env,
+            token=token,
+            client_info=client_info,
+            challenge=challenge,
+            folder_access="FOLDER",
+            folder_id=folder_a,
+        )
+        assert first.status_code == 200, first.text
+        assert _get_consent(env, token=token, client_info=client_info).json()["folder_id"] == folder_a
+
+        # Move A → B.
+        second = _post_consent(
+            env,
+            token=token,
+            client_info=client_info,
+            challenge=challenge,
+            folder_access="FOLDER",
+            folder_id=folder_b,
+        )
+        assert second.status_code == 200, second.text
+        assert _get_consent(env, token=token, client_info=client_info).json()["folder_id"] == folder_b
+
+        # And B → whole Drive.
+        third = _post_consent(
+            env,
+            token=token,
+            client_info=client_info,
+            challenge=challenge,
+            folder_access="ALL",
+        )
+        assert third.status_code == 200, third.text
+        body = _get_consent(env, token=token, client_info=client_info).json()
+        assert body["folder_access"] == "ALL"
+        assert body["folder_id"] is None
+
+
+def test_folder_access_endpoint_returns_only_the_users_active_folder_grants(tmp_path) -> None:
+    with mcp_env(str(tmp_path / "mcp.db")) as env:
+        alice = env.seed_user(username="alice", email="alice@example.com")
+        env.seed_user(username="bob", email="bob@example.com")
+        alice_folder = env.add_folder(alice, "folder-a", "Alice Workspace")
+
+        # Alice: one folder-bound grant, plus (a) a whole-Drive grant and (b) a
+        # revoked folder grant — neither of which may appear.
+        bound_client, bound_challenge, alice_token = _consent_setup(env, username="alice")
+        bound = _post_consent(
+            env,
+            token=alice_token,
+            client_info=bound_client,
+            challenge=bound_challenge,
+            folder_access="FOLDER",
+            folder_id=alice_folder,
+        )
+        assert bound.status_code == 200, bound.text
+
+        all_client, all_challenge, _ = _consent_setup(env, username="alice")
+        # A second client needs a distinct redirect URI? No — the client is
+        # registered fresh, so the same URI is fine.
+        all_drive = _post_consent(
+            env,
+            token=alice_token,
+            client_info=all_client,
+            challenge=all_challenge,
+            folder_access="ALL",
+        )
+        assert all_drive.status_code == 200, all_drive.text
+
+        revoked_client, revoked_challenge, _ = _consent_setup(env, username="alice")
+        revoked = _post_consent(
+            env,
+            token=alice_token,
+            client_info=revoked_client,
+            challenge=revoked_challenge,
+            folder_access="FOLDER",
+            folder_id=alice_folder,
+        )
+        assert revoked.status_code == 200, revoked.text
+        apps = env.client.get(
+            "/api/v1/mcp/connected-apps", headers={"Authorization": f"Bearer {alice_token}"}
+        ).json()["apps"]
+        revoked_grant = next(a for a in apps if a["client_id"] == revoked_client["client_id"])
+        env.client.delete(
+            f"/api/v1/mcp/connected-apps/{revoked_grant['id']}",
+            headers={"Authorization": f"Bearer {alice_token}"},
+        )
+
+        body = env.client.get(
+            "/api/v1/mcp/folder-access",
+            headers={"Authorization": f"Bearer {alice_token}"},
+        ).json()
+        assert [entry["folder_id"] for entry in body["folders"]] == [alice_folder]
+        assert body["folders"][0]["grant_id"] == bound_grant_id(env, alice_token, bound_client)
+
+        # Bob sees nothing of Alice's.
+        bob_token = env.sign_in("bob")
+        bob_body = env.client.get(
+            "/api/v1/mcp/folder-access", headers={"Authorization": f"Bearer {bob_token}"}
+        ).json()
+        assert bob_body["folders"] == []
+
+
+def bound_grant_id(env: MCPEnv, token: str, client_info: dict[str, Any]) -> str:
+    apps = env.client.get(
+        "/api/v1/mcp/connected-apps", headers={"Authorization": f"Bearer {token}"}
+    ).json()["apps"]
+    return str(next(a["id"] for a in apps if a["client_id"] == client_info["client_id"]))
+
+
+def test_folder_access_endpoint_requires_authentication(tmp_path) -> None:
+    with mcp_env(str(tmp_path / "mcp.db")) as env:
+        assert env.client.get("/api/v1/mcp/folder-access").status_code == 401
+
+
+def test_a_tampered_approval_cannot_widen_scopes_even_when_it_binds_a_folder(tmp_path) -> None:
+    """The folder binding is applied, but the scope set is still intersected."""
+    with mcp_env(str(tmp_path / "mcp.db")) as env:
+        user = env.seed_user()
+        folder = env.add_folder(user, "folder-a", "Reports")
+        client_info, challenge, token = _consent_setup(env)
+
+        response = _post_consent(
+            env,
+            token=token,
+            client_info=client_info,
+            challenge=challenge,
+            scope="documents.read",
+            approved=["documents.read", "documents.delete"],
+            folder_access="FOLDER",
+            folder_id=folder,
+        )
+        assert response.status_code == 200, response.text
+
+        apps = env.client.get(
+            "/api/v1/mcp/connected-apps", headers={"Authorization": f"Bearer {token}"}
+        ).json()["apps"]
+        assert apps[0]["scopes"] == ["documents.read"]
+        # The legitimate folder choice is still honoured.
+        body = _get_consent(env, token=token, client_info=client_info).json()
+        assert body["folder_id"] == folder

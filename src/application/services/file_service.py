@@ -87,6 +87,7 @@ class FileRepositoryPort(Protocol):
         sort: FileSortKey = DEFAULT_FILE_SORT,
         order: FileSortOrder = DEFAULT_FILE_SORT_ORDER,
         extensions: Sequence[str] | None = None,
+        folder_ids: Sequence[str] | None = None,
     ) -> tuple[list[UserFileModel], int]:
         """Name-substring search across every folder the user owns."""
         ...
@@ -153,6 +154,10 @@ class FolderRepositoryPort(Protocol):
         self, folder_id: str,
     ) -> tuple[list[str], list[str]]: ...
 
+    async def list_subtree_ids(self, folder_id: str) -> list[str]:
+        """Every descendant folder id of ``folder_id`` (excluding itself)."""
+        ...
+
 
 class SubscriptionTierPort(Protocol):
     """Reads the actor's subscription tier."""
@@ -215,6 +220,25 @@ class FileService:
         if folder is None or folder.user_id != user_id:
             raise FolderNotFoundError()
         return folder
+
+    async def resolve_folder_scope(self, user_id: int, folder_id: str) -> set[str] | None:
+        """The ids in ``folder_id``'s subtree, including the folder itself.
+
+        Returns the exact set of folder ids an agent confined to ``folder_id``
+        may reach, or **None** when the folder does not exist or is not owned by
+        ``user_id``. The two failure cases deliberately return the same value so
+        a caller cannot use this to probe whether a folder id exists for another
+        account — "not yours" and "not there" are indistinguishable.
+
+        A caller must treat ``None`` as a denial, not as "unrestricted". It is
+        the caller's job to decide what an unrestricted grant means; this method
+        only ever answers for a concrete folder.
+        """
+        folder = await self._folders.get_by_id(folder_id)
+        if folder is None or folder.user_id != user_id:
+            return None
+        descendants = await self._folders.list_subtree_ids(folder.id)
+        return {folder.id, *descendants}
 
     async def list_root_folders(
         self, user_id: int, *, offset: int = 0, limit: int = 20,
@@ -378,6 +402,7 @@ class FileService:
         sort: FileSortKey = DEFAULT_FILE_SORT,
         order: FileSortOrder = DEFAULT_FILE_SORT_ORDER,
         extensions: Sequence[str] | None = None,
+        folder_ids: Sequence[str] | None = None,
     ) -> tuple[list[UserFileModel], int]:
         """Find a user's files by name substring, across every folder.
 
@@ -390,12 +415,16 @@ class FileService:
 
         ``sort``/``order`` rank the matches, so "my biggest invoice" can be one
         call instead of a fetch-then-sort in the caller.
+
+        ``folder_ids`` restricts the search to those folders (no-op when
+        ``None``). The MCP toolbox passes an agent's folder subtree here so a
+        name search can never surface a file outside the agent's confinement.
         """
         if not query.strip():
             return [], 0
         return await self._files.search_by_name(
             user_id, query, offset=offset, limit=limit, sort=sort, order=order,
-            extensions=extensions,
+            extensions=extensions, folder_ids=folder_ids,
         )
 
     async def move_file(

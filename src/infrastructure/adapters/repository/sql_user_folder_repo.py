@@ -105,6 +105,34 @@ class SQLUserFolderRepository:
         """Fetch a folder row by primary key."""
         return await self._session.get(UserFolderModel, folder_id)
 
+    async def list_subtree_ids(self, folder_id: str) -> list[str]:
+        """Every descendant folder id of ``folder_id`` (excluding itself).
+
+        The same breadth-first walk as :meth:`delete_with_descendants`, without
+        the deletes. Used by the MCP folder-scope guard
+        (:meth:`FileService.resolve_folder_scope`) to decide which files an
+        agent confined to ``folder_id`` may reach.
+
+        Deliberately **not** scoped by ``user_id``: ownership travels down the
+        parent chain, so the descendants of a folder the caller has already
+        proven they own are theirs too. (The root ownership check happens in
+        ``FileService.resolve_folder_scope`` before this runs.) A ``seen`` set
+        makes the walk terminate even if a cycle exists in the data, which the
+        move path prevents but a manual edit could still introduce.
+        """
+        descendants: list[str] = []
+        seen = {folder_id}
+        frontier = [folder_id]
+        while frontier:
+            result = await self._session.execute(
+                select(UserFolderModel.id).where(UserFolderModel.parent_id.in_(frontier))
+            )
+            children = [row[0] for row in result.all() if row[0] not in seen]
+            descendants.extend(children)
+            seen.update(children)
+            frontier = children
+        return descendants
+
     async def list_by_parent(
         self, user_id: int, parent_id: str | None, *, offset: int = 0, limit: int = 20
     ) -> tuple[list[UserFolderModel], int]:

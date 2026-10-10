@@ -11,8 +11,18 @@ import pytest
 from src.domain.conversions.value_object.job_origin import JobOrigin, coerce_job_origin
 
 
-def test_members_are_exactly_web_api_and_guest() -> None:
-    assert {member.value for member in JobOrigin} == {"WEB", "API", "GUEST"}
+def test_members_are_exactly_web_api_mcp_and_guest() -> None:
+    """``MCP`` is deliberately separate from ``API``, not folded into it.
+
+    An agent acting under an OAuth grant is a different actor from an API-key
+    caller, and the agent-facing ``get_conversion_history`` tool answers "what
+    did *this kind of actor* convert?" by filtering on this value. Recording an
+    agent's conversions as ``API`` would make that question unanswerable.
+
+    The set is asserted exactly so that adding an origin is a decision someone
+    makes here, with a docstring, rather than a silent widening.
+    """
+    assert {member.value for member in JobOrigin} == {"WEB", "API", "MCP", "GUEST"}
 
 
 def test_origin_is_a_str_enum_so_a_plain_string_column_round_trips() -> None:

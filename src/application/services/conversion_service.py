@@ -172,14 +172,22 @@ class ConversionService:
         offset: int = 0,
         limit: int = 20,
         since=None,
+        origin: JobOrigin | None = None,
     ) -> tuple[list[ConversionJob], int]:
         """Return the user's conversion history (newest first) plus total count.
 
         Args:
             since: Optional datetime; only jobs created on/after this time are
                 returned (used for the time-range filter on the History page).
+            origin: Optional :class:`JobOrigin`; when supplied only jobs
+                recorded with that origin are returned. ``None`` is the
+                unfiltered default, so the REST history page is unchanged. The
+                MCP history tool passes ``JobOrigin.MCP`` for its agent-only
+                scope (see ``MCPToolBox.get_conversion_history``).
         """
-        return await self.db_repository.list_user_history(user_id, offset, limit, since=since)
+        return await self.db_repository.list_user_history(
+            user_id, offset, limit, since=since, origin=origin
+        )
 
     async def search_jobs(
         self,

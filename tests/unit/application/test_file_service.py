@@ -117,14 +117,17 @@ class FakeFileRepo:
         sort: FileSortKey = DEFAULT_FILE_SORT,
         order: FileSortOrder = DEFAULT_FILE_SORT_ORDER,
         extensions: list[str] | None = None,
+        folder_ids: list[str] | None = None,
     ):
         needle = query.casefold()
+        allowed = set(folder_ids) if folder_ids is not None else None
         rows = [
             f
             for f in self.files.values()
             if f.user_id == user_id
             and needle in (f.file_name or "").casefold()
             and _matches_extension(f, extensions)
+            and (allowed is None or f.folder_id in allowed)
         ]
         rows = _sorted_files(rows, sort, order)
         return rows[offset:offset + limit], len(rows)

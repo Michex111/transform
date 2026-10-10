@@ -33,6 +33,9 @@ import type {
   ConnectedAppListResponse,
   McpConsentApprovalResponse,
   McpConsentRequestResponse,
+  McpFolderAccess,
+  McpFolderAccessResponse,
+  McpHistoryScope,
   AssistantConversationListResponse,
   AssistantMessage,
   AssistantMessageRole,
@@ -1356,13 +1359,71 @@ export function normalizeMcpConsent(value: unknown): McpConsentRequestResponse {
         destructive: r.destructive === undefined ? true : asBoolean(r.destructive),
       }
     }),
+    // Drop entries with no id: a blank option cannot be selected or submitted,
+    // so keeping it would only render a dead row in the picker.
+    folders: asArray<unknown>(o.folders)
+      .map((row) => {
+        const r = asObject(row)
+        return { folder_id: asString(r.folder_id), name: asString(r.name) }
+      })
+      .filter((f) => f.folder_id !== ""),
+    folder_access: asFolderAccess(o.folder_access),
+    folder_id: asNullableString(o.folder_id) || null,
+    // The least an agent can be given (and the field's own default) is the
+    // fail-safe reading of anything the API did not send.
+    history_scope: asHistoryScope(o.history_scope),
+    // Absent means the screen cannot offer a choice, so it renders the single
+    // allowed value as static text rather than inventing a selector.
+    can_choose_history_scope: asBoolean(o.can_choose_history_scope, false),
   }
+}
+
+/**
+ * Coerce a folder-access value, failing closed on anything unrecognised.
+ *
+ * An absent/null field is the one case that reads as `ALL`: an API older than
+ * folder scoping has no notion of a confined grant, and reading it as `FOLDER`
+ * would trap the user on a picker whose `folder_id` that API never sent. A
+ * value the API *did* send but we do not understand is a real risk of widening
+ * access, so it fails closed to `FOLDER` (which without a folder grants
+ * nothing).
+ */
+function asFolderAccess(value: unknown): McpFolderAccess {
+  if (value === "ALL") return "ALL"
+  if (value === "FOLDER") return "FOLDER"
+  return value === undefined || value === null ? "ALL" : "FOLDER"
+}
+
+/** Coerce a history scope; only an explicit `ALL` opts into the wider read. */
+function asHistoryScope(value: unknown): McpHistoryScope {
+  return value === "ALL" ? "ALL" : "AGENT"
 }
 
 /** The redirect the consent decision produced. */
 export function normalizeMcpConsentApproval(value: unknown): McpConsentApprovalResponse {
   const o = asObject(value)
   return { redirect_url: asString(o.redirect_url) }
+}
+
+/**
+ * The folders active agents may reach, for the Files page indicator.
+ *
+ * Kept intentionally permissive: this backs a quiet decoration that must never
+ * take the Files page down, so a malformed row degrades to a skipped entry
+ * rather than an error.
+ */
+export function normalizeMcpFolderAccess(value: unknown): McpFolderAccessResponse {
+  const o = asObject(value)
+  return {
+    folders: asArray<unknown>(o.folders).map((row) => {
+      const r = asObject(row)
+      return {
+        folder_id: asString(r.folder_id),
+        client_name: asString(r.client_name),
+        grant_id: asString(r.grant_id),
+      }
+    }),
+  }
 }
 
 /* ---------------- Batch conversions + saved workflows ---------------- */

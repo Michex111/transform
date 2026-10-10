@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 from src.infrastructure.database.models import ConversionJobModel
 from src.domain.conversions.entities.conversion_job import ConversionJob
 from src.domain.conversions.value_object.conversion_type import ConversionType
-from src.domain.conversions.value_object.job_origin import coerce_job_origin
+from src.domain.conversions.value_object.job_origin import JobOrigin, coerce_job_origin
 from src.domain.conversions.value_object.job_status import JobStatus
 
 from sqlalchemy import delete, func, or_, select, update
@@ -141,15 +141,25 @@ class SQLConversionJobRepository:
         offset: int,
         limit: int,
         since: datetime | None = None,
+        origin: JobOrigin | None = None,
     ) -> tuple[list[ConversionJob], int]:
         """Returns the user's job history (newest first) plus the total count.
 
         When ``since`` is provided only jobs created on/after that timestamp are
         returned.
+
+        When ``origin`` is provided only jobs recorded with that origin are
+        returned. ``None`` (the default) is unfiltered, so the REST history page
+        keeps returning every origin. The MCP history tool passes
+        ``JobOrigin.MCP`` so an agent sees only conversions started through MCP.
+        The column stores the enum's plain string value; comparing against
+        ``str(origin)`` matches what ``save_conversion_job`` wrote.
         """
         base = select(ConversionJobModel).where(ConversionJobModel.user_id == user_id)
         if since is not None:
             base = base.where(ConversionJobModel.created_at >= since)
+        if origin is not None:
+            base = base.where(ConversionJobModel.origin == str(origin))
 
         count_q = select(func.count()).select_from(base.subquery())
         total = (await self.session.execute(count_q)).scalar_one()

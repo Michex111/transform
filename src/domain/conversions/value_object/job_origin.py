@@ -14,10 +14,18 @@ class JobOrigin(StrEnum):
     ``GUEST`` is not an authenticated actor at all — guest jobs are ownerless and
     never touch a wallet — but they are a distinct origin so that a guest job can
     never be mistaken for a signed-in browser job if ownership is ever added.
+
+    ``MCP`` is an AI agent acting under an OAuth grant. It is separate from
+    ``API`` rather than folded into it because the agent-facing
+    ``get_conversion_history`` tool has to answer "what did *this agent* do?",
+    and because a grant can be confined to a folder by a decision the API-key
+    caller never made. Recording it as ``API`` would make both questions
+    unanswerable from the row.
     """
 
     WEB = "WEB"
     API = "API"
+    MCP = "MCP"
     GUEST = "GUEST"
 
 

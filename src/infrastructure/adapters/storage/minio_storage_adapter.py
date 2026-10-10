@@ -1,4 +1,5 @@
 import asyncio
+import io
 
 from minio import Minio
 from minio.datatypes import Part
@@ -11,6 +12,7 @@ from src.infrastructure.adapters.storage.exceptions import (
     StorageOperationError,
     StoragePermissionError,
 )
+from src.infrastructure.adapters.storage.sanitize import sanitize_object_key
 import logging
 
 
@@ -33,6 +35,53 @@ class MinioFileStorageAdapter:
         except S3Error as e:
             self.logger.error("minio_upload_failed", extra={"key": target_key, "error": str(e)})
             raise
+
+    async def put_object(self, object_key: str, data: bytes) -> None:
+        """Write ``data`` to ``object_key`` in one PUT.
+
+        The async, byte-oriented counterpart to :meth:`upload`. It exists for
+        the MCP ``upload_file`` tool, which has the file content in memory
+        (base64 from the model) and must write it to the object key reserved by
+        an upload session without a temporary file. The key is sanitised and the
+        SDK call is moved off the event loop, exactly as the other methods here.
+        """
+        key = sanitize_object_key(object_key)
+
+        def _put() -> None:
+            try:
+                self.s3_client.put_object(
+                    self.bucket_name, key, io.BytesIO(data), length=len(data),
+                )
+            except S3Error as e:
+                self.logger.error("minio_put_object_failed", extra={"key": key, "error": str(e)})
+                raise StorageOperationError() from e
+
+        await asyncio.to_thread(_put)
+
+    async def read_object(self, object_key: str, max_bytes: int | None = None) -> bytes:
+        """Read an object's bytes (at most ``max_bytes`` when given).
+
+        Used by the MCP ``download_file`` tool, which returns the content as
+        base64. The caller caps the object size before calling; ``max_bytes``
+        is a second, defensive bound so a stale row size can never stream an
+        unbounded payload into memory.
+        """
+        key = sanitize_object_key(object_key)
+
+        def _read() -> bytes:
+            try:
+                response = self.s3_client.get_object(self.bucket_name, key)
+                try:
+                    return response.read(max_bytes) if max_bytes is not None else response.read()
+                finally:
+                    response.close()
+            except S3Error as e:
+                if e.code == "NoSuchKey":
+                    raise ObjectNotFoundError() from e
+                self.logger.error("minio_read_object_failed", extra={"key": key, "error": str(e)})
+                raise StorageOperationError() from e
+
+        return await asyncio.to_thread(_read)
 
     def remove_object(self, key: str) -> bool:
         """Delete an object. Returns False when it did not exist."""

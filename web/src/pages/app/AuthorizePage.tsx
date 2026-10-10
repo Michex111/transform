@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
-import { LinkBreak, Robot, ShieldCheck } from "@phosphor-icons/react";
 import { api } from "@/api/client";
 import { useToast } from "@/auth/ToastContext";
 import { Button, Card, Skeleton } from "@/components/ui";
 import { McpConsentOutcomeDialog } from "@/components/developer/McpConsentOutcomeDialog";
+import { McpConsentScreen } from "@/components/developer/McpConsentScreen";
 import { denialUrl, type ConsentOutcome } from "@/lib/mcpConsent";
+import type { ConsentConfinementPayload } from "@/lib/mcpConsentRequest";
 import type { McpConsentRequestResponse } from "@/api/types";
 
 /** The account's connected-applications section. */
@@ -95,7 +96,7 @@ export function AuthorizePage() {
     });
   }
 
-  async function approve() {
+  async function approve(confinement: ConsentConfinementPayload) {
     if (!request) return;
     setSubmitting(true);
     try {
@@ -107,6 +108,9 @@ export function AuthorizePage() {
         resource: resource || null,
         state,
         approved_scopes: [...selected],
+        // The confinement is spread last so a stray key in it can never be
+        // overridden by, or override, the request identity fields above.
+        ...confinement,
       });
       // The server validated this URL against the client's registered redirect
       // URIs before minting the code, and the code is useless without the PKCE
@@ -162,67 +166,15 @@ export function AuthorizePage() {
   }
 
   return (
-    <Card className="mx-auto max-w-lg p-6">
-      <div className="mb-1 flex items-center gap-3">
-        <Robot size={24} className="text-primary" aria-hidden="true" />
-        <h1 className="font-display text-lg font-semibold">
-          Allow {request.client_name} to use your account?
-        </h1>
-      </div>
-      <p className="mb-5 text-sm text-muted">
-        It is asking for permission to work with your Transform files. You can disconnect it at any
-        time from Settings → AI apps, without changing your password.
-      </p>
-
-      <ul className="mb-5 divide-y divide-outline">
-        {request.scopes.map((s) => {
-          const requested = s.requested;
-          return (
-            <li key={s.scope} className="flex items-start gap-3 py-3">
-              <input
-                type="checkbox"
-                id={`scope-${s.scope}`}
-                checked={selected.has(s.scope)}
-                disabled={!requested}
-                onChange={() => toggle(s.scope)}
-                className="mt-0.5 h-4 w-4 shrink-0 accent-[var(--color-primary)] disabled:opacity-40"
-              />
-              <label
-                htmlFor={`scope-${s.scope}`}
-                className={requested ? "text-sm" : "text-sm text-muted"}
-              >
-                <span className="block text-on-background">{s.description}</span>
-                <span className="block font-mono text-xs text-muted">
-                  {s.scope}
-                  {!requested && " · not requested"}
-                  {s.already_granted && " · already allowed"}
-                </span>
-              </label>
-            </li>
-          );
-        })}
-      </ul>
-
-      <div className="mb-5 flex items-start gap-2 rounded-lg border border-outline-strong bg-surface-variant p-3">
-        <ShieldCheck size={16} className="mt-0.5 shrink-0 text-muted" aria-hidden="true" />
-        <p className="text-xs text-muted">
-          It will only ever see your own files. You can also revoke its access later.
-        </p>
-      </div>
-
-      <div className="flex items-center justify-end gap-2">
-        <Button variant="ghost" onClick={deny} disabled={submitting}>
-          Cancel
-        </Button>
-        <Button onClick={approve} disabled={submitting || selected.size === 0}>
-          {submitting ? "Connecting…" : "Allow access"}
-        </Button>
-      </div>
-
-      <p className="mt-4 flex items-center gap-1 text-xs text-muted">
-        <LinkBreak size={12} aria-hidden="true" />
-        Sending you to {request.redirect_uri}
-      </p>
+    <>
+      <McpConsentScreen
+        request={request}
+        selectedScopes={selected}
+        onToggleScope={toggle}
+        submitting={submitting}
+        onApprove={approve}
+        onDeny={deny}
+      />
 
       {/* The application's browser handoff. Rendered as a confirmation step
           rather than performed on approval — see `McpConsentOutcomeDialog` for
@@ -234,6 +186,6 @@ export function AuthorizePage() {
           onManage={() => navigate(SETTINGS_URL)}
         />
       )}
-    </Card>
+    </>
   );
 }

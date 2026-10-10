@@ -16,9 +16,16 @@ Design rules applied to every tool here:
   reads the verified access token; no tool accepts a user id, and no tool
   accepts a storage key.
 
-There is deliberately **no** tool for uploading arbitrary content, and none for
-starting a conversion *without* an owned ``file_id``. Both would be a way to
-make Transform read or write something the user never authorized.
+There is deliberately **no** tool for starting a conversion *without* an owned
+``file_id``, and no way to name a storage key. ``upload_file`` is the only tool
+that introduces content the user did not already have, and it is bounded (a
+small size cap) and confined to the connection's allowed folder, because its
+content comes from the model.
+
+Every tool is additionally confined to the folder the user chose when they
+connected the application (when they chose one): a file outside it is reported
+exactly as a file that does not exist, so the confinement cannot be used to
+probe for files elsewhere in the Drive.
 """
 
 import contextlib
@@ -37,6 +44,10 @@ from src.presentation.mcp.dependencies import open_mcp_scope
 #: Shown to the agent on initialize. Kept short and factual: it states the
 #: workflow and the two things an agent most often gets wrong (conversions are
 #: asynchronous; deletes are permanent).
+#:
+#: NOTE: ``docs/mcp.md`` and ``web/src/lib/mcpAgentPrompt.ts`` are the
+#: user-facing copies of this text. They are owned by a different workstream —
+#: update them there, not here.
 INSTRUCTIONS = """\
 Transform converts documents between formats and stores them in the user's Drive.
 
@@ -47,14 +58,22 @@ Workflow for "convert my X and save the result":
   3. get_conversion_status(job_id) — poll until status is COMPLETED or FAILED.
   4. save_file(job_id) — save the converted result into the Drive.
 
+Other things you can do:
+  - download_file(file_id) — read a document's contents (as base64).
+  - upload_file(file_name, content_base64) — create a new file in the Drive.
+  - get_conversion_history — list recent conversions.
+  - get_credits — check the user's remaining credits.
+
 Notes:
   - Every tool acts only on the signed-in user's own data. An id that is not
     theirs is reported as "not found", which is intentional.
+  - This connection may be confined to ONE folder of the user's Drive. Files
+    outside it are reported as "not found", and folder arguments outside it are
+    refused. Do not tell the user a file exists somewhere you cannot reach.
   - Conversions are asynchronous: convert_file returns immediately.
   - delete_file is permanent and needs the documents.delete permission, which
     is not granted by default. Always confirm with the user first.
-  - File contents are not returned by any tool; only metadata. Never claim to
-    have read a document's text.
+  - Never claim to have read a document's text unless you used download_file.
 """
 
 
@@ -78,13 +97,20 @@ async def _tool_scope() -> AsyncGenerator[tuple[MCPToolBox, MCPToolContext]]:
 
     scopes = normalize_scopes(token.scopes or ())
     claims = token.claims or {}
-    async with open_mcp_scope(user_id) as scope:
+    grant_id = str(claims.get("grant_id", ""))
+    async with open_mcp_scope(user_id, grant_id) as scope:
         yield scope.toolbox, MCPToolContext(
             user_id=user_id,
             scopes=scopes,
             tier=scope.tier,
             client_id=token.client_id,
-            grant_id=str(claims.get("grant_id", "")),
+            grant_id=grant_id,
+            # The folder confinement and history scope come from the stored
+            # grant, loaded by ``open_mcp_scope``. They are part of the token's
+            # authority, never a tool argument.
+            folder_access=scope.folder_access,
+            folder_id=scope.folder_id,
+            history_scope=scope.history_scope,
         )
 
 
@@ -209,6 +235,45 @@ def register_tools(mcp: MCPServer) -> None:
             return await toolbox.get_file(ctx, file_id)
 
     @mcp.tool(
+        name="download_file",
+        title="Download a file's contents",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=False,
+        ),
+        structured_output=True,
+    )
+    @instrument_tool("download_file")
+    async def download_file(file_id: str) -> dict[str, Any]:
+        """Return the CONTENTS of one of the user's files, base64-encoded.
+
+        Use this when the user asks you to read, summarise, quote or translate a
+        document's text. Conversions only return a new file; they do not expose
+        content. For anything but a small document, prefer converting it or
+        having the user open it in the Transform web app — a single tool call is
+        the wrong channel for a large transfer.
+
+        Args:
+            file_id: The id returned by list_files. It must belong to the
+                signed-in user.
+
+        Returns:
+            {"ok": true, "file_name", "extension", "size_bytes",
+            "content_base64"} — decode the base64 to get the raw bytes.
+            {"ok": false, "error"} when the file is missing, outside this
+            connection's folder, or larger than the size limit for this tool
+            (in which case the error says to use the web app).
+
+        Read-only. Requires documents.read. A file that exists but is not
+        reachable by this connection is reported exactly as a file that does not
+        exist.
+        """
+        async with _tool_scope() as (toolbox, ctx):
+            return await toolbox.download_file(ctx, file_id)
+
+    @mcp.tool(
         name="get_conversion_status",
         title="Check a conversion",
         annotations=ToolAnnotations(
@@ -241,6 +306,72 @@ def register_tools(mcp: MCPServer) -> None:
         """
         async with _tool_scope() as (toolbox, ctx):
             return await toolbox.get_conversion_status(ctx, job_id)
+
+    @mcp.tool(
+        name="get_conversion_history",
+        title="List recent conversions",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=False,
+        ),
+        structured_output=True,
+    )
+    @instrument_tool("get_conversion_history")
+    async def get_conversion_history(limit: int = 20, offset: int = 0) -> dict[str, Any]:
+        """List the user's recent conversions, newest first.
+
+        How much history is visible depends on the permission this application
+        was granted: by default it sees only conversions started through a
+        connected application (which includes other apps the user has
+        connected), and only if the user explicitly allowed it does it see the
+        user's entire conversion history.
+
+        Args:
+            limit: Maximum rows to return (1-50, default 20).
+            offset: Rows to skip, for paging.
+
+        Returns:
+            {"ok": true, "items": [{"job_id", "status", "source_format",
+            "target_format", "input_file", "output_file", "created_at",
+            "credits_used"}], "total", "returned", "scope"} where "scope" is
+            "AGENT" or "ALL". {"ok": false, "error"} on failure.
+
+        Read-only. Requires documents.read. Never returns file contents or
+        storage locations.
+        """
+        async with _tool_scope() as (toolbox, ctx):
+            return await toolbox.get_conversion_history(ctx, limit=limit, offset=offset)
+
+    @mcp.tool(
+        name="get_credits",
+        title="Check the user's credit balance",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=False,
+        ),
+        structured_output=True,
+    )
+    @instrument_tool("get_credits")
+    async def get_credits() -> dict[str, Any]:
+        """Report the user's remaining conversion credits for the current period.
+
+        Use this before starting a lot of conversions, or when the user asks how
+        many credits they have left. Credits reset monthly on paid plans.
+
+        Returns:
+            {"ok": true, "balance": <int>, "resets_at": <ISO timestamp|null>}.
+            "resets_at" is null when the plan's credits do not reset.
+            {"ok": false, "error"} on failure.
+
+        Read-only. Requires documents.read. Reads the signed-in user's own
+        balance only.
+        """
+        async with _tool_scope() as (toolbox, ctx):
+            return await toolbox.get_credits(ctx)
 
     # ------------------------------------------------------------------
     # Mutating
@@ -324,6 +455,53 @@ def register_tools(mcp: MCPServer) -> None:
         async with _tool_scope() as (toolbox, ctx):
             return await toolbox.save_file(
                 ctx, job_id=job_id, folder_id=folder_id, file_name=file_name
+            )
+
+    @mcp.tool(
+        name="upload_file",
+        title="Upload a new file into the Drive",
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=False,
+            idempotent_hint=False,
+            open_world_hint=False,
+        ),
+        structured_output=True,
+    )
+    @instrument_tool("upload_file")
+    async def upload_file(
+        file_name: str,
+        content_base64: str,
+        folder_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Create a NEW file in the user's Drive from content you provide.
+
+        Generate the file's bytes, base64-encode them, and pass them here. This
+        is how you save a document you authored (for example a report you
+        generated as text) into the user's Drive, unlike save_file which only
+        promotes a conversion result.
+
+        Args:
+            file_name: The name for the new file, including its extension
+                (e.g. "report.pdf" or "notes.md").
+            content_base64: The file's raw bytes, base64-encoded. This is
+                supplied by you and is length-limited (a few tens of MB); for
+                anything larger ask the user to upload it in the web app.
+            folder_id: Optional destination folder id. Omit to place the file in
+                the connection's folder (or the Drive root for an unrestricted
+                connection). A folder outside this connection's allowed folder
+                is refused.
+
+        Returns:
+            {"ok": true, "file": {"file_id", "file_name", "extension",
+            "size_bytes", "folder_id"}} or {"ok": false, "error"}.
+
+        Creates a new file; nothing is overwritten. Requires documents.write.
+        """
+        async with _tool_scope() as (toolbox, ctx):
+            return await toolbox.upload_file(
+                ctx, file_name=file_name, content_base64=content_base64,
+                folder_id=folder_id,
             )
 
     @mcp.tool(

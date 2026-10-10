@@ -47,6 +47,7 @@ from src.application.ports.mcp_oauth_port import (
 )
 from src.domain.security.enitities.agent_grant import AgentGrant, AgentGrantStatus
 from src.domain.security.exceptions.exceptions import InvalidGrantTransition
+from src.domain.security.value_object.agent_access_scope import FolderAccess, HistoryScope
 from src.domain.security.value_object.agent_scope import (
     ALL_SCOPES,
     DEFAULT_SCOPES,
@@ -114,6 +115,12 @@ class AuthorizationRequestView:
     #: Scopes this user already granted this client, so the screen can say
     #: "already allowed" instead of pretending the decision is new.
     already_granted: tuple[AgentScope, ...]
+    #: The binding the user already has, so re-consenting shows the existing
+    #: choice rather than silently resetting it. Defaults to whole-Drive /
+    #: agent-only when there is no grant to read.
+    folder_access: FolderAccess = FolderAccess.ALL
+    folder_id: str | None = None
+    history_scope: HistoryScope = HistoryScope.AGENT
 
 
 class MCPAccessService:
@@ -185,6 +192,14 @@ class MCPAccessService:
             resource=resource_url,
             requested_scopes=scopes,
             already_granted=tuple(s for s in already if s in scopes),
+            # Report the binding the user already has so a re-consent screen
+            # reflects it instead of defaulting to whole-Drive, which would look
+            # like a fresh decision. With no grant, the least-access defaults win.
+            folder_access=existing.folder_access if existing is not None else FolderAccess.ALL,
+            folder_id=existing.folder_id if existing is not None else None,
+            history_scope=(
+                existing.history_scope if existing is not None else HistoryScope.AGENT
+            ),
         )
 
     async def approve(
@@ -197,6 +212,9 @@ class MCPAccessService:
         code_challenge: str,
         resource: str | None,
         state: str | None = None,
+        folder_access: FolderAccess = FolderAccess.ALL,
+        folder_id: str | None = None,
+        history_scope: HistoryScope = HistoryScope.AGENT,
     ) -> str:
         """Record consent and return the redirect the browser must follow.
 
@@ -204,6 +222,13 @@ class MCPAccessService:
         never infers identity from the request. Every value is re-validated
         against the client's registration, because the consent page is a
         browser-supplied round trip and must be treated as untrusted input.
+
+        The folder binding (``folder_access``/``folder_id``) and
+        ``history_scope`` are stored **verbatim**: resolving a folder name or
+        proving the folder belongs to the user requires file-service I/O, which
+        deliberately lives outside this layer. The router resolves and
+        ownership-checks the binding before calling this, and the toolbox denies
+        a restricted grant whose folder cannot be resolved.
         """
         client = await self._require_client(client_id)
         self._ensure_redirect_uri(client, redirect_uri)
@@ -222,6 +247,9 @@ class MCPAccessService:
                 scopes=scopes,
                 status=AgentGrantStatus.ACTIVE,
                 resource=resource_url,
+                folder_access=folder_access,
+                folder_id=folder_id,
+                history_scope=history_scope,
                 created_at=now,
             )
         )
