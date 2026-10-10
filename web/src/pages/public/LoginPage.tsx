@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
+import { Robot } from "@phosphor-icons/react";
 import { motion } from "motion/react";
 import { useAuth } from "@/auth/AuthContext";
 import { useToast } from "@/auth/ToastContext";
@@ -8,6 +9,7 @@ import { ApiError } from "@/api/client";
 import { EMAIL_NOT_VERIFIED } from "@/api/types";
 import { Button, Field, Logo } from "@/components/ui";
 import { SeoHead } from "@/components/SeoHead";
+import { isAuthorizationRequest, safeReturnPath } from "@/lib/returnTo";
 
 export function LoginPage() {
   const { login } = useAuth();
@@ -28,7 +30,23 @@ export function LoginPage() {
    */
   const [unverifiedEmail, setUnverifiedEmail] = useState<string | null>(null);
 
-  const from = (location.state as { from?: string } | null)?.from ?? "/app/dashboard";
+  /**
+   * Where to go once signed in.
+   *
+   * Validated before use because it arrives from whatever URL opened the tab
+   * and it is used as a navigation target; `PublicOnlyRoute` reads the same
+   * state, so both guards resolve the destination identically.
+   */
+  const from = safeReturnPath((location.state as { from?: string } | null)?.from);
+  /**
+   * An AI application started this sign-in.
+   *
+   * A harness opens a cold browser tab at the consent route, and a visitor
+   * without a session lands here. Presenting the usual "welcome back" copy
+   * gives no clue that anything is waiting on them — the tab looks like an
+   * unrelated sign-in, so the connection is abandoned rather than completed.
+   */
+  const connecting = isAuthorizationRequest(from);
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
@@ -90,7 +108,7 @@ export function LoginPage() {
             animate={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.12 }}
           >
-            Welcome back
+            {connecting ? "Sign in to connect" : "Welcome back"}
           </motion.h1>
           <motion.p
             className="mt-1 text-sm text-muted"
@@ -98,9 +116,22 @@ export function LoginPage() {
             animate={{ opacity: 1 }}
             transition={{ delay: 0.2 }}
           >
-            Sign in to keep converting.
+            {connecting
+              ? "An AI application is asking for access to your account."
+              : "Sign in to keep converting."}
           </motion.p>
         </div>
+
+        {connecting && (
+          <div className="mb-5 flex items-start gap-2 rounded-lg border border-outline-strong bg-surface-variant p-3">
+            <Robot size={16} className="mt-0.5 shrink-0 text-primary" aria-hidden="true" />
+            <p className="text-xs text-muted">
+              An AI application sent you here and is waiting for your approval. Sign in to
+              review exactly what it is asking for — you choose the permissions before it
+              gets any access.
+            </p>
+          </div>
+        )}
 
         <form onSubmit={onSubmit} className="space-y-4">
           {/* Labelled "Username or email" because the API accepts either. It

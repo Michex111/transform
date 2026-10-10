@@ -91,6 +91,11 @@ register yourself, and the user approves you in a browser.
    failure. ONLY a signed-in human can approve; never try to complete this step
    yourself.
 
+   After approving, the user confirms the handoff to your \`redirect_uri\` from a
+   "…is connected" dialog. The grant is recorded when they approve, so the
+   dialog tells them to switch back to your application if the redirect does not
+   open it.
+
 5. Exchange the \`code\` at \`https://transform-api-7b3g.onrender.com/mcp/token\`
    with your \`code_verifier\`, \`client_id\`, and the same \`redirect_uri\`.
 
@@ -183,4 +188,8 @@ Workspace settings -> Apps -> Create, enter the endpoint, choose OAuth, and clic
   your client. Report it; do not override the endpoint by hand.
 - Consent screen will not complete — a signed-in human must approve it in a
   browser. It cannot be automated.
+- The user approved but no code arrived — your loopback listener was not
+  accepting connections when they confirmed the handoff. The grant already
+  exists (they can see it under Settings → AI apps), so have them retry the
+  connection instead of approving again.
 `;

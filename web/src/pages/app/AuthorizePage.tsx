@@ -4,7 +4,12 @@ import { LinkBreak, Robot, ShieldCheck } from "@phosphor-icons/react";
 import { api } from "@/api/client";
 import { useToast } from "@/auth/ToastContext";
 import { Button, Card, Skeleton } from "@/components/ui";
+import { McpConsentOutcomeDialog } from "@/components/developer/McpConsentOutcomeDialog";
+import { denialUrl, type ConsentOutcome } from "@/lib/mcpConsent";
 import type { McpConsentRequestResponse } from "@/api/types";
+
+/** The account's connected-applications section. */
+const SETTINGS_URL = "/app/settings?tab=connected-apps";
 
 /**
  * The OAuth consent screen an AI application sends the browser to.
@@ -37,6 +42,8 @@ export function AuthorizePage() {
   const [loading, setLoading] = useState(true);
   const [failed, setFailed] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  /** Set once the visitor has decided; the handoff happens from the dialog. */
+  const [outcome, setOutcome] = useState<ConsentOutcome | null>(null);
 
   useEffect(() => {
     if (!clientId || !redirectUri || !codeChallenge) {
@@ -103,8 +110,13 @@ export function AuthorizePage() {
       });
       // The server validated this URL against the client's registered redirect
       // URIs before minting the code, and the code is useless without the PKCE
-      // verifier the application holds.
-      window.location.assign(res.redirect_url);
+      // verifier the application holds. See `Outcome` for why the handoff waits
+      // for the visitor rather than happening here.
+      setOutcome({
+        kind: "approved",
+        clientName: request.client_name,
+        redirectUrl: res.redirect_url,
+      });
     } catch (err) {
       setSubmitting(false);
       errorToast(err instanceof Error ? err.message : "Could not complete the connection");
@@ -112,16 +124,17 @@ export function AuthorizePage() {
   }
 
   function deny() {
-    // Hand the application a standards-compliant refusal instead of stranding
-    // the browser here.
-    try {
-      const target = new URL(redirectUri);
-      target.searchParams.set("error", "access_denied");
-      if (state) target.searchParams.set("state", state);
-      window.location.assign(target.toString());
-    } catch {
-      navigate("/app/settings?tab=connected-apps");
+    // Hand the application a refusal instead of stranding the browser here.
+    const url = denialUrl(redirectUri, state);
+    if (!url) {
+      navigate(SETTINGS_URL);
+      return;
     }
+    setOutcome({
+      kind: "denied",
+      clientName: request?.client_name ?? "The application",
+      redirectUrl: url,
+    });
   }
 
   if (loading) {
@@ -141,7 +154,7 @@ export function AuthorizePage() {
         <p className="mb-4 text-sm text-muted">
           {failed ?? "This connection request is not valid."}
         </p>
-        <Button variant="secondary" onClick={() => navigate("/app/settings?tab=connected-apps")}>
+        <Button variant="secondary" onClick={() => navigate(SETTINGS_URL)}>
           Back to settings
         </Button>
       </Card>
@@ -210,6 +223,17 @@ export function AuthorizePage() {
         <LinkBreak size={12} aria-hidden="true" />
         Sending you to {request.redirect_uri}
       </p>
+
+      {/* The application's browser handoff. Rendered as a confirmation step
+          rather than performed on approval — see `McpConsentOutcomeDialog` for
+          why the visitor completes it. */}
+      {outcome && (
+        <McpConsentOutcomeDialog
+          outcome={outcome}
+          onReturn={() => window.location.assign(outcome.redirectUrl)}
+          onManage={() => navigate(SETTINGS_URL)}
+        />
+      )}
     </Card>
   );
 }

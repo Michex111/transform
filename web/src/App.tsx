@@ -165,7 +165,15 @@ export default function App() {
           <Route path="/app/developer/mcp-activity" element={<McpActivityPage />} />
           {/* The OAuth consent screen an AI application sends the browser to.
               Inside `ProtectedRoute` on purpose: the decision is made by a
-              signed-in user, and the API refuses to mint a code without one. */}
+              signed-in user, and the API refuses to mint a code without one.
+
+              The path stays a STRING LITERAL even though `lib/returnTo` exports
+              `MCP_AUTHORIZE_ROUTE` for it: `vite-plugins/spa-route-stubs`
+              extracts literals from this file to decide which paths get a
+              built HTML shell. A harness opens this route as a cold hard load,
+              so without the stub it 404s at the CDN. `returnTo.test.ts` pins
+              the constant and `spa-route-stubs.test.ts` pins this literal, so
+              the two can only drift together. */}
           <Route path="/app/authorize" element={<AuthorizePage />} />
         </Route>
       </Route>

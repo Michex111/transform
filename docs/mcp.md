@@ -60,6 +60,32 @@ authorization rule.
   a redirect URI must match a registered value exactly; a resource indicator
   that is not this server is an error.
 
+## Browser authorization flow
+
+An agent cannot approve itself, so the connection is finished by a human in a
+browser. Three parts of that are load-bearing:
+
+1. **The API redirects to the SPA consent route**, not to a page of its own
+   (`MCP_CONSENT_PATH`, default `/app/authorize`). The signed-in session is a
+   bearer token held by the SPA, so a top-level navigation to the API could not
+   carry it. The API stays authoritative: the page only relays a decision, and
+   every value is re-validated before a code is minted.
+2. **The request survives sign-in.** A harness opens the route in a fresh tab, so
+   the visitor is usually signed out and is bounced to `/login` first. The
+   authorization request has to be restored afterwards, and the sign-in page says
+   an application is waiting — a bare form gives no clue why it appeared. The
+   recorded destination is validated before use (`lib/returnTo`), because it is
+   used as a navigation target and arrives from whatever URL opened the tab.
+3. **The handoff is confirmed rather than silent.** Approving records the grant,
+   then shows a dialog naming the application with a control that sends the
+   browser to its `redirect_uri`. Redirecting immediately would drop the visitor
+   on the browser's connection-error page whenever the client's loopback listener
+   had stopped — turning a successful connection into what looks like a failure,
+   with nothing on screen saying the grant exists.
+
+The consent route must keep a built HTML shell, because a harness opens it as a
+cold hard load (see `vite-plugins/spa-route-stubs.ts`).
+
 ## Tools
 
 | Tool | Scope | Writes | Notes |

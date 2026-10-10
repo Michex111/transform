@@ -111,6 +111,45 @@ To confirm the path is live, compare `telemetry_ingest_written_total` before and
 after one authenticated call: it must rise *and* the row must appear on the
 Activity page. A rising counter alone is not evidence — that is exactly the trap.
 
+### The consent route is opened cold by a harness
+
+A harness opens `/app/authorize?...` in a **fresh browser tab**, normally with no
+session. Two things have to be true for that to work, and the second was broken:
+
+1. **The route needs a built HTML shell**, or the CDN 404s it before the SPA ever
+   loads. `vite-plugins/spa-route-stubs` writes one per route, and it discovers
+   routes by reading **string literals** out of `App.tsx` — so the path must stay
+   `path="/app/authorize"`. (Substituting the `MCP_AUTHORIZE_ROUTE` constant
+   silently removed the stub; `spa-route-stubs.test.ts` catches this.)
+2. **Signing in must return the visitor to the authorization request.**
+   `PublicOnlyRoute`, which wraps `/login`, redirected to a hardcoded
+   `/app/dashboard`. Because it fires the instant authentication succeeds, it beat
+   the sign-in page's own navigation to the recorded destination every time — so
+   the request was discarded and the connection could never complete. It now
+   navigates to the destination `ProtectedRoute` recorded, validated by
+   `lib/returnTo.safeReturnPath` (the value is a navigation target and arrives
+   from whatever URL opened the tab, so an absolute URL there would be an open
+   redirect).
+
+    This also silently affected Stripe's `/app/billing?credits=success` return and
+    every signed-out deep link.
+
+Symptom if this regresses: the agent says "authenticate in the browser", the
+visitor signs in, lands on the dashboard, and the agent waits until it times out.
+
+### After approval, the visitor completes the handoff
+
+Approving records the grant, then shows a dialog naming the application with a
+**Return to `<app>`** control that performs the redirect. The handoff is not
+automatic because the destination is usually a loopback port: if that listener
+has stopped, an automatic redirect replaces a successful connection with the
+browser's connection-error page. The dialog therefore states that the connection
+is already saved and tells the visitor to switch back themselves.
+
+The authorization code lives 5 minutes (`MCP_AUTHORIZATION_CODE_TTL_MINUTES`), so
+a visitor who leaves the dialog open for longer must reconnect; the grant itself
+is unaffected.
+
 ### Verifying a connection without a real agent
 
 The flow is `register → authorize → token → initialize → tools/call`. Consent can
