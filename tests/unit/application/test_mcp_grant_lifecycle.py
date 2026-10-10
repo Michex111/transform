@@ -24,6 +24,7 @@ from src.application.services.mcp_access_service import (
 )
 from src.domain.security.enitities.agent_grant import AgentGrant, AgentGrantStatus
 from src.domain.security.exceptions.exceptions import InvalidGrantTransition
+from src.domain.security.value_object.agent_access_scope import FolderAccess, HistoryScope
 from src.domain.security.value_object.agent_scope import AgentScope
 from src.infrastructure.adapters.repository.sql_mcp_repo import SQLMCPRepository
 from src.infrastructure.database.models import UserModel
@@ -350,5 +351,122 @@ def test_scoping_narrows_a_token_after_a_re_consent() -> None:
                 await _grant(service, user_id=account, scopes=(AgentScope.DOCUMENTS_READ,))
 
                 assert await service.load_access_token("wide-token") is None
+
+        asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
+# In-place binding edit (the method that must NOT reactivate a grant)
+# ---------------------------------------------------------------------------
+
+
+async def _update_binding(
+    store: SQLMCPRepository,
+    *,
+    grant_id: str,
+    user_id: int,
+    scopes: tuple[AgentScope, ...] = (AgentScope.DOCUMENTS_READ,),
+    folder_access: FolderAccess = FolderAccess.FOLDER,
+    folder_id: str | None = "folder-a",
+    history_scope: HistoryScope = HistoryScope.ALL,
+) -> AgentGrant | None:
+    return await store.update_grant_binding(
+        grant_id=grant_id,
+        user_id=user_id,
+        scopes=scopes,
+        folder_access=folder_access,
+        folder_id=folder_id,
+        history_scope=history_scope,
+    )
+
+
+def test_update_grant_binding_changes_only_the_binding_fields() -> None:
+    """The stored grant keeps its identity, lifecycle and timestamps."""
+
+    with sqlite_session_factory() as factory:
+
+        async def _run() -> None:
+            account = await _seed_user(factory, "binder")
+            async with factory() as session:
+                service = _service(session)
+                grant = await _grant(service, user_id=account)
+
+                updated = await _update_binding(
+                    _store(service), grant_id=grant.id, user_id=account
+                )
+
+            assert updated is not None
+            assert updated.scopes == (AgentScope.DOCUMENTS_READ,)
+            assert updated.folder_access is FolderAccess.FOLDER
+            assert updated.folder_id == "folder-a"
+            assert updated.history_scope is HistoryScope.ALL
+            # Everything else is exactly as it was.
+            assert updated.status is AgentGrantStatus.ACTIVE
+            assert updated.client_id == grant.client_id
+            assert updated.client_name == grant.client_name
+            assert updated.resource == grant.resource
+            assert updated.created_at == grant.created_at
+            assert updated.paused_at is None
+            assert updated.revoked_at is None
+
+        asyncio.run(_run())
+
+
+def test_update_grant_binding_keeps_a_paused_grant_paused() -> None:
+    """Editing a permission must not resume a suspended connection.
+
+    This is the exact bug that using ``upsert_grant`` for an edit would
+    introduce: it sets ``status = ACTIVE`` and clears ``paused_at``.
+    """
+
+    with sqlite_session_factory() as factory:
+
+        async def _run() -> None:
+            account = await _seed_user(factory, "still-paused")
+            async with factory() as session:
+                service = _service(session)
+                grant = await _grant(service, user_id=account)
+                paused = await service.pause_connection(account, grant.id)
+                assert paused is not None and paused.paused_at == NOW
+
+                updated = await _update_binding(
+                    _store(service), grant_id=grant.id, user_id=account
+                )
+                stored = await _store(service).get_grant(grant.id)
+
+            assert updated is not None
+            assert updated.status is AgentGrantStatus.PAUSED
+            assert updated.paused_at == NOW
+            assert stored is not None
+            assert stored.status is AgentGrantStatus.PAUSED
+            assert stored.paused_at == NOW
+            # The binding did change, so the update was not simply skipped.
+            assert stored.scopes == (AgentScope.DOCUMENTS_READ,)
+
+        asyncio.run(_run())
+
+
+def test_update_grant_binding_returns_none_for_a_foreign_grant() -> None:
+    with sqlite_session_factory() as factory:
+
+        async def _run() -> None:
+            alice = await _seed_user(factory, "owner")
+            bob = await _seed_user(factory, "intruder")
+            async with factory() as session:
+                service = _service(session)
+                grant = await _grant(service, user_id=alice)
+
+                result = await _update_binding(
+                    _store(service), grant_id=grant.id, user_id=bob
+                )
+                stored = await _store(service).get_grant(grant.id)
+
+            assert result is None
+            assert stored is not None
+            assert stored.user_id == alice
+            # Alice's binding was not touched by Bob's attempt.
+            assert stored.scopes == grant.scopes
+            assert stored.folder_access is FolderAccess.ALL
+            assert stored.folder_id is None
 
         asyncio.run(_run())

@@ -96,3 +96,21 @@ class ConnectionStateError(MCPAccessError):
 
     def __init__(self, description: str) -> None:
         super().__init__("invalid_request", description)
+
+
+class ConnectionEditError(MCPAccessError):
+    """An in-place edit of a connection was refused because it is not a valid state.
+
+    Two cases, both fixable by the user and both a 400 rather than a 404 (the
+    connection exists and is the caller's):
+
+    * removing **every** permission, which is a revocation rather than an edit;
+    * enabling an irreversible permission (``documents.delete``) without an
+      explicit confirmation.
+
+    ``error`` is ``invalid_request``: the request is well-formed but asks for a
+    state this server will not store.
+    """
+
+    def __init__(self, description: str) -> None:
+        super().__init__("invalid_request", description)

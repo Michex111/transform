@@ -1577,6 +1577,32 @@ describe("normalizeConnectedAppList", () => {
     expect(normalizeConnectedAppList(null).apps).toEqual([]);
     expect(normalizeConnectedAppList({ apps: "nope" }).apps).toEqual([]);
   });
+
+  it("carries the confinement fields, defaulting an older API to whole-Drive", () => {
+    const list = normalizeConnectedAppList({
+      apps: [
+        {
+          id: "g1",
+          folder_access: "FOLDER",
+          folder_id: "f1",
+          folder_name: "Reports",
+          history_scope: "ALL",
+        },
+        { id: "g2" },
+      ],
+    });
+
+    expect(list.apps[0].folder_access).toBe("FOLDER");
+    expect(list.apps[0].folder_id).toBe("f1");
+    expect(list.apps[0].folder_name).toBe("Reports");
+    expect(list.apps[0].history_scope).toBe("ALL");
+    // An API older than folder scoping sends neither field; reading it as FOLDER
+    // would trap the user on a picker that API never populated.
+    expect(list.apps[1].folder_access).toBe("ALL");
+    expect(list.apps[1].folder_id).toBeNull();
+    expect(list.apps[1].folder_name).toBeNull();
+    expect(list.apps[1].history_scope).toBe("AGENT");
+  });
 });
 
 describe("normalizeMcpConsent", () => {

@@ -19,6 +19,7 @@ from datetime import datetime
 from typing import Protocol
 
 from src.domain.security.enitities.agent_grant import AgentGrant, AgentGrantStatus
+from src.domain.security.value_object.agent_access_scope import FolderAccess, HistoryScope
 from src.domain.security.value_object.agent_scope import AgentScope
 
 
@@ -107,6 +108,34 @@ class MCPRepositoryPort(Protocol):
         connection, and refuses to move a revoked grant (revocation is terminal
         — regaining access needs a fresh consent). Returns ``None`` for a grant
         that does not exist or is not the caller's.
+        """
+        ...
+
+    async def update_grant_binding(
+        self,
+        *,
+        grant_id: str,
+        user_id: int,
+        scopes: tuple[AgentScope, ...],
+        folder_access: FolderAccess,
+        folder_id: str | None,
+        history_scope: HistoryScope,
+    ) -> AgentGrant | None:
+        """Edit an owned grant's binding fields **in place**.
+
+        Writes only ``scopes``, ``folder_access``, ``folder_id`` and
+        ``history_scope``. It deliberately does **not** touch ``status``,
+        ``paused_at`` or ``revoked_at``: editing a permission is not a
+        re-consent, so a paused application must stay paused. This is why it is
+        a distinct method and not a call to :meth:`upsert_grant`, which sets
+        ``status = ACTIVE`` and clears ``paused_at``/``revoked_at`` — using it
+        here would silently *resume* a paused application the moment any
+        unrelated permission was edited.
+
+        Scoped by ``user_id`` so a guessed grant id belonging to another
+        account is indistinguishable from one that does not exist. Returns
+        ``None`` when the grant is missing or not the caller's; commits on
+        success.
         """
         ...
 

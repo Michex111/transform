@@ -108,6 +108,35 @@ class ConnectedAppResponse(BaseModel):
     created_at: datetime | None = None
     last_used_at: datetime | None = None
     revoked_at: datetime | None = None
+    #: The connection's binding, so the Settings screen can show — and pre-fill
+    #: an edit with — which folder and how much history the agent may reach. The
+    #: wire values are the domain enums (imported above) so they cannot drift
+    #: from what the enforcement layer reads.
+    folder_access: FolderAccess = FolderAccess.ALL
+    folder_id: str | None = None
+    #: Display name of ``folder_id``, resolved when the response is built.
+    #: ``None`` for a whole-Drive binding, or when the folder no longer exists —
+    #: a folder deleted after consent must render as a missing name, never a 500.
+    folder_name: str | None = None
+    history_scope: HistoryScope = HistoryScope.AGENT
+
+
+class UpdateConnectedAppRequest(BaseModel):
+    """An in-place edit of one connection's permissions.
+
+    Unlike a consent approval, this never changes the connection's ``status``:
+    a paused connection stays paused. ``scopes`` is the full replacement set
+    (not a delta), so a removal is expressed by leaving a scope out; an empty
+    set is refused because removing every permission is a revoke, not an edit.
+    Adding ``documents.delete`` to a connection that did not already hold it
+    requires ``confirm_destructive=true``.
+    """
+
+    scopes: list[str] = Field(default_factory=list, max_length=16)
+    folder_access: FolderAccess = FolderAccess.ALL
+    folder_id: str | None = Field(default=None, max_length=64)
+    history_scope: HistoryScope = HistoryScope.AGENT
+    confirm_destructive: bool = False
 
 
 class ConnectedAppListResponse(BaseModel):

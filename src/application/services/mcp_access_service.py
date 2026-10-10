@@ -31,6 +31,7 @@ from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from src.application.exceptions.mcp_exceptions import (
+    ConnectionEditError,
     ConnectionStateError,
     GrantRevokedError,
     InvalidGrantError,
@@ -480,6 +481,99 @@ class MCPAccessService:
             client_id=grant.client_id,
         )
         return grant
+
+    async def update_connected_app(
+        self,
+        *,
+        user_id: int,
+        grant_id: str,
+        scopes: Iterable[str],
+        folder_access: FolderAccess,
+        folder_id: str | None,
+        history_scope: HistoryScope,
+        confirm_destructive: bool = False,
+    ) -> AgentGrant | None:
+        """Edit an existing connection's permissions in place.
+
+        Unlike :meth:`approve`, this is **not** a re-consent and therefore never
+        moves the grant's lifecycle: ``status``, ``paused_at`` and
+        ``revoked_at`` are left exactly as they were. A paused connection stays
+        paused. That is the whole reason this delegates to
+        :meth:`MCPRepositoryPort.update_grant_binding` rather than reusing
+        :meth:`~MCPRepositoryPort.upsert_grant`, which reactivates the row.
+
+        Returns ``None`` when the grant does not exist or belongs to somebody
+        else, so the caller cannot use this to probe for another account's ids —
+        the same contract as :meth:`revoke_connection`. A **revoked** grant is
+        refused with :class:`ConnectionStateError`: revocation is terminal and
+        regaining access requires a fresh consent.
+
+        Scope handling fails closed, twice over:
+
+        * an unrecognised scope is **refused**, not dropped — ``normalize_scopes``
+          silently discards unknown values, so that drop is detected here and
+          turned into an error rather than persisted as a silently-narrowed set;
+        * an empty result is refused outright: a connection with no permissions
+          is a revocation, which is what the revoke endpoint is for, and storing
+          one would leave a confusing "connected but useless" row.
+
+        Adding ``documents.delete`` to a grant that did not already hold it
+        requires ``confirm_destructive=True``, because it is irreversible.
+        Removing it never does.
+        """
+        grant = await self._repository.get_grant(grant_id)
+        if grant is None or grant.user_id != user_id:
+            # Not-found and not-owned are the same answer, on purpose: a
+            # distinct 403 would confirm that somebody else's grant id exists.
+            return None
+        if grant.status is AgentGrantStatus.REVOKED:
+            raise ConnectionStateError(
+                "A revoked connection cannot be edited. "
+                "Reconnect the application to grant access again."
+            )
+
+        requested = [value.strip() for value in scopes]
+        unknown = [
+            value for value in requested if value and value not in _KNOWN_SCOPE_VALUES
+        ]
+        if unknown:
+            raise InvalidScopeError(unknown)
+        normalized = normalize_scopes(requested)
+        if not normalized:
+            raise ConnectionEditError(
+                "A connection must keep at least one permission. "
+                "To remove access entirely, revoke the connection instead."
+            )
+        if (
+            AgentScope.DOCUMENTS_DELETE in normalized
+            and AgentScope.DOCUMENTS_DELETE not in set(grant.scopes)
+            and not confirm_destructive
+        ):
+            raise ConnectionEditError(
+                "Allowing the agent to permanently delete your files is irreversible. "
+                "Re-send the change with confirm_destructive=true to allow it."
+            )
+
+        updated = await self._repository.update_grant_binding(
+            grant_id=grant_id,
+            user_id=user_id,
+            scopes=normalized,
+            folder_access=folder_access,
+            folder_id=folder_id,
+            history_scope=history_scope,
+        )
+        if updated is None:
+            # The row vanished or changed hands between the read above and the
+            # write; report it exactly like not-found rather than leaking it.
+            return None
+        log_connection_control(
+            "update_permissions",
+            str(user_id),
+            updated.id,
+            success=True,
+            client_id=updated.client_id,
+        )
+        return updated
 
     # ------------------------------------------------------------------
     # Rules

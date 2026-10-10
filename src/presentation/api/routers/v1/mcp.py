@@ -36,9 +36,10 @@ from src.application.exceptions.file_system_exceptions import (
     FileSystemError,
     FolderNameConflictError,
 )
-from src.application.exceptions.mcp_exceptions import MCPAccessError
+from src.application.exceptions.mcp_exceptions import ConnectionStateError, MCPAccessError
 from src.application.services.file_service import FileService
 from src.application.services.mcp_access_service import MCPAccessService
+from src.domain.security.enitities.agent_grant import AgentGrant
 from src.domain.security.value_object.agent_access_scope import FolderAccess
 from src.domain.security.value_object.agent_scope import (
     DESTRUCTIVE_SCOPES,
@@ -65,6 +66,7 @@ from src.presentation.schemas.mcp import (
     FolderAccessEntry,
     FolderAccessResponse,
     ScopeDescription,
+    UpdateConnectedAppRequest,
 )
 
 #: Discovery endpoints are unauthenticated by necessity (a client must be able
@@ -389,27 +391,155 @@ async def list_active_folder_access(
 # ---------------------------------------------------------------------------
 
 
+async def _resolve_folder_name(
+    file_service: FileService, user_id: int, folder_id: str | None
+) -> str | None:
+    """The display name of a bound folder, or ``None`` when it cannot be read.
+
+    A grant may legitimately outlive its folder — deleting a folder does not
+    delete the consent — so a missing folder is reported as a missing *name*
+    rather than an error: the Connected-apps list must still render the
+    connection. Enforcement is what denies the unusable binding, not this.
+    """
+    if not folder_id:
+        return None
+    try:
+        folder = await file_service.get_folder(user_id, folder_id)
+    except FileSystemError:
+        return None
+    return folder.name
+
+
+def _connected_app_response(
+    grant: AgentGrant, *, folder_name: str | None
+) -> ConnectedAppResponse:
+    """Render a grant for the management API, populating the binding fields."""
+    return ConnectedAppResponse(
+        id=grant.id,
+        client_id=grant.client_id,
+        client_name=grant.client_name,
+        scopes=[scope.value for scope in grant.scopes],
+        status=str(grant.status),
+        created_at=grant.created_at,
+        last_used_at=grant.last_used_at,
+        revoked_at=grant.revoked_at,
+        folder_access=grant.folder_access,
+        folder_id=grant.folder_id,
+        folder_name=folder_name,
+        history_scope=grant.history_scope,
+    )
+
+
 @router.get("/connected-apps", response_model=ConnectedAppListResponse)
 async def list_connected_apps(
-    current_user: CurrentUser, access: MCPService
+    current_user: CurrentUser, access: MCPService, file_service: FileServiceDep
 ) -> ConnectedAppListResponse:
-    """List the applications the user has connected, active and revoked."""
-    grants = await access.list_connections(int(current_user.id))
-    return ConnectedAppListResponse(
-        apps=[
-            ConnectedAppResponse(
-                id=grant.id,
-                client_id=grant.client_id,
-                client_name=grant.client_name,
-                scopes=[scope.value for scope in grant.scopes],
-                status=str(grant.status),
-                created_at=grant.created_at,
-                last_used_at=grant.last_used_at,
-                revoked_at=grant.revoked_at,
+    """List the applications the user has connected, active and revoked.
+
+    Each entry carries the connection's folder binding and history scope, so the
+    Settings screen can display them and pre-fill an in-place edit. The bound
+    folder's display name is resolved here; a folder that no longer exists is
+    reported as ``folder_name: null`` rather than failing the listing.
+    """
+    user_id = int(current_user.id)
+    grants = await access.list_connections(user_id)
+    apps: list[ConnectedAppResponse] = []
+    for grant in grants:
+        folder_name = await _resolve_folder_name(file_service, user_id, grant.folder_id)
+        apps.append(_connected_app_response(grant, folder_name=folder_name))
+    return ConnectedAppListResponse(apps=apps)
+
+
+@router.patch("/connected-apps/{grant_id}", response_model=ConnectedAppResponse)
+async def update_connected_app(
+    grant_id: str,
+    body: UpdateConnectedAppRequest,
+    current_user: CurrentUser,
+    access: MCPService,
+    file_service: FileServiceDep,
+) -> ConnectedAppResponse:
+    """Edit one application's permissions in place, without re-consenting.
+
+    Replaces the connection's scope set, folder binding and history scope in a
+    single call. Unlike the OAuth consent flow it never restarts a token
+    exchange, and it never changes the connection's **status** — editing a
+    permission is not the same act as resuming, so a paused connection stays
+    paused, and a revoked connection cannot be edited at all (409).
+
+    What the UI should tell the user about the agent's behaviour:
+
+    * **Narrowing takes effect on the agent's next call.** Every MCP request
+      re-reads the grant and ``MCPAccessService.load_access_token`` refuses any
+      token whose scopes are no longer a subset of the grant's — so the agent's
+      existing token stops working immediately and it must re-authorize.
+    * **Widening does not retroactively upgrade an already-issued token.** The
+      agent gains a newly-added permission when it next authorizes (or refreshes
+      its token), not before.
+    * Editing never changes whether the connection is paused or revoked.
+
+    The folder binding is resolved against the user's own folders before the
+    service is called — the same rule the consent approval follows — so a folder
+    id the caller does not own is refused rather than stored, and a whole-Drive
+    edit discards any supplied folder id.
+    """
+    user_id = int(current_user.id)
+
+    # Resolve the folder in the router (it owns file I/O), so the service only
+    # ever receives an id that is provably the caller's.
+    resolved_folder_id: str | None = None
+    folder_name: str | None = None
+    if body.folder_access is FolderAccess.FOLDER:
+        if not body.folder_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "Choose a folder for this connection, "
+                    "or allow access to your whole Drive."
+                ),
             )
-            for grant in grants
-        ]
-    )
+        try:
+            folder = await file_service.get_folder(user_id, body.folder_id)
+        except FileSystemError as exc:
+            # get_folder reports a missing folder and another user's folder the
+            # same way, so this is not an ownership oracle. Surfaced as a 400
+            # with a fixable sentence rather than the error's own 404: the
+            # folder field is what the user must correct, not the connection.
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "That folder was not found in your Drive. "
+                    "Choose one of your own folders."
+                ),
+            ) from exc
+        resolved_folder_id = folder.id
+        folder_name = folder.name
+    # Whole-Drive: any supplied folder id is discarded, so a request cannot
+    # claim unrestricted access while binding a folder.
+
+    try:
+        grant = await access.update_connected_app(
+            user_id=user_id,
+            grant_id=grant_id,
+            scopes=body.scopes,
+            folder_access=body.folder_access,
+            folder_id=resolved_folder_id,
+            history_scope=body.history_scope,
+            confirm_destructive=body.confirm_destructive,
+        )
+    except ConnectionStateError as exc:
+        # A revoked connection is the caller's but terminal — 409, not 404.
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=exc.description) from exc
+    except MCPAccessError as exc:
+        # Empty/unknown scope sets and an unconfirmed destructive addition are
+        # all requests the user can correct, so they are 400s.
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.description) from exc
+
+    if grant is None:
+        # Not-found and not-owned are the same answer, on purpose: a distinct
+        # 403 would confirm that somebody else's grant id exists.
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Application not found")
+
+    return _connected_app_response(grant, folder_name=folder_name)
 
 
 @router.delete("/connected-apps/{grant_id}", status_code=status.HTTP_204_NO_CONTENT)

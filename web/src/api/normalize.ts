@@ -31,6 +31,7 @@ import type {
   AssistantConversation,
   AssistantConversationDetailResponse,
   ConnectedAppListResponse,
+  ConnectedAppResponse,
   McpConsentApprovalResponse,
   McpConsentRequestResponse,
   McpFolderAccess,
@@ -1313,6 +1314,35 @@ export function normalizeAssistantStreamEvent(
  * ------------------------------------------------------------------ */
 
 /**
+ * One connected-application row.
+ *
+ * Every field is coerced because the settings card renders the row directly:
+ * `scopes` is mapped over, `client_name` is printed, and — since the in-place
+ * permissions editor became available — `folder_access`/`history_scope` decide
+ * which badges show. A malformed body must render a harmless row rather than
+ * take the settings page down.
+ */
+export function normalizeConnectedApp(value: unknown): ConnectedAppResponse {
+  const r = asObject(value)
+  return {
+    id: asString(r.id),
+    client_id: asString(r.client_id),
+    client_name: asString(r.client_name),
+    scopes: asStringArray(r.scopes),
+    status: asString(r.status),
+    created_at: asNullableString(r.created_at),
+    last_used_at: asNullableString(r.last_used_at),
+    revoked_at: asNullableString(r.revoked_at),
+    folder_access: asFolderAccess(r.folder_access),
+    folder_id: asNullableString(r.folder_id) || null,
+    // `|| null` folds "" into null too: an empty name is "no name to show",
+    // never a badge reading an empty string.
+    folder_name: asNullableString(r.folder_name) || null,
+    history_scope: asHistoryScope(r.history_scope),
+  }
+}
+
+/**
  * The connected-applications list.
  *
  * `scopes` must always be an array because the card maps over it to render the
@@ -1322,21 +1352,7 @@ export function normalizeAssistantStreamEvent(
  */
 export function normalizeConnectedAppList(value: unknown): ConnectedAppListResponse {
   const o = asObject(value)
-  return {
-    apps: asArray<unknown>(o.apps).map((row) => {
-      const r = asObject(row)
-      return {
-        id: asString(r.id),
-        client_id: asString(r.client_id),
-        client_name: asString(r.client_name),
-        scopes: asStringArray(r.scopes),
-        status: asString(r.status),
-        created_at: asNullableString(r.created_at),
-        last_used_at: asNullableString(r.last_used_at),
-        revoked_at: asNullableString(r.revoked_at),
-      }
-    }),
-  }
+  return { apps: asArray<unknown>(o.apps).map(normalizeConnectedApp) }
 }
 
 /** The pending authorization request shown on the consent screen. */

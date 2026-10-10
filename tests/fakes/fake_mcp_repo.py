@@ -19,6 +19,8 @@ from src.application.ports.mcp_oauth_port import (
 )
 from src.domain.security.enitities.agent_grant import AgentGrant, AgentGrantStatus
 from src.domain.security.exceptions.exceptions import InvalidGrantTransition
+from src.domain.security.value_object.agent_access_scope import FolderAccess, HistoryScope
+from src.domain.security.value_object.agent_scope import AgentScope
 
 
 class FakeMCPRepository:
@@ -105,6 +107,34 @@ class FakeMCPRepository:
             grant.pause(now=now)
         else:
             grant.resume()
+        return grant
+
+    async def update_grant_binding(
+        self,
+        *,
+        grant_id: str,
+        user_id: int,
+        scopes: tuple[AgentScope, ...],
+        folder_access: FolderAccess,
+        folder_id: str | None,
+        history_scope: HistoryScope,
+    ) -> AgentGrant | None:
+        """Edit a grant's binding in place, mirroring the SQL adapter.
+
+        Replaces **only** ``scopes``, ``folder_access``, ``folder_id`` and
+        ``history_scope``; ``status``, ``paused_at``, ``revoked_at``,
+        ``created_at`` and the client fields are untouched. In particular a
+        PAUSED grant stays PAUSED — this is *not* ``upsert_grant``, which
+        reactivates. Scoped by ``user_id``: a foreign or missing grant returns
+        ``None``.
+        """
+        grant = self.grants.get(grant_id)
+        if grant is None or grant.user_id != user_id:
+            return None
+        grant.scopes = scopes
+        grant.folder_access = folder_access
+        grant.folder_id = folder_id
+        grant.history_scope = history_scope
         return grant
 
     # -- codes --------------------------------------------------------

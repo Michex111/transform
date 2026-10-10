@@ -28,10 +28,12 @@ from src.application.ports.mcp_oauth_port import (
 from src.domain.security.enitities.agent_grant import AgentGrant, AgentGrantStatus
 from src.domain.security.exceptions.exceptions import InvalidGrantTransition
 from src.domain.security.value_object.agent_access_scope import (
+    FolderAccess,
+    HistoryScope,
     coerce_folder_access,
     coerce_history_scope,
 )
-from src.domain.security.value_object.agent_scope import normalize_scopes
+from src.domain.security.value_object.agent_scope import AgentScope, normalize_scopes
 from src.infrastructure.database.models import (
     MCPAgentGrantModel,
     MCPAuthorizationCodeModel,
@@ -245,6 +247,48 @@ class SQLMCPRepository:
             return self._to_grant(row)
         row.status = status.value
         row.paused_at = now if status is AgentGrantStatus.PAUSED else None
+        await self._session.commit()
+        return self._to_grant(row)
+
+    async def update_grant_binding(
+        self,
+        *,
+        grant_id: str,
+        user_id: int,
+        scopes: tuple[AgentScope, ...],
+        folder_access: FolderAccess,
+        folder_id: str | None,
+        history_scope: HistoryScope,
+    ) -> AgentGrant | None:
+        """Edit a grant's binding fields in place, without re-consenting.
+
+        Touches **only** ``scopes``, ``folder_access``, ``folder_id`` and
+        ``history_scope``. ``status``, ``paused_at``, ``revoked_at``,
+        ``created_at``, ``client_id``, ``client_name``, ``resource`` and
+        ``last_used_at`` are left exactly as stored.
+
+        Deliberately separate from :meth:`upsert_grant`: that method reactivates
+        the row (``status = ACTIVE``, ``paused_at``/``revoked_at`` cleared), so
+        using it to *edit permissions* would silently resume a paused
+        application — the exact regression this method exists to prevent.
+
+        Scoped by ``user_id`` in the same statement that loads the row, so a
+        guessed grant id belonging to another account is indistinguishable from
+        one that does not exist. Returns ``None`` for a foreign/missing grant.
+        """
+        result = await self._session.execute(
+            select(MCPAgentGrantModel).where(
+                MCPAgentGrantModel.id == grant_id,
+                MCPAgentGrantModel.user_id == user_id,
+            )
+        )
+        row = result.scalars().first()
+        if row is None:
+            return None
+        row.scopes = " ".join(scope.value for scope in scopes)
+        row.folder_access = folder_access.value
+        row.folder_id = folder_id
+        row.history_scope = history_scope.value
         await self._session.commit()
         return self._to_grant(row)
 

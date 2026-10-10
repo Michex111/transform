@@ -902,3 +902,284 @@ def test_a_tampered_approval_cannot_widen_scopes_even_when_it_binds_a_folder(tmp
         # The legitimate folder choice is still honoured.
         body = _get_consent(env, token=token, client_info=client_info).json()
         assert body["folder_id"] == folder
+
+
+# ---------------------------------------------------------------------------
+# In-place permission editing (PATCH /connected-apps/{id})
+# ---------------------------------------------------------------------------
+
+
+def _authorize_app(
+    env: MCPEnv, *, username: str = "ada"
+) -> tuple[str, str, dict[str, str]]:
+    """Approve one application; return (agent token, grant id, session headers)."""
+    _client, agent_token = _authorize_and_redeem(env, username=username)
+    session = {"Authorization": f"Bearer {env.sign_in(username)}"}
+    apps = env.client.get("/api/v1/mcp/connected-apps", headers=session).json()["apps"]
+    assert len(apps) == 1, apps
+    return agent_token, str(apps[0]["id"]), session
+
+
+def _patch_app(
+    env: MCPEnv, grant_id: str, session: dict[str, str], **body: Any
+) -> Any:
+    return env.client.patch(
+        f"/api/v1/mcp/connected-apps/{grant_id}", json=body, headers=session
+    )
+
+
+def test_patch_edits_scopes_folder_and_history_in_place(tmp_path) -> None:
+    with mcp_env(str(tmp_path / "mcp.db")) as env:
+        user = env.seed_user()
+        folder = env.add_folder(user, "folder-a", "Reports")
+        _token, grant_id, session = _authorize_app(env)
+
+        response = _patch_app(
+            env,
+            grant_id,
+            session,
+            scopes=["documents.read", "documents.write"],
+            folder_access="FOLDER",
+            folder_id=folder,
+            history_scope="ALL",
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["scopes"] == ["documents.read", "documents.write"]
+        assert body["folder_access"] == "FOLDER"
+        assert body["folder_id"] == folder
+        assert body["folder_name"] == "Reports"
+        assert body["history_scope"] == "ALL"
+        assert body["status"] == "ACTIVE"
+
+        # The list endpoint reports the same stored truth.
+        listed = env.client.get(
+            "/api/v1/mcp/connected-apps", headers=session
+        ).json()["apps"][0]
+        assert listed["scopes"] == ["documents.read", "documents.write"]
+        assert listed["folder_name"] == "Reports"
+        assert listed["history_scope"] == "ALL"
+
+
+def test_patch_a_revoked_connection_is_a_conflict(tmp_path) -> None:
+    with mcp_env(str(tmp_path / "mcp.db")) as env:
+        env.seed_user()
+        _token, grant_id, session = _authorize_app(env)
+        revoked = env.client.delete(
+            f"/api/v1/mcp/connected-apps/{grant_id}", headers=session
+        )
+        assert revoked.status_code == 204
+
+        response = _patch_app(
+            env,
+            grant_id,
+            session,
+            scopes=["documents.read"],
+            folder_access="ALL",
+            history_scope="AGENT",
+        )
+        assert response.status_code == 409, response.text
+
+        # The revoked grant is unchanged.
+        listed = env.client.get(
+            "/api/v1/mcp/connected-apps", headers=session
+        ).json()["apps"][0]
+        assert listed["status"] == "REVOKED"
+        assert listed["scopes"] == ["documents.read", "documents.convert"]
+
+
+def test_patch_another_users_connection_is_not_found(tmp_path) -> None:
+    with mcp_env(str(tmp_path / "mcp.db")) as env:
+        env.seed_user(username="alice", email="alice@example.com")
+        env.seed_user(username="bob", email="bob@example.com")
+        _alice_token, alice_grant, _alice_session = _authorize_app(env, username="alice")
+        bob_session = {"Authorization": f"Bearer {env.sign_in('bob')}"}
+
+        response = _patch_app(
+            env,
+            alice_grant,
+            bob_session,
+            scopes=["documents.read"],
+            folder_access="ALL",
+            history_scope="AGENT",
+        )
+        assert response.status_code == 404, response.text
+
+        alice_session = {"Authorization": f"Bearer {env.sign_in('alice')}"}
+        listed = env.client.get(
+            "/api/v1/mcp/connected-apps", headers=alice_session
+        ).json()["apps"][0]
+        assert listed["scopes"] == ["documents.read", "documents.convert"]
+
+
+def test_patch_empty_scope_set_is_refused(tmp_path) -> None:
+    with mcp_env(str(tmp_path / "mcp.db")) as env:
+        env.seed_user()
+        _token, grant_id, session = _authorize_app(env)
+        response = _patch_app(
+            env,
+            grant_id,
+            session,
+            scopes=[],
+            folder_access="ALL",
+            history_scope="AGENT",
+        )
+        assert response.status_code == 400, response.text
+        assert "at least one permission" in response.json()["detail"]
+
+
+def test_patch_an_unknown_scope_is_refused_not_dropped(tmp_path) -> None:
+    with mcp_env(str(tmp_path / "mcp.db")) as env:
+        env.seed_user()
+        _token, grant_id, session = _authorize_app(env)
+        response = _patch_app(
+            env,
+            grant_id,
+            session,
+            scopes=["documents.read", "documents.admin"],
+            folder_access="ALL",
+            history_scope="AGENT",
+        )
+        assert response.status_code == 400, response.text
+        assert "documents.admin" in response.json()["detail"]
+
+        # The valid subset was NOT silently persisted.
+        listed = env.client.get(
+            "/api/v1/mcp/connected-apps", headers=session
+        ).json()["apps"][0]
+        assert listed["scopes"] == ["documents.read", "documents.convert"]
+
+
+def test_patch_folder_access_without_a_folder_is_refused(tmp_path) -> None:
+    with mcp_env(str(tmp_path / "mcp.db")) as env:
+        env.seed_user()
+        _token, grant_id, session = _authorize_app(env)
+        response = _patch_app(
+            env,
+            grant_id,
+            session,
+            scopes=["documents.read"],
+            folder_access="FOLDER",
+            history_scope="AGENT",
+        )
+        assert response.status_code == 400, response.text
+        assert "whole Drive" in response.json()["detail"]
+
+
+def test_patch_with_another_users_folder_is_refused(tmp_path) -> None:
+    with mcp_env(str(tmp_path / "mcp.db")) as env:
+        alice = env.seed_user(username="alice", email="alice@example.com")
+        env.seed_user(username="bob", email="bob@example.com")
+        alice_folder = env.add_folder(alice, "alice-folder", "Alice Only")
+        _token, grant_id, bob_session = _authorize_app(env, username="bob")
+
+        response = _patch_app(
+            env,
+            grant_id,
+            bob_session,
+            scopes=["documents.read"],
+            folder_access="FOLDER",
+            folder_id=alice_folder,
+            history_scope="AGENT",
+        )
+        assert response.status_code == 400, response.text
+        assert "your own folders" in response.json()["detail"]
+
+        # Bob's binding was not changed to Alice's folder.
+        listed = env.client.get(
+            "/api/v1/mcp/connected-apps", headers=bob_session
+        ).json()["apps"][0]
+        assert listed["folder_id"] is None
+
+
+def test_patch_whole_drive_ignores_a_supplied_folder(tmp_path) -> None:
+    with mcp_env(str(tmp_path / "mcp.db")) as env:
+        user = env.seed_user()
+        folder = env.add_folder(user, "folder-a", "Reports")
+        _token, grant_id, session = _authorize_app(env)
+
+        response = _patch_app(
+            env,
+            grant_id,
+            session,
+            scopes=["documents.read"],
+            folder_access="ALL",
+            folder_id=folder,
+            history_scope="AGENT",
+        )
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["folder_access"] == "ALL"
+        assert body["folder_id"] is None
+        assert body["folder_name"] is None
+
+
+def test_patch_adding_delete_requires_confirmation(tmp_path) -> None:
+    with mcp_env(str(tmp_path / "mcp.db")) as env:
+        env.seed_user()
+        _token, grant_id, session = _authorize_app(env)
+
+        without = _patch_app(
+            env,
+            grant_id,
+            session,
+            scopes=["documents.read", "documents.convert", "documents.delete"],
+            folder_access="ALL",
+            history_scope="AGENT",
+        )
+        assert without.status_code == 400, without.text
+        assert "confirm_destructive" in without.json()["detail"]
+
+        with_confirm = _patch_app(
+            env,
+            grant_id,
+            session,
+            scopes=["documents.read", "documents.convert", "documents.delete"],
+            folder_access="ALL",
+            history_scope="AGENT",
+            confirm_destructive=True,
+        )
+        assert with_confirm.status_code == 200, with_confirm.text
+        assert "documents.delete" in with_confirm.json()["scopes"]
+
+        # Removing it never needs confirmation.
+        removed = _patch_app(
+            env,
+            grant_id,
+            session,
+            scopes=["documents.read", "documents.convert"],
+            folder_access="ALL",
+            history_scope="AGENT",
+        )
+        assert removed.status_code == 200, removed.text
+        assert "documents.delete" not in removed.json()["scopes"]
+
+
+def test_patch_narrowing_stops_an_already_issued_agent_token(tmp_path) -> None:
+    """Narrowing bites on the agent's next call, as the settings UI claims."""
+
+    with mcp_env(str(tmp_path / "mcp.db")) as env:
+        user = env.seed_user()
+        env.add_file(user, "11111111-1111-1111-1111-111111111111", "resume.docx")
+        agent_token, grant_id, session = _authorize_app(env)
+
+        # The agent works with its read+convert token…
+        assert env.call_tool(agent_token, "list_files", {})["ok"] is True
+
+        # …the user narrows it to read only…
+        response = _patch_app(
+            env,
+            grant_id,
+            session,
+            scopes=["documents.read"],
+            folder_access="ALL",
+            history_scope="AGENT",
+        )
+        assert response.status_code == 200, response.text
+
+        # …and the very next call is refused: the token now exceeds its consent.
+        after = env.mcp_post(
+            {"jsonrpc": "2.0", "id": 9, "method": "tools/list"}, token=agent_token
+        )
+        assert after.status_code == 401, after.text
+

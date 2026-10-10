@@ -1,22 +1,21 @@
-import { useEffect, useState } from "react";
-import { Plugs, PlugsConnected, Trash } from "@phosphor-icons/react";
+import { useEffect, useRef, useState } from "react";
+import { PlugsConnected } from "@phosphor-icons/react";
 import { api } from "@/api/client";
 import { useToast } from "@/auth/ToastContext";
-import { Badge, Button, Card, Skeleton } from "@/components/ui";
+import { Button, Card, Skeleton } from "@/components/ui";
 import { Modal } from "@/components/Modal";
-import type { ConnectedAppResponse } from "@/api/types";
-
-/** Human wording for a scope, so the row does not print a raw identifier. */
-const SCOPE_LABELS: Record<string, string> = {
-  "documents.read": "Read files",
-  "documents.convert": "Convert",
-  "documents.write": "Save files",
-  "documents.delete": "Delete files",
-};
-
-function scopeLabel(scope: string): string {
-  return SCOPE_LABELS[scope] ?? scope;
-}
+import { ConnectedAppRow } from "@/pages/app/settings/ConnectedAppRow";
+import { ConnectedAppPermissionsEditor } from "@/pages/app/settings/ConnectedAppPermissionsEditor";
+import type {
+  ConnectedAppResponse,
+  McpFolderOption,
+  UpdateConnectedAppRequest,
+} from "@/api/types";
+import {
+  describeUpdateError,
+  initialPermissionState,
+  type ConnectedAppPermissionState,
+} from "@/lib/connectedAppPermissions";
 
 /**
  * The connected AI applications card.
@@ -35,6 +34,16 @@ export function ConnectedAppsSection() {
   const [apps, setApps] = useState<ConnectedAppResponse[]>([]);
   const [loading, setLoading] = useState(true);
   const [revokeTarget, setRevokeTarget] = useState<ConnectedAppResponse | null>(null);
+  // The connection being edited, kept together with the selection in its dialog
+  // so closing the dialog cannot leave a stale selection behind.
+  const [editTarget, setEditTarget] = useState<ConnectedAppResponse | null>(null);
+  const [editState, setEditState] = useState<ConnectedAppPermissionState | null>(null);
+  const [folders, setFolders] = useState<McpFolderOption[]>([]);
+  const [foldersLoading, setFoldersLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  // Folders are only needed once the editor opens, so they are fetched lazily
+  // and only once.
+  const foldersRequested = useRef(false);
 
   useEffect(() => {
     let active = true;
@@ -51,18 +60,70 @@ export function ConnectedAppsSection() {
     };
   }, []);
 
+  async function refreshApps() {
+    const list = await api.listConnectedApps();
+    setApps(list.apps);
+  }
+
+  /**
+   * Load the folder list for the picker, once.
+   *
+   * Fail-soft: if it cannot be loaded the picker stays empty and the user can
+   * still keep "All folders"; only switching to "one folder" is blocked, with
+   * the validation message explaining why.
+   */
+  function ensureFolders() {
+    if (foldersRequested.current) return;
+    foldersRequested.current = true;
+    setFoldersLoading(true);
+    api
+      .listFolders()
+      .then((res) => setFolders(res.folders.map((f) => ({ folder_id: f.id, name: f.name }))))
+      .catch(() => {
+        /* the picker simply stays empty */
+      })
+      .finally(() => setFoldersLoading(false));
+  }
+
+  function openEditor(app: ConnectedAppResponse) {
+    setEditTarget(app);
+    setEditState(initialPermissionState(app));
+    ensureFolders();
+  }
+
+  function closeEditor() {
+    setEditTarget(null);
+    setEditState(null);
+  }
+
   async function handleRevoke() {
     if (!revokeTarget) return;
     const id = revokeTarget.id;
     try {
       await api.revokeConnectedApp(id);
-      const list = await api.listConnectedApps();
-      setApps(list.apps);
+      await refreshApps();
       success("Access revoked");
     } catch (err) {
       error(err instanceof Error ? err.message : "Could not revoke access");
     } finally {
       setRevokeTarget(null);
+    }
+  }
+
+  async function handleSave(body: UpdateConnectedAppRequest) {
+    if (!editTarget) return;
+    setSaving(true);
+    try {
+      await api.updateConnectedApp(editTarget.id, body);
+      await refreshApps();
+      success("Permissions updated");
+      closeEditor();
+    } catch (err) {
+      // Keep the dialog open with the user's input intact, and explain the
+      // failure — the API's own wording where it has one.
+      error(describeUpdateError(err));
+    } finally {
+      setSaving(false);
     }
   }
 
@@ -98,52 +159,14 @@ export function ConnectedAppsSection() {
           <p className="text-sm text-muted">No applications are connected.</p>
         ) : (
           <ul className="divide-y divide-outline">
-            {[...active, ...paused, ...revoked].map((app) => {
-              const isRevoked = app.status === "REVOKED";
-              const isPaused = app.status === "PAUSED";
-              return (
-                <li key={app.id} className="flex items-start gap-3 py-3">
-                  <Plugs
-                    size={16}
-                    className={`mt-1 shrink-0 ${
-                      isRevoked ? "text-muted" : isPaused ? "text-warning" : "text-success"
-                    }`}
-                    aria-hidden="true"
-                  />
-                  <div className="min-w-0 flex-1">
-                    <p className="truncate text-sm text-on-background">{app.client_name}</p>
-                    <div className="mt-1 flex flex-wrap gap-1">
-                      {app.scopes.map((scope) => (
-                        <Badge key={scope}>{scopeLabel(scope)}</Badge>
-                      ))}
-                      {isPaused && <Badge>Paused</Badge>}
-                      {isRevoked && <Badge>Revoked</Badge>}
-                    </div>
-                    <p className="mt-1 text-xs text-muted">
-                      {isRevoked
-                        ? "Access revoked"
-                        : isPaused
-                          ? "Paused — requests from this application are refused"
-                          : app.last_used_at
-                            ? `Last used ${new Date(app.last_used_at).toLocaleDateString()}`
-                            : "Not used yet"}
-                    </p>
-                  </div>
-                  {!isRevoked && (
-                    <button
-                      type="button"
-                      onClick={() => setRevokeTarget(app)}
-                      // 44px on touch, compact on a mouse — the icon alone was
-                      // a 16px hit area on a phone.
-                      className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-muted hover:text-error pointer-fine:h-8 pointer-fine:w-8"
-                      aria-label={`Revoke access for ${app.client_name}`}
-                    >
-                      <Trash size={16} />
-                    </button>
-                  )}
-                </li>
-              );
-            })}
+            {[...active, ...paused, ...revoked].map((app) => (
+              <ConnectedAppRow
+                key={app.id}
+                app={app}
+                onEdit={openEditor}
+                onRevoke={setRevokeTarget}
+              />
+            ))}
           </ul>
         )}
       </Card>
@@ -166,6 +189,29 @@ export function ConnectedAppsSection() {
             Revoke access
           </Button>
         </div>
+      </Modal>
+
+      <Modal
+        open={editTarget !== null}
+        onClose={() => {
+          // Don't let the backdrop or Escape drop the dialog mid-save.
+          if (!saving) closeEditor();
+        }}
+        title={editTarget ? `Edit ${editTarget.client_name} permissions` : "Edit permissions"}
+        maxWidth="max-w-lg"
+      >
+        {editTarget && editState && (
+          <ConnectedAppPermissionsEditor
+            app={editTarget}
+            state={editState}
+            onChange={setEditState}
+            folders={folders}
+            foldersLoading={foldersLoading}
+            saving={saving}
+            onSave={handleSave}
+            onClose={closeEditor}
+          />
+        )}
       </Modal>
     </>
   );

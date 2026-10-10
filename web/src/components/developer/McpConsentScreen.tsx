@@ -1,13 +1,10 @@
 import { useState } from "react";
-import { FolderSimple, LinkBreak, Plus, Robot, ShieldCheck } from "@phosphor-icons/react";
-import { Button, Card, Field } from "@/components/ui";
+import { LinkBreak, Robot, ShieldCheck } from "@phosphor-icons/react";
+import { Button, Card } from "@/components/ui";
+import { FolderAccessControl, HistoryScopeControl } from "@/components/developer/ConfinementControls";
 import type { McpConsentRequestResponse } from "@/api/types";
 import type { ConsentConfinementPayload, FolderChoice } from "@/lib/mcpConsentRequest";
 import {
-  FOLDER_ACCESS_HINTS,
-  FOLDER_ACCESS_LABELS,
-  HISTORY_SCOPE_HINTS,
-  HISTORY_SCOPE_LABELS,
   buildConsentConfinement,
   describeFolderChoice,
   effectiveHistoryScope,
@@ -128,151 +125,38 @@ export function McpConsentScreen({
         })}
       </ul>
 
-      {/* Where the agent may work. Two explicit options, in the product's own
-          words, with the picker revealed only for the confined one. */}
-      <fieldset className="mb-5">
-        <legend className="mb-2 text-sm font-medium text-on-background">
-          Where can {request.client_name} work?
-        </legend>
-        <div className="space-y-2">
-          {(["ALL", "FOLDER"] as const).map((value) => (
-            <label
-              key={value}
-              className="flex cursor-pointer items-start gap-3 rounded-lg border border-outline p-3 hover:border-primary/40"
-            >
-              <input
-                type="radio"
-                name="mcp-folder-access"
-                value={value}
-                checked={folderAccess === value}
-                onChange={() => setFolderAccess(value)}
-                className="mt-0.5 h-4 w-4 shrink-0 accent-[var(--color-primary)]"
-              />
-              <span className="text-sm">
-                <span className="block text-on-background">{FOLDER_ACCESS_LABELS[value]}</span>
-                <span className="block text-xs text-muted">{FOLDER_ACCESS_HINTS[value]}</span>
-              </span>
-            </label>
-          ))}
-        </div>
-
-        {folderAccess === "FOLDER" && (
-          <div className="mt-3 border-l-2 border-outline pl-3">
-            <p id="mcp-folder-picker-label" className="mb-1.5 text-xs font-medium text-muted">
-              Folder the agent may use
-            </p>
-            {/* Bounded height + scroll so a Drive with hundreds of folders is
-                still a short, keyboard-navigable list rather than an unbounded
-                wall. Native radios give arrow-key navigation for free. */}
-            <div
-              role="radiogroup"
-              aria-labelledby="mcp-folder-picker-label"
-              className="max-h-56 space-y-0.5 overflow-y-auto rounded-lg border border-outline p-1"
-            >
-              {request.folders.map((folder) => (
-                <label
-                  key={folder.folder_id}
-                  className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-sm hover:bg-surface-variant"
-                >
-                  <input
-                    type="radio"
-                    name="mcp-folder-picker"
-                    value={folder.folder_id}
-                    checked={!creatingFolder && folderId === folder.folder_id}
-                    onChange={() => {
-                      setCreatingFolder(false);
-                      setFolderId(folder.folder_id);
-                    }}
-                    className="h-4 w-4 shrink-0 accent-[var(--color-primary)]"
-                  />
-                  <FolderSimple size={16} className="shrink-0 text-warning" aria-hidden="true" />
-                  <span className="min-w-0 flex-1 truncate">{folder.name}</span>
-                </label>
-              ))}
-              {request.folders.length === 0 && (
-                <p className="px-2 py-1.5 text-xs text-muted">
-                  You have no folders yet. Create one for this app below.
-                </p>
-              )}
-              <label className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-sm hover:bg-surface-variant">
-                <input
-                  type="radio"
-                  name="mcp-folder-picker"
-                  value="__new__"
-                  checked={creatingFolder}
-                  onChange={() => {
-                    setCreatingFolder(true);
-                    setFolderId(null);
-                  }}
-                  className="h-4 w-4 shrink-0 accent-[var(--color-primary)]"
-                />
-                <Plus size={16} className="shrink-0 text-primary" aria-hidden="true" />
-                <span className="min-w-0 flex-1">Create a new folder for this app</span>
-              </label>
-            </div>
-
-            {creatingFolder && (
-              <div className="mt-2">
-                <Field
-                  label="New folder name"
-                  value={newFolderName}
-                  onChange={(e) => setNewFolderName(e.target.value)}
-                  placeholder="e.g. Claude workspace"
-                  hint="It is created in your Drive when you allow access."
-                />
-              </div>
-            )}
-          </div>
-        )}
-
-        <p className="mt-3 flex items-start gap-2 text-xs text-muted">
-          <ShieldCheck
-            size={14}
-            className="mt-0.5 shrink-0 text-muted"
-            aria-hidden="true"
-          />
-          <span>{summary}</span>
-        </p>
-      </fieldset>
-
-      {/* How much conversion history the agent may read. */}
-      <fieldset className="mb-5">
-        <legend className="mb-2 text-sm font-medium text-on-background">
-          How much conversion history can {request.client_name} read?
-        </legend>
-        {request.can_choose_history_scope ? (
-          <div className="space-y-2">
-            {(["AGENT", "ALL"] as const).map((value) => (
-              <label
-                key={value}
-                className="flex cursor-pointer items-start gap-3 rounded-lg border border-outline p-3 hover:border-primary/40"
-              >
-                <input
-                  type="radio"
-                  name="mcp-history-scope"
-                  value={value}
-                  checked={historyScope === value}
-                  onChange={() => setHistoryScope(value)}
-                  className="mt-0.5 h-4 w-4 shrink-0 accent-[var(--color-primary)]"
-                />
-                <span className="text-sm">
-                  <span className="block text-on-background">{HISTORY_SCOPE_LABELS[value]}</span>
-                  <span className="block text-xs text-muted">{HISTORY_SCOPE_HINTS[value]}</span>
-                </span>
-              </label>
-            ))}
-          </div>
-        ) : (
-          // The API allows only one value here, so the screen states it rather
-          // than offering a choice that does not exist.
-          <p className="text-sm text-muted">
-            {HISTORY_SCOPE_LABELS[request.history_scope === "ALL" ? "ALL" : "AGENT"]}
-            <span className="block text-xs text-muted">
-              This is fixed for this application.
-            </span>
+      {/* Where the agent may work and how much history it may read. Both
+          controls are shared with Settings → AI apps' permissions editor
+          (`components/developer/ConfinementControls`), so the two screens
+          cannot describe the same choice in different words. */}
+      <FolderAccessControl
+        clientName={request.client_name}
+        value={folderAccess}
+        onChange={setFolderAccess}
+        folders={request.folders}
+        folderId={folderId}
+        onFolderIdChange={setFolderId}
+        allowCreate
+        creatingFolder={creatingFolder}
+        onCreatingFolderChange={setCreatingFolder}
+        newFolderName={newFolderName}
+        onNewFolderNameChange={setNewFolderName}
+        idPrefix="mcp"
+        footer={
+          <p className="mt-3 flex items-start gap-2 text-xs text-muted">
+            <ShieldCheck size={14} className="mt-0.5 shrink-0 text-muted" aria-hidden="true" />
+            <span>{summary}</span>
           </p>
-        )}
-      </fieldset>
+        }
+      />
+
+      <HistoryScopeControl
+        clientName={request.client_name}
+        value={effectiveHistoryScope(request, historyScope)}
+        onChange={setHistoryScope}
+        canChoose={request.can_choose_history_scope}
+        idPrefix="mcp"
+      />
 
       <div className="mb-5 flex items-start gap-2 rounded-lg border border-outline-strong bg-surface-variant p-3">
         <ShieldCheck size={16} className="mt-0.5 shrink-0 text-muted" aria-hidden="true" />

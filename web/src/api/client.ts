@@ -20,6 +20,7 @@ import {
   normalizeWorkflowRun,
   normalizeApiKeyList,
   normalizeBatchDelete,
+  normalizeConnectedApp,
   normalizeConnectedAppList,
   normalizeMcpConsent,
   normalizeMcpConsentApproval,
@@ -108,6 +109,7 @@ import type {
   SubscriptionCheckoutRequest,
   TokenResponse,
   UpdateProfileRequest,
+  UpdateConnectedAppRequest,
   UserCreateRequest,
   ValidationErrorItem,
   VerifyPhoneRequest,
@@ -1573,6 +1575,24 @@ export class ApiClient {
    */
   revokeConnectedApp = (id: string) =>
     this.request<void>(`/v1/mcp/connected-apps/${id}`, { method: 'DELETE' })
+
+  /**
+   * Replace an existing connection's permissions in place.
+   *
+   * The body is the *full* desired set rather than a delta, so a request can
+   * never be interpreted as a partial update that leaves a permission the user
+   * just removed. `confirm_destructive` must be true to add `documents.delete`;
+   * `buildUpdateConnectedAppRequest` sets both invariants, so this method takes
+   * a body that already satisfies the contract.
+   *
+   * Answers with the updated row, so the caller rerenders from the response
+   * rather than guessing at the new state.
+   */
+  updateConnectedApp = (id: string, body: UpdateConnectedAppRequest) =>
+    this.request<unknown>(`/v1/mcp/connected-apps/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }).then(normalizeConnectedApp)
 
   /** The authorization request an application is asking the user to approve. */
   mcpConsentRequest = (params: {

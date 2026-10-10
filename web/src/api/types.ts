@@ -1298,15 +1298,46 @@ export interface ConnectedAppResponse {
   client_id: string
   client_name: string
   scopes: string[]
-  /** `ACTIVE` or `REVOKED`. */
+  /** `ACTIVE`, `PAUSED` or `REVOKED`. */
   status: string
   created_at: string | null
   last_used_at: string | null
   revoked_at: string | null
+  /**
+   * Where the connection may work. `FOLDER` confines it to `folder_id`.
+   *
+   * Required here but read through `normalizeConnectedApp`, which folds an
+   * absent value from an older API into the whole-Drive default rather than
+   * trapping the user on a picker that API never populated.
+   */
+  folder_access: McpFolderAccess
+  /** The folder a `FOLDER` grant is bound to, or null (including when it is gone). */
+  folder_id: string | null
+  /** The bound folder's name for display, or null when `ALL` or it was deleted. */
+  folder_name: string | null
+  /** How much conversion history the connection may read. */
+  history_scope: McpHistoryScope
 }
 
 export interface ConnectedAppListResponse {
   apps: ConnectedAppResponse[]
+}
+
+/**
+ * The full desired permission set for an existing connection.
+ *
+ * Deliberately not a partial patch: every field is required, so an editor
+ * cannot accidentally widen access by leaving one out. `folder_id` must be
+ * `null` whenever `folder_access` is `ALL`, and `confirm_destructive` must be
+ * true to add `documents.delete`. Both invariants are owned by the pure builder
+ * in `lib/connectedAppPermissions.ts` rather than trusted to the caller.
+ */
+export interface UpdateConnectedAppRequest {
+  scopes: string[]
+  folder_access: McpFolderAccess
+  folder_id: string | null
+  history_scope: McpHistoryScope
+  confirm_destructive: boolean
 }
 
 /** One permission row on the consent screen. */
