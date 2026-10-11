@@ -159,6 +159,28 @@ export function checkoutUrlWithoutPromo(search: string): string {
 }
 
 /**
+ * The React `key` for the checkout provider, derived from the session secret.
+ *
+ * Stripe's `CheckoutElementsProvider` initialises its SDK exactly **once per
+ * mount**: `initCheckoutElementsSdk(options)` sits behind an internal ref that
+ * is never reset, so a changed `options.clientSecret` is IGNORED — only
+ * `appearance` and `fonts` are propagated afterwards (see
+ * `@stripe/react-stripe-js/dist/checkout.js`). Passing a new secret therefore
+ * silently leaves the mounted form bound to the OLD session.
+ *
+ * That matters here because a Stripe discount is attached to the **session**,
+ * so applying a promotion code necessarily creates a new one. Unkeyed, the page
+ * updated its summary to "Free — first month" while `confirm()` still targeted
+ * the previous, full-price session: a customer was charged $9.99 for a product
+ * they had been told was free. React remounts a component whose `key` changes,
+ * which is the only way to make the provider re-read the secret — so two
+ * different sessions must produce two different keys.
+ */
+export function checkoutElementsKey(clientSecret: string | null | undefined): string {
+  return clientSecret ?? "";
+}
+
+/**
  * The primary button's wording for the amount the session will charge.
  *
  * Only `0` means free: the server asks Stripe for

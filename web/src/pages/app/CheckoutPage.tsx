@@ -45,6 +45,7 @@ import { STRIPE_CHECKOUT_APPEARANCE } from "@/lib/stripeAppearance";
 import {
   checkoutButtonLabel,
   checkoutCardHint,
+  checkoutElementsKey,
   checkoutUrlWithPromo,
   checkoutUrlWithoutPromo,
   describeIntent,
@@ -91,14 +92,7 @@ type Phase = "creating" | "ready" | "failed";
  * as before. `if_required` would keep a card on the page but leave the success
  * destination to be re-derived here, duplicating server config for no gain.
  */
-function CheckoutForm({
-  amountTotal,
-  onFailure,
-}: {
-  /** Minor-unit total the session will charge, or `null` when unreported. */
-  amountTotal: number | null;
-  onFailure: (message: string) => void;
-}) {
+function CheckoutForm({ onFailure }: { onFailure: (message: string) => void }) {
   const state = useCheckoutElements();
   const [submitting, setSubmitting] = useState(false);
 
@@ -112,6 +106,15 @@ function CheckoutForm({
   }
 
   const { checkout } = state;
+
+  // What the button may promise is read from the session this form is actually
+  // bound to (`total.total.minorUnitsAmount`), NOT from the API's echoed
+  // `amount_total`. Those are two different objects, and the mounted one is
+  // what `confirm()` will charge; they once disagreed, and the customer read
+  // "Free — first month" while their card was charged $9.99. Only the
+  // zero/non-zero distinction is taken from here, so a currency conversion
+  // (adaptive pricing) cannot make it wrong for a legitimate reason.
+  const mountedTotal = checkout.total.total.minorUnitsAmount;
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -131,11 +134,11 @@ function CheckoutForm({
     <form onSubmit={submit} className="flex flex-col gap-5 p-6">
       <PaymentElement />
       <Button type="submit" size="lg" disabled={submitting}>
-        {submitting ? "Processing…" : checkoutButtonLabel(amountTotal)}
+        {submitting ? "Processing…" : checkoutButtonLabel(mountedTotal)}
       </Button>
       <p className="flex items-center justify-center gap-1.5 text-xs text-muted">
         <Lock size={13} weight="fill" aria-hidden />
-        {checkoutCardHint(amountTotal)}
+        {checkoutCardHint(mountedTotal)}
       </p>
     </form>
   );
@@ -205,7 +208,6 @@ export function CheckoutPage() {
     () => discountSummary(session, { renewalPrice: summary?.amount ?? null }),
     [session, summary],
   );
-  const amountTotal = session?.amount_total ?? null;
   const isSubscription = intent?.kind === "subscription";
 
   // A description of the purchase, fetched independently of the payment flow so
@@ -257,6 +259,14 @@ export function CheckoutPage() {
     }
 
     let cancelled = false;
+
+    // A session is (re)being created here — including after a promotion code is
+    // applied, which necessarily creates a new one because a Stripe discount
+    // attaches to the session. Drop back to the skeleton for the duration: the
+    // form currently on screen is bound to the PREVIOUS session, and confirming
+    // it would charge the previous (possibly undiscounted) total.
+    setPhase("creating");
+    setFailure("");
 
     void (async () => {
       try {
@@ -405,6 +415,16 @@ export function CheckoutPage() {
                       fallback={<FormUnavailable message={failure || "Please try again."} />}
                     >
                       <CheckoutElementsProvider
+                        // Remount per session. Stripe's provider initialises its
+                        // SDK exactly once and IGNORES a later `clientSecret`
+                        // (an internal ref guards `initCheckoutElementsSdk` and
+                        // is never reset), so without this key the mounted form
+                        // keeps confirming whichever session it was first
+                        // given — which is how applying a code once ended up
+                        // charging the undiscounted total. React remounts when
+                        // `key` changes; that is the only way to make the
+                        // provider re-read the secret.
+                        key={checkoutElementsKey(clientSecret)}
                         stripe={stripePromise}
                         options={{
                           clientSecret,
@@ -417,7 +437,7 @@ export function CheckoutPage() {
                           elementsOptions: { appearance: STRIPE_CHECKOUT_APPEARANCE },
                         }}
                       >
-                        <CheckoutForm amountTotal={amountTotal} onFailure={reportFailure} />
+                        <CheckoutForm onFailure={reportFailure} />
                       </CheckoutElementsProvider>
                     </ErrorBoundary>
                   )}

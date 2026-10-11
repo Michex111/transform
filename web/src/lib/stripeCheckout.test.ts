@@ -16,6 +16,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   checkoutButtonLabel,
   checkoutCardHint,
+  checkoutElementsKey,
   checkoutUrlWithPromo,
   checkoutUrlWithoutPromo,
   describeIntent,
@@ -218,6 +219,25 @@ describe("promo URL builders", () => {
     expect(checkoutUrlWithoutPromo("?tier=PRO&promo=BAD")).toBe("/app/checkout?tier=PRO");
     expect(checkoutUrlWithoutPromo("?tier=PRO")).toBe("/app/checkout?tier=PRO");
     expect(checkoutUrlWithoutPromo("?promo=BAD")).toBe("/app/checkout");
+  });
+});
+
+describe("checkoutElementsKey", () => {
+  // The provider ignores a changed `clientSecret`, so the ONLY thing that makes
+  // it pick up a new session is React remounting it — which happens when the
+  // `key` changes. A constant here would silently reintroduce the bug where a
+  // customer is shown "free" and charged the undiscounted total.
+  it("differs between sessions, so the provider is remounted", () => {
+    expect(checkoutElementsKey("cs_a_secret_111")).not.toBe(checkoutElementsKey("cs_b_secret_222"));
+  });
+
+  it("is stable for one session, so a re-render does not remount it", () => {
+    expect(checkoutElementsKey("cs_a_secret_111")).toBe(checkoutElementsKey("cs_a_secret_111"));
+  });
+
+  it("folds a missing secret to a single value", () => {
+    expect(checkoutElementsKey(null)).toBe("");
+    expect(checkoutElementsKey(undefined)).toBe("");
   });
 });
 
