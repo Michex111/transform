@@ -103,43 +103,91 @@ register yourself, and the user approves you in a browser.
    \`refresh_token\`. Store both securely and never log them.
 
 6. Refresh with \`grant_type=refresh_token\` before expiry rather than
-   re-authorizing. Refresh tokens last 30 days.
+   re-authorizing. Refresh tokens last 30 days, and a refresh token is issued on
+   every code exchange — you do not need to do anything special to get one.
 
 ## 3. Scopes — request only what you need
 
 | Scope | Grants |
 |---|---|
-| \`documents.read\` | list and inspect files and conversions |
+| \`documents.read\` | list and inspect files, folders and conversions; read file contents |
 | \`documents.convert\` | start a conversion |
-| \`documents.write\` | save a conversion result into the user's Drive |
+| \`documents.write\` | save or upload files into the user's Drive, create folders |
 | \`documents.delete\` | permanently delete a file |
+| \`workspaces.read\` | see the user's cloud workspaces, their files and execution history |
+| \`workspaces.execute\` | write files in a workspace and run code there |
 
 - \`documents.delete\` is NEVER pre-selected, is not in the default set, and is not
   implied by any other scope. Request it only if the task genuinely requires
   deletion, and expect the user to have to tick it deliberately.
+- The \`workspaces.*\` scopes are separate from \`documents.*\` and are not granted
+  by default: a workspace grants CPU on the platform, and a workspace is not in
+  the Drive, so folder confinement does not apply to it.
 - Requesting a scope the user did not approve is refused.
 - Revocation is immediate: if the user disconnects you, your very next request
   fails. On a 401, re-run authorization — do not retry blindly.
+
+### \`offline_access\`
+
+You may include \`offline_access\` in the \`scope\` parameter to ask for a refresh
+token. It is advertised in \`scopes_supported\` and always accepted, but it is a
+**request marker, not a permission**:
+
+- it will NOT appear in the granted scopes, and that is not a refusal;
+- a refresh token is issued on every code exchange regardless;
+- do not report it to the user as a permission they granted, and do not treat
+  its absence from the token response as a failure.
 
 ## 4. Tools
 
 | Tool | Scope | Notes |
 |---|---|---|
 | \`get_supported_conversions\` | read | the conversion graph |
-| \`list_files\` | read | whole Drive; optional name / extension filters |
+| \`list_files\` | read | whole Drive; optional name / extension / folder filters |
+| \`list_folders\` | read | folder ids — nothing else returns them |
 | \`get_file\` | read | metadata only — never content, never a storage key |
+| \`download_file\` | read | file contents, paged (see below) |
 | \`get_conversion_status\` | read | poll an async conversion |
+| \`get_conversion_history\` | read | recent conversions |
+| \`get_credits\` | read | the user's remaining credits |
 | \`convert_file\` | convert | starts a job; the original is never modified |
 | \`save_file\` | write | saves a result you produced into the Drive |
+| \`upload_file\` | write | creates a new file (bounded in size) |
+| \`create_folder\` | write | the only structural change you may make |
 | \`delete_file\` | delete | irreversible |
+| \`list_workspaces\` | workspaces.read | the user's cloud workspaces |
+| \`get_workspace\` | workspaces.read | runtime state, toolchain, disk budget |
+| \`list_workspace_files\` | workspaces.read | files inside a workspace |
+| \`read_workspace_file\` | workspaces.read | read one workspace file |
+| \`list_artifacts\` | workspaces.read | files recent runs produced |
+| \`write_workspace_file\` | workspaces.execute | write a file verbatim |
+| \`run_code\` | workspaces.execute | async — returns an execution id |
+| \`get_execution\` | workspaces.read | status, exit code, stdout, stderr |
+| \`cancel_execution\` | workspaces.execute | stop a run that is taking too long |
+| \`save_workspace_environment\` | workspaces.execute | persist installed packages |
+| \`create_workspace\` | workspaces.execute | only when the user asks for a new one |
 
 Call \`tools/list\` for current schemas rather than assuming them.
 
+Reading a large file — \`download_file\` returns about 128 KB per call, because a
+result travels as a single transport event with a size cap:
+
+1. Call with just \`file_id\` and read the first part plus \`has_more\`.
+2. While \`has_more\` is true, call again with \`offset\` set to \`next_offset\`.
+3. Concatenate the decoded parts **in order**. One part on its own is not the file.
+
+Never summarise a file you have only partly read: say what you saw and that it
+was truncated.
+
 Deliberate limitations — do not work around these:
-- There is NO upload tool. You cannot put arbitrary content into a user's Drive.
 - Every tool takes a \`file_id\` / \`job_id\` and resolves it server-side. You can
-  never name a storage object, and no storage key is ever returned.
-- No tool returns document text or a presigned URL. \`get_file\` is metadata only.
+  never name a storage object, and no storage key or presigned URL is ever
+  returned.
+- \`upload_file\` is the only way to introduce content the user did not already
+  have, and it is size-capped. \`save_file\` only promotes a job Transform itself
+  produced.
+- There is no tool that deletes or renames a folder or a workspace. Deletion of a
+  workspace is a decision a human makes in the app.
 
 ## 5. Conversions are asynchronous
 

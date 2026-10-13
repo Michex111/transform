@@ -35,15 +35,15 @@ from src.application.ports.api_telemetry_port import (
     ApiLogFilters,
     McpActivityFilters,
 )
-from src.application.services.api_telemetry_service import (
+from src.application.services.developer.api_telemetry_service import (
     RANGE_PRESETS,
     ApiTelemetryService,
     InvalidRangeError,
     ResolvedRange,
     resolve_range,
 )
-from src.application.services.mcp_access_service import MCPAccessService
-from src.application.services.mcp_activity_service import (
+from src.application.services.mcp.access_service import MCPAccessService
+from src.application.services.mcp.activity_service import (
     McpActivityService,
     McpConnectionView,
 )

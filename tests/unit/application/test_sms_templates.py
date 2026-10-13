@@ -7,7 +7,7 @@ character that would force UCS-2 encoding (which halves the budget to 70).
 
 import pytest
 
-from src.application.services.sms_templates import (
+from src.application.services.notifications.sms_templates import (
     MAX_SMS_SEGMENT_CHARS,
     build_phone_verification_sms,
     is_gsm7,

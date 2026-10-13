@@ -9,7 +9,7 @@ module stops type checking instead of silently returning ``None``.
 
 from base64 import b64encode
 
-from src.application.services.user_profile import (
+from src.application.services.users.profile import (
     avatar_data_url_for,
     display_name_for,
     initials_for,

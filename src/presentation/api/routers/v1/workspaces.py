@@ -36,14 +36,14 @@ from src.application.exceptions.workspace_exceptions import (
     WorkspaceNotUsableError,
     WorkspaceQuotaExceededError,
 )
-from src.application.services.execution_service import (
+from src.application.services.workspaces.execution_service import (
     ExecutionArtifactRef,
     ExecutionNotFoundError,
     ExecutionService,
     InvalidExecutionRequestError,
     TooManyActiveExecutionsError,
 )
-from src.application.services.workspace_service import WorkspaceDetail, WorkspaceService
+from src.application.services.workspaces.workspace_service import WorkspaceDetail, WorkspaceService
 from src.domain.conversions.value_object.job_origin import JobOrigin
 from src.domain.workspaces.entities.execution import Execution
 from src.domain.workspaces.entities.runtime_image_revision import RuntimeImageRevision

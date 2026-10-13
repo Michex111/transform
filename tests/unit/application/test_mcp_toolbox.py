@@ -12,9 +12,13 @@ import asyncio
 import base64
 from typing import Any
 
-from src.application.exceptions.file_system_exceptions import FileRecordNotFoundError
-from src.application.services.credit_service import CreditBalance
-from src.application.services.mcp_toolbox import MCPToolBox, MCPToolContext
+from src.application.exceptions.file_system_exceptions import (
+    FileRecordNotFoundError,
+    FolderNameConflictError,
+    FolderNotFoundError,
+)
+from src.application.services.billing.credit_service import CreditBalance
+from src.application.services.mcp.toolbox import MCPToolBox, MCPToolContext
 from src.domain.conversions.entities.conversion_job import ConversionJob
 from src.domain.conversions.value_object.conversion_type import ConversionType
 from src.domain.conversions.value_object.job_origin import JobOrigin
@@ -102,6 +106,8 @@ class FakeFileService:
         self.folders = folders or {}
         self.deleted: list[str] = []
         self.completed: list[Any] = []
+        #: (user_id, name, parent_id) for every folder the tools asked for.
+        self.created_folders: list[tuple[int, str, str | None]] = []
 
     async def get_file(self, user_id: int, file_id: str) -> UserFileModel:
         row = self.files.get(file_id)
@@ -157,6 +163,48 @@ class FakeFileService:
     async def complete_upload(self, user_id: int, session: Any) -> str:
         self.completed.append(session)
         return "saved-file-1"
+
+    # --- folders ------------------------------------------------------
+    # The real FileService owns the rules; these mirror its shape closely enough
+    # to prove the TOOL passes the right arguments and applies the confinement.
+
+    def _folder_row(self, folder_id: str, name: str) -> Any:
+        from types import SimpleNamespace
+
+        return SimpleNamespace(id=folder_id, name=name, created_at=None)
+
+    def _children(self, parent_id: str | None) -> list[str]:
+        return [f for f, parent in self.folders.items() if parent == parent_id]
+
+    async def list_root_folders(self, user_id: int, **kwargs: Any):
+        ids = self._children(None)
+        return [self._folder_row(f, f) for f in ids], len(ids)
+
+    async def get_folder_contents(self, user_id: int, folder_id: str, **kwargs: Any):
+        if folder_id not in self.folders:
+            raise FolderNotFoundError("folder")
+        ids = self._children(folder_id)
+        subs = [self._folder_row(f, f) for f in ids]
+        files = [
+            row
+            for row in self.files.values()
+            if row.user_id == user_id and row.folder_id == folder_id
+        ]
+        return self._folder_row(folder_id, folder_id), subs, len(subs), files, len(files)
+
+    async def create_folder(self, user_id: int, name: str, parent_id: str | None = None):
+        if parent_id is not None and parent_id not in self.folders:
+            raise FolderNotFoundError("parent")
+        cleaned = name.strip()
+        if any(
+            self._folder_row(f, f).name == cleaned and parent == parent_id
+            for f, parent in self.folders.items()
+        ):
+            raise FolderNameConflictError("duplicate")
+        new_id = f"new-{len(self.folders)}"
+        self.folders[new_id] = parent_id
+        self.created_folders.append((user_id, cleaned, parent_id))
+        return self._folder_row(new_id, cleaned)
 
 
 class FakeConversionService:
@@ -239,7 +287,13 @@ class FakeObjectStore:
         self.puts.append((object_key, data))
         self.objects[object_key] = data
 
-    async def read_object(self, object_key: str, max_bytes: int | None = None) -> bytes:
+    async def read_object(
+        self, object_key: str, max_bytes: int | None = None, *, user_id: str = "7"
+    ) -> bytes:
+        # `user_id` mirrors the real port: at-rest content is per-user encrypted,
+        # so a reader that ignores the owner would hand back ciphertext. This
+        # fake holds plaintext, which is what a decrypting reader returns.
+        assert user_id
         if object_key not in self.objects:
             raise FileNotFoundError(object_key)
         data = self.objects[object_key]
@@ -461,7 +515,7 @@ def test_convert_of_an_unsupported_pair_lists_what_is_possible() -> None:
             _ctx(AgentScope.DOCUMENTS_CONVERT), "file-1", "mp3"
         )
         assert result["ok"] is False
-        assert result["supported_target_formats"] == ["pdf", "txt"]
+        assert result["target_formats"] == ["pdf", "txt"]
         assert conversions.started == []
 
     asyncio.run(_run())
@@ -925,3 +979,239 @@ def test_upload_file_rejects_invalid_base64() -> None:
 
     asyncio.run(_run())
 
+
+
+# --------------------------------------------------------------------------
+# download_file paging
+#
+# WHY these exist: the tool used to return the whole file in one result, and a
+# result travels as a single transport event capped at 1 MiB. Measured against a
+# live server, 256 KiB of content worked and 384 KiB failed with an SSE error —
+# while the tool advertised a 25 MiB limit. An ordinary 1 MB PDF was
+# unreadable, and the failure named no file and suggested no next step.
+# --------------------------------------------------------------------------
+
+
+def test_download_file_returns_a_small_file_whole_in_one_call() -> None:
+    async def _run() -> None:
+        store = FakeObjectStore({"upload/file-1/secret-key.docx": b"hello"})
+        toolbox, *_ = _build_toolbox(store=store)
+        result = await toolbox.download_file(_ctx(AgentScope.DOCUMENTS_READ), "file-1")
+        assert result["ok"] is True
+        assert base64.b64decode(result["content_base64"]) == b"hello"
+        # The common case must stay a single call: no paging protocol to follow.
+        assert result["has_more"] is False
+        assert "next_offset" not in result
+
+    asyncio.run(_run())
+
+
+def test_download_file_pages_content_larger_than_the_chunk() -> None:
+    async def _run() -> None:
+        payload = bytes(i % 251 for i in range(300_000))
+        store = FakeObjectStore({"upload/file-1/secret-key.docx": payload})
+        toolbox, *_ = _build_toolbox(store=store)
+        ctx = _ctx(AgentScope.DOCUMENTS_READ)
+
+        first = await toolbox.download_file(ctx, "file-1")
+        assert first["ok"] is True
+        assert first["has_more"] is True
+        assert first["offset"] == 0
+        assert first["next_offset"] == first["bytes_returned"]
+        # size_bytes is the WHOLE file, not this slice — a per-slice size would
+        # be misread as the file's size and the caller would stop early.
+        assert first["size_bytes"] == len(payload)
+        assert "note" in first
+
+        collected = bytearray(base64.b64decode(first["content_base64"]))
+        offset = first["next_offset"]
+        guard = 0
+        while offset is not None:
+            guard += 1
+            assert guard < 20, "paging did not terminate"
+            part = await toolbox.download_file(ctx, "file-1", offset)
+            assert part["ok"] is True
+            collected.extend(base64.b64decode(part["content_base64"]))
+            offset = part.get("next_offset") if part["has_more"] else None
+
+        assert bytes(collected) == payload
+
+    asyncio.run(_run())
+
+
+def test_download_file_caps_a_client_requested_chunk_size() -> None:
+    async def _run() -> None:
+        store = FakeObjectStore({"upload/file-1/secret-key.docx": b"x" * 200_000})
+        toolbox, *_ = _build_toolbox(store=store)
+        ctx = _ctx(AgentScope.DOCUMENTS_READ)
+        # Asking for a slice far larger than the transport can carry must not
+        # produce one: the tool clamps it rather than trusting the model.
+        huge = await toolbox.download_file(ctx, "file-1", 0, 100_000_000)
+        assert huge["bytes_returned"] <= 128 * 1024
+        assert huge["has_more"] is True
+        # A smaller preference is honoured.
+        small = await toolbox.download_file(ctx, "file-1", 0, 10)
+        assert small["bytes_returned"] == 10
+
+    asyncio.run(_run())
+
+
+def test_download_file_reports_an_offset_past_the_end_rather_than_empty_success() -> None:
+    async def _run() -> None:
+        store = FakeObjectStore({"upload/file-1/secret-key.docx": b"short"})
+        toolbox, *_ = _build_toolbox(store=store)
+        result = await toolbox.download_file(_ctx(AgentScope.DOCUMENTS_READ), "file-1", 9999)
+        # An empty ok:true would read as "this file is empty".
+        assert result["ok"] is False
+        assert "past the end" in result["error"]
+        assert result["size_bytes"] == 5
+
+    asyncio.run(_run())
+
+
+def test_download_file_tolerates_loosely_typed_offsets() -> None:
+    async def _run() -> None:
+        store = FakeObjectStore({"upload/file-1/secret-key.docx": b"abcdef"})
+        toolbox, *_ = _build_toolbox(store=store)
+        ctx = _ctx(AgentScope.DOCUMENTS_READ)
+        # A model writing "2" or 2.0 means 2, and refusing it is friction with no
+        # security benefit; a value that is genuinely unusable falls back.
+        assert base64.b64decode((await toolbox.download_file(ctx, "file-1", "2"))["content_base64"]) == b"cdef"
+        assert base64.b64decode((await toolbox.download_file(ctx, "file-1", 2.0))["content_base64"]) == b"cdef"
+        # Booleans are ints in Python; offset=True meaning 1 would be a surprise.
+        assert base64.b64decode((await toolbox.download_file(ctx, "file-1", True))["content_base64"]) == b"abcdef"
+        assert base64.b64decode((await toolbox.download_file(ctx, "file-1", "nonsense"))["content_base64"]) == b"abcdef"
+
+    asyncio.run(_run())
+
+
+# --------------------------------------------------------------------------
+# Folders
+# --------------------------------------------------------------------------
+
+
+def test_list_folders_needs_the_read_scope() -> None:
+    async def _run() -> None:
+        toolbox, *_ = _folder_toolbox()
+        result = await toolbox.list_folders(_ctx())
+        assert result["ok"] is False
+        assert result["required_scope"] == "documents.read"
+
+    asyncio.run(_run())
+
+
+def test_list_folders_returns_usable_ids() -> None:
+    async def _run() -> None:
+        toolbox, *_ = _folder_toolbox()
+        result = await toolbox.list_folders(_ctx(AgentScope.DOCUMENTS_READ))
+        assert result["ok"] is True
+        ids = [f["folder_id"] for f in result["folders"]]
+        assert "bound" in ids and "other" in ids
+
+    asyncio.run(_run())
+
+
+def test_list_folders_hides_folders_outside_a_confined_grant() -> None:
+    async def _run() -> None:
+        toolbox, *_ = _folder_toolbox()
+        ctx = _folder_ctx(AgentScope.DOCUMENTS_READ)
+        # A confined grant's root listing is its BOUND folder's contents, so it
+        # never learns the name or id of anything beside it.
+        roots = await toolbox.list_folders(ctx)
+        ids = [f["folder_id"] for f in roots["folders"]]
+        assert "other" not in ids
+        assert ids == ["child"]
+        assert roots["parent_id"] == "bound"
+
+        inside = await toolbox.list_folders(ctx, "bound")
+        child_ids = [f["folder_id"] for f in inside["folders"]]
+        assert child_ids == ["child"]
+
+        # Naming a folder outside the subtree is refused, not silently emptied.
+        assert await toolbox.list_folders(ctx, "other") == _FOLDER_DENIAL
+
+    asyncio.run(_run())
+
+
+def test_create_folder_needs_write_and_respects_confinement() -> None:
+    async def _run() -> None:
+        toolbox, files, *_ = _folder_toolbox()
+        denied = await toolbox.create_folder(_ctx(AgentScope.DOCUMENTS_READ), "Notes")
+        assert denied["ok"] is False
+        assert denied["required_scope"] == "documents.write"
+        assert files.created_folders == []
+
+        ctx = _folder_ctx(AgentScope.DOCUMENTS_WRITE)
+        created = await toolbox.create_folder(ctx, "  Notes  ")
+        assert created["ok"] is True
+        # Whitespace is trimmed, and a confined grant creates INSIDE its folder
+        # rather than at a root it is not allowed to touch.
+        assert files.created_folders == [(7, "Notes", "bound")]
+
+        # Outside the subtree is refused.
+        assert await toolbox.create_folder(ctx, "Elsewhere", "other") == _FOLDER_DENIAL
+
+        blank = await toolbox.create_folder(ctx, "   ")
+        assert blank["ok"] is False and "name is required" in blank["error"]
+
+    asyncio.run(_run())
+
+
+def test_create_folder_reports_a_name_conflict_as_a_value() -> None:
+    async def _run() -> None:
+        toolbox, *_ = _folder_toolbox()
+        ctx = _folder_ctx(AgentScope.DOCUMENTS_WRITE)
+        # "bound" already exists at the root; a second one with that name would
+        # violate the unique constraint and must come back as a value.
+        result = await toolbox.create_folder(_ctx(AgentScope.DOCUMENTS_WRITE), "bound")
+        assert result["ok"] is False
+        assert "already exists" in result["error"]
+        assert ctx is not None
+
+    asyncio.run(_run())
+
+
+def test_the_conversion_failure_names_the_same_key_as_the_lookup_tool() -> None:
+    async def _run() -> None:
+        toolbox, *_ = _toolbox()
+        lookup = await toolbox.get_supported_conversions(
+            _ctx(AgentScope.DOCUMENTS_READ), "docx"
+        )
+        refused = await toolbox.convert_file(
+            _ctx(AgentScope.DOCUMENTS_CONVERT), "file-1", "png"
+        )
+        assert refused["ok"] is False
+        # One word for one concept: the agent can pipe this straight into a retry
+        # without noticing a rename.
+        assert set(refused["target_formats"]) == set(lookup["target_formats"])
+        assert "hint" in refused
+
+    asyncio.run(_run())
+
+
+def test_list_folders_for_a_confined_grant_starts_at_its_bound_folder() -> None:
+    """A confined grant must still be able to browse.
+
+    The regression: with no ``parent_id`` this listed the Drive ROOT and then
+    filtered out every folder outside the subtree — so a grant confined to a
+    nested folder saw nothing at all, exactly the case ``list_files`` handles by
+    defaulting to the bound folder.
+    """
+
+    async def _run() -> None:
+        # A forest where the bound folder is NOT at the root, so "list the root
+        # and filter" provably returns nothing.
+        parents = {"top": None, "bound": "top", "child": "bound"}
+        toolbox, *_ = _build_toolbox(files=FakeFileService({}, parents))
+        ctx = _folder_ctx(AgentScope.DOCUMENTS_READ)
+
+        result = await toolbox.list_folders(ctx)
+        ids = [f["folder_id"] for f in result["folders"]]
+        assert ids == ["child"], ids
+        # And it says which folder it listed, rather than implying the root.
+        assert result["parent_id"] == "bound"
+        # The count must be what the caller can reach, not the repository's
+        # total (which includes folders it may never see).
+        assert result["total"] == 1
+
+    asyncio.run(_run())

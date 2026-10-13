@@ -9,7 +9,7 @@ periods.
 from dataclasses import dataclass
 from typing import Any
 
-from src.application.services.workspace_service import WorkspaceService
+from src.application.services.workspaces.workspace_service import WorkspaceService
 from src.infrastructure.adapters.queues.redis_stream_workspace_queue import (
     WorkspaceWorkStream,
 )

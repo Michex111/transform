@@ -31,6 +31,13 @@ export const SCOPE_LABELS: Record<string, string> = {
   "documents.convert": "Convert",
   "documents.write": "Save files",
   "documents.delete": "Delete files",
+  // The workspace permissions are separate from the document ones because a
+  // workspace is not a file: it grants CPU on the platform. Omitting them here
+  // (as this list did) meant the editor could neither show what an agent held
+  // nor let a user grant it, so every workspace tool refused and the user had no
+  // remedy in the app.
+  "workspaces.read": "See workspaces",
+  "workspaces.execute": "Run code",
 };
 
 /** The permissions the editor offers, in the order they are shown. */
@@ -39,6 +46,8 @@ export const PERMISSION_SCOPES = [
   "documents.convert",
   "documents.write",
   "documents.delete",
+  "workspaces.read",
+  "workspaces.execute",
 ] as const;
 
 /**

@@ -30,17 +30,17 @@ from src.application.dtos.assistant_dto import (
     AssistantToolEvent,
 )
 from src.application.ports.llm_port import LlmMessage, LlmResponse, LlmStreamChunk, LlmToolCall, LlmToolSpec
-from src.application.services.assistant_service import AssistantService
-from src.application.services.assistant_tools import AssistantToolBox
-from src.application.services.assistant_workspace_tools import (
+from src.application.services.assistant.service import AssistantService
+from src.application.services.assistant.tools import AssistantToolBox
+from src.application.services.assistant.workspace_tools import (
     WORKSPACE_TOOL_NAMES,
     AssistantWorkspaceToolBox,
     WorkspaceTurnContext,
     bound_text,
     redact_secrets,
 )
-from src.application.services.execution_service import ExecutionService
-from src.application.services.workspace_service import WorkspaceService
+from src.application.services.workspaces.execution_service import ExecutionService
+from src.application.services.workspaces.workspace_service import WorkspaceService
 from src.domain.assistant.entities.conversation import Conversation, Message, MessageRole
 from src.domain.assistant.exceptions.assistant_exceptions import (
     AssistantConversationNotFound,

@@ -9,7 +9,7 @@ from typing import Any
 from sqlalchemy import SQLColumnExpression, Select, delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.application.services.file_listing import (
+from src.application.services.files.listing import (
     DEFAULT_FILE_SORT,
     DEFAULT_FILE_SORT_ORDER,
     FileSortKey,

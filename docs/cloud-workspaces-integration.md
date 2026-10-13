@@ -18,9 +18,9 @@ guide).
 | Capability | Evidence |
 |---|---|
 | Workspace domain (4 state machines, fingerprinted runtime config, closed `uv` operation allow-list) | `src/domain/workspaces/**`; `tests/unit/domain/test_*.py` |
-| Runtime lifecycle: idempotent start, config-change retirement, snapshot reuse/compatibility | `src/application/services/workspace_service.py`; `tests/unit/application/test_workspace_service.py` |
+| Runtime lifecycle: idempotent start, config-change retirement, snapshot reuse/compatibility | `src/application/services/workspaces/workspace_service.py`; `tests/unit/application/test_workspace_service.py` |
 | Docker provider: path jail, in-container `timeout -s KILL`, tmpfs output capture, cgroup limits, cap-drop, no-new-privileges | `src/infrastructure/adapters/runtime/docker_runtime_provider.py`; `tests/unit/infrastructure/test_docker_runtime_provider.py` |
-| Durable executions: typed lifecycle, conditional claim, idempotency key, cancel-wins-over-outcome | `src/application/services/execution_service.py`; `tests/unit/workers/test_workspace_processor.py` |
+| Durable executions: typed lifecycle, conditional claim, idempotency key, cancel-wins-over-outcome | `src/application/services/workspaces/execution_service.py`; `tests/unit/workers/test_workspace_processor.py` |
 | 22 API operations over 18 paths, owner-scoped, centrally mapped errors | `src/presentation/api/routers/v1/workspaces.py`; `tests/integration/test_workspaces_api.py` (27 tests) |
 | Migration `0028`, guarded and idempotent | `tests/unit/infrastructure/test_migration_0028_cloud_workspaces.py` |
 | Workspace worker (own consumer, re-queue on reclaim, dead-letter before ACK, SIGTERM) | `workers/workspace_worker/**` |
@@ -40,7 +40,7 @@ guide).
 
 | Gap | Detail |
 |---|---|
-| **The AI cannot use workspaces at all** | `AssistantToolBox` (`src/application/services/assistant_tools.py`) exposes 13 file/conversion tools. None touches workspaces: `specs()` has no workspace entry and `_dispatch()` has no workspace branch. The runtime is a dashboard-only feature — exactly what the brief forbids. |
+| **The AI cannot use workspaces at all** | `AssistantToolBox` (`src/application/services/assistant/tools.py`) exposes 13 file/conversion tools. None touches workspaces: `specs()` has no workspace entry and `_dispatch()` has no workspace branch. The runtime is a dashboard-only feature — exactly what the brief forbids. |
 | **No workspace context in a turn** | `stream_chat` passes only `user_id`/`tier`/`message`/`conversation_id`/`file_ids`/`context`. There is no way to say "operate on workspace X", and no server-authored line in the prompt telling the model which workspace is active. |
 | **Long-running work has no representation** | The tool loop (`for _iteration in range(max_iterations)`) assumes each tool returns promptly. Nothing submits durable work and reports progress across turns. |
 | **Artifacts are paths, not objects** | `handle_execution` records `ExecutionArtifact(path=…, size_bytes=…)` with `object_key=None`; the API marks such an artifact `downloadable: false`. The bytes stay in the container. |

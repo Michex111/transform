@@ -1,6 +1,6 @@
 """Regression tests for production-readiness security/payment hardening fixes."""
 
-from src.application.services.file_magic import detect_type, validate_upload_signature
+from src.application.services.files.magic import detect_type, validate_upload_signature
 from src.infrastructure.converters.functions.archive.archive_converters import (
     MAX_ARCHIVE_ENTRIES,
     MAX_ARCHIVE_EXPAND_BYTES,

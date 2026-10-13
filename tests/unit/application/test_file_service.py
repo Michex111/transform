@@ -13,13 +13,13 @@ from src.application.exceptions.file_system_exceptions import (
     FolderNotFoundError,
     StorageQuotaExceededError,
 )
-from src.application.services.file_listing import (
+from src.application.services.files.listing import (
     DEFAULT_FILE_SORT,
     DEFAULT_FILE_SORT_ORDER,
     FileSortKey,
     FileSortOrder,
 )
-from src.application.services.file_service import FileService
+from src.application.services.files.service import FileService
 from src.domain.subscriptions.policies.tier_policy import TierPolicy
 from src.domain.subscriptions.value_object.tier import SubscriptionTier
 from src.infrastructure.database.models import UserFileModel, UserFolderModel

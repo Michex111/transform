@@ -18,8 +18,8 @@ from typing import Annotated
 from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.application.services.execution_service import ExecutionService
-from src.application.services.workspace_service import WorkspaceService
+from src.application.services.workspaces.execution_service import ExecutionService
+from src.application.services.workspaces.workspace_service import WorkspaceService
 from src.infrastructure.adapters.queues.redis_stream_workspace_queue import (
     WorkspaceWorkStream,
 )

@@ -6,7 +6,7 @@ from uuid import uuid4
 from src.application.exceptions.conversion_job_exception import InvalidConversionJobError
 from src.application.ports.database_port import ConversionJobRepositoryPort
 from src.application.ports.queue_port import JobQueuePort
-from src.application.services.priority_queue_dispatcher import PriorityQueueDispatcher
+from src.application.services.conversions.priority_queue_dispatcher import PriorityQueueDispatcher
 from src.domain.conversions.entities.conversion_job import ConversionJob
 from src.domain.conversions.exceptions import InvalidConversion
 from src.domain.conversions.policies.conversion_policy import is_supported

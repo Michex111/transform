@@ -217,7 +217,7 @@ def test_dead_letter_uses_the_qualified_stream(prefix, monkeypatch):
 
 
 def test_tier_router_targets_the_qualified_streams(prefix):
-    from src.application.services.queue_priority_router import QueuePriorityRouter
+    from src.application.services.conversions.queue_priority_router import QueuePriorityRouter
     from src.domain.subscriptions.value_object.tier import SubscriptionTier
 
     prefix("dev:")
@@ -230,7 +230,7 @@ def test_tier_router_targets_the_qualified_streams(prefix):
 
 def test_tier_router_defaults_to_production_names(prefix):
     """With no prefix configured the router must still match the publish streams."""
-    from src.application.services.queue_priority_router import QueuePriorityRouter
+    from src.application.services.conversions.queue_priority_router import QueuePriorityRouter
     from src.domain.subscriptions.value_object.tier import SubscriptionTier
 
     prefix("")
@@ -248,7 +248,7 @@ def test_tier_router_defaults_to_production_names(prefix):
 
 def test_tier_router_targets_the_qualified_streams_consumer_reads(prefix):
     """The prefixed producer/consumer names must still line up exactly."""
-    from src.application.services.queue_priority_router import QueuePriorityRouter
+    from src.application.services.conversions.queue_priority_router import QueuePriorityRouter
     from src.domain.subscriptions.value_object.tier import SubscriptionTier
 
     prefix("dev:")

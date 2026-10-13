@@ -33,9 +33,9 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
 import src.presentation.api.main as api_main
-from src.application.services.conversion_service import ConversionService
-from src.application.services.file_service import FileService
-from src.application.services.workflow_service import WorkflowService
+from src.application.services.conversions.service import ConversionService
+from src.application.services.files.service import FileService
+from src.application.services.workflows.service import WorkflowService
 from src.domain.conversions.entities.conversion_job import ConversionJob
 from src.domain.subscriptions.value_object.tier import SubscriptionTier
 from src.infrastructure.adapters.repository.sql_conversion_job_repo import (

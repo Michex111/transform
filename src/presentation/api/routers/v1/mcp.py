@@ -37,11 +37,12 @@ from src.application.exceptions.file_system_exceptions import (
     FolderNameConflictError,
 )
 from src.application.exceptions.mcp_exceptions import ConnectionStateError, MCPAccessError
-from src.application.services.file_service import FileService
-from src.application.services.mcp_access_service import MCPAccessService
+from src.application.services.files.service import FileService
+from src.application.services.mcp.access_service import MCPAccessService
 from src.domain.security.enitities.agent_grant import AgentGrant
 from src.domain.security.value_object.agent_access_scope import FolderAccess
 from src.domain.security.value_object.agent_scope import (
+    ALL_SCOPES,
     DESTRUCTIVE_SCOPES,
     SCOPE_DESCRIPTIONS,
     AgentScope,
@@ -141,22 +142,34 @@ async def authorization_server_metadata_inserted_path() -> dict:
 def _scope_descriptions(
     requested: tuple[AgentScope, ...], already_granted: tuple[AgentScope, ...]
 ) -> list[ScopeDescription]:
-    """Every scope the product understands, marked requested/granted.
+    """Every permission the product has, marked requested/granted.
 
-    Listing all four (rather than only the requested ones) lets the consent
-    screen explain what *isn't* being granted, which is how a user can tell
-    that "delete my files" was not silently included.
+    Listing all of them (rather than only the requested ones) lets the consent
+    screen show what *isn't* being granted, which is how a user can tell that
+    "delete my files" was not silently included.
+
+    Derived from :data:`ALL_SCOPES` rather than written out. It WAS a hand-listed
+    four, which quietly broke the ``workspaces.*`` permissions twice over: the
+    screen never rendered them, so a user could not see that an application was
+    asking for workspace access, and — because the screen posts back only what it
+    rendered — an approved connection silently lost them. An agent then failed
+    every workspace tool with "needs the workspaces.read permission" and the user
+    had no way to grant it.
+
+    Iterating the vocabulary means a new capability appears here automatically,
+    which is the only version of this that does not rot.
     """
+    requested_set = set(requested)
+    granted_set = set(already_granted)
     return [
         ScopeDescription(
             scope=scope.value,
             description=SCOPE_DESCRIPTIONS[scope],
-            requested=scope in set(requested),
-            already_granted=scope in set(already_granted),
+            requested=scope in requested_set,
+            already_granted=scope in granted_set,
             destructive=scope in DESTRUCTIVE_SCOPES,
         )
-        for scope in (AgentScope.DOCUMENTS_READ, AgentScope.DOCUMENTS_CONVERT,
-                      AgentScope.DOCUMENTS_WRITE, AgentScope.DOCUMENTS_DELETE)
+        for scope in ALL_SCOPES
     ]
 
 

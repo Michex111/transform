@@ -49,13 +49,45 @@ authorization rule.
 
   | Scope | Grants |
   |---|---|
-  | `documents.read` | list / inspect files and conversions |
+  | `documents.read` | list / inspect files, folders and conversions; read file contents |
   | `documents.convert` | start a conversion |
-  | `documents.write` | save a conversion result into the Drive |
+  | `documents.write` | save or upload files, create folders |
   | `documents.delete` | permanently delete a file |
+  | `workspaces.read` | see the user's cloud workspaces, their files and execution history |
+  | `workspaces.execute` | write files in a workspace and run code there |
 
   `documents.delete` is never pre-selected, is never in the default scope set,
-  and is not implied by any other scope.
+  and is not implied by any other scope. The `workspaces.*` scopes are separate
+  from `documents.*`, are not in the default set, and are never implied by a
+  document permission — a workspace grants CPU on the platform, so it is opt-in
+  on its own.
+
+  ### `offline_access`
+
+  `offline_access` is advertised in `scopes_supported` and accepted in a request,
+  but it is a **request marker, not a permission**. A client sends it to say
+  "issue me a refresh token"; Transform always issues one, so it grants nothing
+  that is not already granted. It is deliberately *not* an `AgentScope`:
+
+  * `normalize_scopes` only ever yields capabilities, so the marker cannot reach
+    a grant row, a token record, or a checkbox on the consent screen;
+  * `KNOWN_REQUEST_SCOPES` — the advertised and accepted vocabulary — is the
+    capabilities plus the marker; `ALL_SCOPES` remains the capabilities alone.
+
+  Advertising it matters because several clients (ChatGPT among them) decide
+  whether to attempt a refresh by looking for this scope, and without it they
+  conclude refresh is unavailable and drop the connection when the 60-minute
+  access token expires — despite the refresh token having been issued and
+  working. Both halves are needed: advertising it while `resolve_scopes` still
+  refused it as unrecognised would make every authorization request fail.
+
+  A client that omits `scope` when it registers (RFC 7591 makes the field
+  optional, and most clients omit it) is registered against the FULL set rather
+  than the default set. It must be: the registered value is then treated as the
+  client's own cap, so filling in the consent default made `documents.delete` and
+  both `workspaces.*` scopes impossible to grant at consent. The conservative
+  default still applies where it belongs — an authorization request that names no
+  scope resolves to read/convert/write in `MCPAccessService.resolve_scopes`.
 * **Fail closed.** An unrecognised scope string is refused rather than dropped;
   a redirect URI must match a registered value exactly; a resource indicator
   that is not this server is an error.
@@ -88,24 +120,66 @@ cold hard load (see `vite-plugins/spa-route-stubs.ts`).
 
 ## Tools
 
+24 tools in two groups. `tools/list` is authoritative for schemas.
+
+**Documents** — gated by `documents.*`:
+
 | Tool | Scope | Writes | Notes |
 |---|---|---|---|
 | `get_supported_conversions` | read | no | the conversion graph |
-| `list_files` | read | no | whole Drive; optional name/extension filter |
+| `list_files` | read | no | whole Drive; optional name/extension/folder filter |
+| `list_folders` | read | no | folder ids — nothing else returns them |
 | `get_file` | read | no | metadata only — never content or a storage key |
+| `download_file` | read | no | file contents as base64, **paged** |
 | `get_conversion_status` | read | no | poll an async conversion |
+| `get_conversion_history` | read | no | recent conversions |
+| `get_credits` | read | no | remaining credits |
 | `convert_file` | convert | creates a job | the original is never modified |
 | `save_file` | write | creates a file | only promotes a job Transform itself produced |
+| `upload_file` | write | creates a file | the only way to introduce new content; size-capped |
+| `create_folder` | write | creates a folder | the only structural change an agent may make |
 | `delete_file` | delete | deletes | irreversible; needs an explicit grant |
+
+**Workspaces** — gated by `workspaces.*`:
+
+| Tool | Scope | Writes | Notes |
+|---|---|---|---|
+| `list_workspaces` | workspaces.read | no | the user's workspaces |
+| `get_workspace` | workspaces.read | no | runtime state, toolchain, disk budget |
+| `list_workspace_files` | workspaces.read | no | files inside a workspace |
+| `read_workspace_file` | workspaces.read | no | read one workspace file |
+| `list_artifacts` | workspaces.read | no | files recent runs produced |
+| `write_workspace_file` | workspaces.execute | yes | write a file verbatim |
+| `run_code` | workspaces.execute | yes | async — returns an execution id |
+| `get_execution` | workspaces.read | no | status, exit code, stdout, stderr |
+| `cancel_execution` | workspaces.execute | yes | stop a run that is taking too long |
+| `save_workspace_environment` | workspaces.execute | yes | persist installed packages |
+| `create_workspace` | workspaces.execute | yes | only when the user asks for a new one |
 
 Deliberate omissions:
 
-* **No upload tool.** An agent cannot introduce arbitrary content into a Drive.
-* **No storage-key arguments.** Every tool takes a `file_id` / `job_id` and
-  resolves it server-side, so an agent can never name an object it was not
-  authorized to read.
-* **No content in tool results.** No tool returns a document's text, a presigned
-  URL, a storage key or any infrastructure detail.
+* **No way to name a storage object.** Every tool takes a `file_id` / `job_id`
+  and resolves it server-side, so an agent can never name an object it was not
+  authorized to read. No storage key, bucket or presigned URL is ever returned.
+* **No folder or workspace mutation beyond creation.** An agent may create a
+  folder or a workspace; renaming, moving and deleting either are not exposed.
+  Deleting a workspace is a decision a human makes in the app.
+* **Uploads are bounded and content-carrying.** `upload_file` is the only tool
+  that introduces content the user did not already have, and it caps the decoded
+  bytes before anything touches storage.
+
+### Reading a large file
+
+A tool result travels as a single Streamable-HTTP server-sent event, which the
+MCP transport caps at 1 MiB, and a `structured_output` tool puts the payload in
+that event twice. `download_file` therefore returns at most 128 KiB of file
+content per call and reports `has_more` / `next_offset` so the caller can
+continue; the caller concatenates the decoded parts in order.
+
+This replaced a tool that advertised a 25 MiB limit and in practice failed at
+roughly 340 KiB with `SSE stream failed: Server-sent event exceeded the 1048576
+byte limit` — an ordinary 1 MB PDF was unreadable, and the error named no file
+and suggested no next step. Measured live: 256 KiB succeeded, 384 KiB failed.
 
 ## Asynchronous conversions
 
@@ -153,3 +227,4 @@ Browser-based MCP clients also need their origin in `ALLOWED_ORIGINS`.
 | `tests/unit/application/test_mcp_toolbox.py` | scope gating, ownership delegation, no storage keys in results, `save_file` rules |
 | `tests/integration/test_mcp_oauth_flow.py` | discovery documents, DCR → consent → PKCE token exchange, tool calls over the real transport, cross-user isolation (IDOR), immediate revocation |
 | `tests/unit/infrastructure/test_migration_0024_mcp_oauth.py` | the schema's tables, indexes, idempotency and reversibility |
+| `tests/unit/presentation/test_mcp_workspace_tools.py` | every workspace tool's scope gate, the workspace port's deliberate lack of `delete_workspace`, and that `run_code` never claims completion |

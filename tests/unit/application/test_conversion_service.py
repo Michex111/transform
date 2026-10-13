@@ -2,8 +2,8 @@ import asyncio
 
 import pytest
 
-import src.application.services.conversion_service as conversion_service_module
-from src.application.services.conversion_service import ConversionService
+import src.application.services.conversions.service as conversion_service_module
+from src.application.services.conversions.service import ConversionService
 from src.domain.conversions.exceptions import InvalidConversion
 from src.domain.conversions.value_object.conversion_type import ConversionType
 

@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
 import src.presentation.api.main as api_main
-from src.application.services.file_service import FileService
+from src.application.services.files.service import FileService
 from src.domain.subscriptions.value_object.tier import SubscriptionTier
 from src.infrastructure.adapters.repository.sql_user_file_repo import SQLUserFileRepository
 from src.infrastructure.adapters.repository.sql_user_folder_repo import SQLUserFolderRepository

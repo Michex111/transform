@@ -20,11 +20,13 @@ from src.application.exceptions.mcp_exceptions import (
     InvalidTargetError,
 )
 from src.application.ports.mcp_oauth_port import OAuthClientRecord, TokenRecord
-from src.application.services.mcp_access_service import MCPAccessService
+from src.application.services.mcp.access_service import MCPAccessService
 from src.domain.security.enitities.agent_grant import AgentGrantStatus
 from src.domain.security.value_object.agent_access_scope import FolderAccess, HistoryScope
 from src.domain.security.value_object.agent_scope import (
+    ALL_SCOPES,
     DEFAULT_SCOPES,
+    OFFLINE_ACCESS,
     AgentScope,
     normalize_scopes,
 )
@@ -517,3 +519,222 @@ def test_re_consent_replaces_the_previous_binding() -> None:
         assert grant.history_scope is HistoryScope.ALL
 
     asyncio.run(_run())
+
+
+# --------------------------------------------------------------------------
+# The reason a scope is refused
+#
+# WHY: all three refusals used to share one sentence, "Unsupported or disallowed
+# scope(s)". When a client that had omitted ``scope`` at registration asked for
+# workspace access, that read as "this product has no workspaces" — while the
+# server advertised five scopes and served nine workspace tools. Only one of the
+# three is something the user can act on, so only one may be worded that way.
+# --------------------------------------------------------------------------
+
+
+def test_a_client_outside_its_registration_is_told_it_is_the_client() -> None:
+    async def _run() -> None:
+        repo = FakeMCPRepository()
+        # A client that capped itself to read at registration.
+        await _register(repo, scope="documents.read")
+        with pytest.raises(InvalidScopeError) as caught:
+            await _service(repo).describe_authorization(
+                user_id=1,
+                client_id="client-1",
+                redirect_uri=REDIRECT,
+                requested_scopes=["workspaces.read"],
+                resource=RESOURCE,
+            )
+        message = str(caught.value)
+        # It must point at the client's registration, not call the scope unknown.
+        assert "did not register for" in message
+        assert "workspaces.read" in message
+        assert "Unknown scope" not in message
+
+    asyncio.run(_run())
+
+
+def test_a_genuinely_unknown_scope_lists_the_supported_ones() -> None:
+    async def _run() -> None:
+        repo = FakeMCPRepository()
+        await _register(repo)
+        with pytest.raises(InvalidScopeError) as caught:
+            await _service(repo).describe_authorization(
+                user_id=1,
+                client_id="client-1",
+                redirect_uri=REDIRECT,
+                requested_scopes=["workspaces.admin"],
+                resource=RESOURCE,
+            )
+        message = str(caught.value)
+        assert "Unknown scope" in message
+        # The whole vocabulary, so the caller can correct itself in one step.
+        for scope in ("documents.read", "documents.delete", "workspaces.execute"):
+            assert scope in message
+
+    asyncio.run(_run())
+
+
+def test_an_unrestricted_client_may_be_granted_every_scope() -> None:
+    """The regression this pins.
+
+    A client that registers without a ``scope`` (what most MCP clients do, since
+    RFC 7591 makes it optional) must not end up unable to be granted the scopes
+    the server advertises. Before the fix, the registration filled in the
+    *consent default* — read/convert/write — and that was then treated as the
+    client's own cap, so ``documents.delete`` and both ``workspaces.*`` scopes
+    were permanently ungrantable during consent.
+    """
+
+    async def _run() -> None:
+        repo = FakeMCPRepository()
+        await _register(repo, scope=None)
+        described = await _service(repo).describe_authorization(
+            user_id=1,
+            client_id="client-1",
+            redirect_uri=REDIRECT,
+            requested_scopes=[scope.value for scope in ALL_SCOPES],
+            resource=RESOURCE,
+        )
+        # Every scope the server advertises is grantable to a client that did not
+        # restrict itself.
+        assert {scope.value for scope in described.requested_scopes} == {
+            scope.value for scope in ALL_SCOPES
+        }
+
+    asyncio.run(_run())
+
+
+# --------------------------------------------------------------------------
+# offline_access — a request MARKER, never a capability
+#
+# WHY: clients that omit it from `scopes_supported`-based discovery conclude
+# refresh is unavailable and drop the connection when the 60-minute access token
+# expires, even though a refresh token was issued. But simply advertising it
+# would have broken EVERY authorization request, because `resolve_scopes` refuses
+# an unrecognised scope (fail closed). Both halves are required, and the second
+# half is the constraint that matters: accepting it must not make it grantable.
+# --------------------------------------------------------------------------
+
+
+def test_offline_access_is_accepted_in_a_request() -> None:
+    """Advertising a scope the resolver rejects would fail every request that used it."""
+
+    async def _run() -> None:
+        repo = FakeMCPRepository()
+        await _register(repo, scope=None)
+        described = await _service(repo).describe_authorization(
+            user_id=1,
+            client_id="client-1",
+            redirect_uri=REDIRECT,
+            requested_scopes=["documents.read", OFFLINE_ACCESS],
+            resource=RESOURCE,
+        )
+        # The request is valid, and the marker is not one of the permissions.
+        assert [scope.value for scope in described.requested_scopes] == ["documents.read"]
+
+    asyncio.run(_run())
+
+
+def test_offline_access_is_never_granted() -> None:
+    """The invariant: a marker is accepted on input and can never be stored.
+
+    A grant row listing `offline_access` would claim the agent holds a permission
+    this product does not model, and the consent screen would offer a checkbox
+    that grants nothing.
+    """
+
+    async def _run() -> None:
+        repo = FakeMCPRepository()
+        await _register(repo, scope=None)
+        code = await _service(repo).approve(
+            user_id=1,
+            client_id="client-1",
+            redirect_uri=REDIRECT,
+            requested_scopes=["documents.read", OFFLINE_ACCESS],
+            code_challenge="challenge",
+            resource=RESOURCE,
+            state="s",
+        )
+        assert "code=" in code
+        grant = await repo.get_grant_for_user_client(1, "client-1")
+        assert grant is not None
+        granted = {scope.value for scope in grant.scopes}
+        assert granted == {"documents.read"}
+        assert OFFLINE_ACCESS not in granted
+
+        # And it cannot be smuggled in as the only scope either: an empty
+        # capability set is a refusal, because requesting nothing grantable is
+        # not a way to obtain something grantable.
+        assert OFFLINE_ACCESS not in {scope.value for scope in ALL_SCOPES}
+
+    asyncio.run(_run())
+
+
+def test_offline_access_is_accepted_in_a_client_registration() -> None:
+    """A client that registers FOR it must not be rejected at registration."""
+
+    def _run() -> None:
+        from src.presentation.mcp.server import (
+            build_authorization_server_metadata,
+        )
+
+        metadata = build_authorization_server_metadata()
+        # The SDK derives `scopes_supported` from the registration options, so
+        # this asserts the wiring end to end rather than the constant.
+        assert OFFLINE_ACCESS in metadata["scopes_supported"]
+        assert "documents.read" in metadata["scopes_supported"]
+        assert "workspaces.execute" in metadata["scopes_supported"]
+
+    _run()
+
+
+def test_an_unknown_scope_is_still_refused_alongside_the_marker() -> None:
+    """Accepting the marker must not loosen the fail-closed rule for anything else."""
+
+    async def _run() -> None:
+        repo = FakeMCPRepository()
+        await _register(repo, scope=None)
+        with pytest.raises(InvalidScopeError) as caught:
+            await _service(repo).describe_authorization(
+                user_id=1,
+                client_id="client-1",
+                redirect_uri=REDIRECT,
+                requested_scopes=["documents.read", OFFLINE_ACCESS, "documents.admin"],
+                resource=RESOURCE,
+            )
+        # Only the genuinely unknown value is named.
+        assert "documents.admin" in str(caught.value)
+        assert OFFLINE_ACCESS not in str(caught.value)
+
+    asyncio.run(_run())
+
+
+def test_the_consent_view_lists_every_permission_including_workspaces() -> None:
+    """The regression this pins.
+
+    `_scope_descriptions` hand-listed only the four `documents.*` scopes, so the
+    consent screen never rendered the workspace permissions. Since the screen
+    posts back only what it rendered, an approved connection silently LOST any
+    workspace access the client asked for — and the user could not see that it had
+    been requested. An agent then failed every workspace tool with "needs the
+    workspaces.read permission", with no way for the user to grant it.
+    """
+
+    def _run() -> None:
+        from src.presentation.api.routers.v1.mcp import _scope_descriptions
+
+        described = _scope_descriptions((), ())
+        listed = [item.scope for item in described]
+        assert listed == [scope.value for scope in ALL_SCOPES], (
+            "the consent screen must offer exactly the product's permissions"
+        )
+        assert "workspaces.read" in listed
+        assert "workspaces.execute" in listed
+        # Every listed scope has user-facing wording, or the screen would print a
+        # raw identifier.
+        assert all(item.description for item in described)
+        # And none of them is a request marker.
+        assert OFFLINE_ACCESS not in listed
+
+    _run()

@@ -29,8 +29,8 @@ from src.application.exceptions.file_transfer_exceptions import (
     UploadSessionNotFoundError,
     UploadVerificationError,
 )
-from src.application.services.conversion_service import ConversionService
-from src.application.services.file_transfer_service import TransferService
+from src.application.services.conversions.service import ConversionService
+from src.application.services.files.transfer_service import TransferService
 from src.domain.conversions.entities.conversion_job import ConversionJob
 from src.domain.conversions.exceptions import InvalidConversion
 from src.domain.conversions.value_object.conversion_type import ConversionType

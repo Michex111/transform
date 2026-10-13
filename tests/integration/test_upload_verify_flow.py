@@ -12,8 +12,8 @@ from sqlalchemy.pool import NullPool
 
 import src.presentation.api.main as api_main
 from src.application.dtos.upload_dto import UploadResponse, UploadSession
-from src.application.services.file_service import FileService
-from src.application.services.file_transfer_service import TransferService
+from src.application.services.files.service import FileService
+from src.application.services.files.transfer_service import TransferService
 from src.domain.conversions.entities.conversion_job import ConversionJob
 from src.domain.subscriptions.value_object.tier import SubscriptionTier
 from src.infrastructure.adapters.repository.sql_user_file_repo import SQLUserFileRepository

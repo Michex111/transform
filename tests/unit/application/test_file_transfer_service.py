@@ -12,7 +12,7 @@ from src.application.exceptions.file_transfer_exceptions import (
     UploadVerificationError,
 )
 from src.application.ports.object_storage_port import StorageUrlGateway
-from src.application.services.file_transfer_service import TransferService
+from src.application.services.files.transfer_service import TransferService
 
 
 class FakeStorageGateway:

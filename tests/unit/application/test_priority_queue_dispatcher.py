@@ -4,8 +4,8 @@ import asyncio
 
 import pytest
 
-from src.application.services.priority_queue_dispatcher import PriorityQueueDispatcher
-from src.application.services.queue_priority_router import QueuePriorityRouter
+from src.application.services.conversions.priority_queue_dispatcher import PriorityQueueDispatcher
+from src.application.services.conversions.queue_priority_router import QueuePriorityRouter
 from src.domain.conversions.entities.conversion_job import ConversionJob
 from src.domain.conversions.value_object.conversion_type import ConversionType
 from src.domain.subscriptions.value_object.tier import SubscriptionTier

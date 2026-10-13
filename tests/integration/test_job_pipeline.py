@@ -3,8 +3,8 @@ from pathlib import Path
 
 import pytest
 
-import src.application.services.conversion_service as conversion_service_module
-from src.application.services.conversion_service import ConversionService
+import src.application.services.conversions.service as conversion_service_module
+from src.application.services.conversions.service import ConversionService
 from src.domain.conversions.value_object.job_status import JobStatus
 from workers.converter_workers.context.worker_context import WorkerContext
 from workers.converter_workers.processor import process_job

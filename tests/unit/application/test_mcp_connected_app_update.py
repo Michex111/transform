@@ -28,7 +28,7 @@ from src.application.exceptions.mcp_exceptions import (
     InvalidScopeError,
 )
 from src.application.ports.mcp_oauth_port import TokenRecord
-from src.application.services.mcp_access_service import (
+from src.application.services.mcp.access_service import (
     ACCESS_TOKEN_KIND,
     MCPAccessService,
     hash_secret,

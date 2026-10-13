@@ -6,18 +6,18 @@ from fastapi import Depends
 from minio import Minio
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.application.services.api_key_service import APIKeyService
-from src.application.services.assistant_service import AssistantService
-from src.application.services.assistant_tools import AssistantToolBox
-from src.application.services.conversion_service import ConversionService
-from src.application.services.file_service import FileService
-from src.application.services.file_transfer_service import TransferService
-from src.application.services.mcp_access_service import MCPAccessService
-from src.application.services.mcp_activity_service import McpActivityService
-from src.application.services.api_telemetry_service import ApiTelemetryService
-from src.application.services.priority_queue_dispatcher import PriorityQueueDispatcher
-from src.application.services.queue_priority_router import QueuePriorityRouter
-from src.application.services.workflow_service import WorkflowService
+from src.application.services.developer.api_key_service import APIKeyService
+from src.application.services.assistant.service import AssistantService
+from src.application.services.assistant.tools import AssistantToolBox
+from src.application.services.conversions.service import ConversionService
+from src.application.services.files.service import FileService
+from src.application.services.files.transfer_service import TransferService
+from src.application.services.mcp.access_service import MCPAccessService
+from src.application.services.mcp.activity_service import McpActivityService
+from src.application.services.developer.api_telemetry_service import ApiTelemetryService
+from src.application.services.conversions.priority_queue_dispatcher import PriorityQueueDispatcher
+from src.application.services.conversions.queue_priority_router import QueuePriorityRouter
+from src.application.services.workflows.service import WorkflowService
 from src.presentation.schemas.workflow import MAX_BATCH_FILES
 from src.application.ports.assistant_account_port import AssistantAccountPort
 from src.application.ports.assistant_model_port import AssistantModelResolver
@@ -435,7 +435,7 @@ def get_assistant_toolbox(
         build_execution_service,
         build_workspace_service,
     )
-    from src.application.services.assistant_workspace_tools import (
+    from src.application.services.assistant.workspace_tools import (
         AssistantWorkspaceToolBox,
     )
 

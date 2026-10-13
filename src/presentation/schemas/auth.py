@@ -40,7 +40,7 @@ class UserResponse(BaseModel):
     last_name: str | None = None
     #: ``"Ada Lovelace"``, whichever single name is set, else the username.
     #: Computed, never an ORM attribute — build this model with
-    #: ``to_user_response()`` (``application/services/user_profile.py``) rather
+    #: ``to_user_response()`` (``application/services/users/profile.py``) rather
     #: than ``model_validate(orm_row)``, which cannot supply it.
     display_name: str
     #: ``"AL"`` from the names, else the first two letters of the username.

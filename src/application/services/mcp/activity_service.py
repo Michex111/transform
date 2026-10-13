@@ -26,7 +26,7 @@ from src.application.ports.api_telemetry_port import (
     TelemetryRepositoryPort,
 )
 from src.application.ports.mcp_oauth_port import MCPRepositoryPort
-from src.application.services.api_telemetry_service import ResolvedRange
+from src.application.services.developer.api_telemetry_service import ResolvedRange
 from src.domain.security.enitities.agent_grant import AgentGrantStatus
 from src.domain.security.value_object.agent_scope import AgentScope
 

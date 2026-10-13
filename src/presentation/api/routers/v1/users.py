@@ -16,14 +16,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.application.exceptions.file_system_exceptions import FolderNotFoundError
 from src.application.ports.email_port import EmailPort
 from src.application.ports.sms_port import SmsPort
-from src.application.services.email_templates import (
+from src.application.services.notifications.email_templates import (
     build_password_reset_email,
     build_verification_email,
 )
-from src.application.services.file_magic import validate_upload_signature
-from src.application.services.file_service import FileService
-from src.application.services.sms_templates import build_phone_verification_sms
-from src.application.services.user_profile import to_user_response
+from src.application.services.files.magic import validate_upload_signature
+from src.application.services.files.service import FileService
+from src.application.services.notifications.sms_templates import build_phone_verification_sms
+from src.application.services.users.profile import to_user_response
 from src.domain.security.enitities.email_verification import (
     cooldown_elapsed,
     hash_verification_token,

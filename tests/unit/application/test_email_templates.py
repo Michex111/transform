@@ -7,7 +7,7 @@ must be escaped, and the message must not depend on any remote asset.
 
 import re
 
-from src.application.services.email_templates import (
+from src.application.services.notifications.email_templates import (
     build_password_reset_email,
     build_verification_email,
 )

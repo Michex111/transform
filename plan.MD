@@ -281,7 +281,7 @@ classDiagram
    - `QueuePort`: Abstract job queue operations (interface)
    - Enable dependency inversion and testability
 
-2. **Services** (`application/services/conversion_service.py`)
+2. **Services** (`application/services/conversions/service.py`)
    - Orchestrate use cases:
      - SubmitConversionJob: validate → create → persist → publish
      - GetJobStatus: retrieve from DB

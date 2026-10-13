@@ -34,7 +34,7 @@ paths resolve to an active `UserModel`, then call
 
 Before either method above can be used, the account must prove it controls its
 email address. Implementation: `src/domain/security/enitities/email_verification.py`,
-`src/application/services/email_templates.py`,
+`src/application/services/notifications/email_templates.py`,
 `src/infrastructure/adapters/email/`, and
 `src/presentation/api/routers/v1/users.py`.
 
@@ -108,7 +108,7 @@ tokens, so a stolen refresh token cannot be used directly as an access token.
 
 ## 3. API-key lifecycle & hashing
 
-Implementation: `src/application/services/api_key_service.py`,
+Implementation: `src/application/services/developer/api_key_service.py`,
 `src/presentation/api/routers/v1/api_keys.py`.
 
 | Phase | Behaviour |

@@ -12,8 +12,8 @@ harmful — it made the streamed download advertise a form submission for a song
 
 import pytest
 
-from src.application.services.file_service import FileService
-from src.application.services.mime_types import (
+from src.application.services.files.service import FileService
+from src.application.services.files.mime_types import (
     FALLBACK_MIME_TYPE,
     GENERIC_MIME_TYPES,
     mime_type_for,

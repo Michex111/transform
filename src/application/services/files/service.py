@@ -23,19 +23,19 @@ from src.application.exceptions.file_system_exceptions import (
     FolderNotFoundError,
     StorageQuotaExceededError,
 )
-from src.application.services.file_listing import (
+from src.application.services.files.listing import (
     DEFAULT_FILE_SORT,
     DEFAULT_FILE_SORT_ORDER,
     FileSortKey,
     FileSortOrder,
 )
-from src.application.services.file_magic import validate_upload_signature
-from src.application.services.mime_types import (
+from src.application.services.files.magic import validate_upload_signature
+from src.application.services.files.mime_types import (
     FALLBACK_MIME_TYPE,
     GENERIC_MIME_TYPES,
     mime_type_for,
 )
-from src.application.services.upload_limits import default_size_limits
+from src.application.services.files.upload_limits import default_size_limits
 from src.domain.subscriptions.policies.storage_quota import evaluate_storage_quota
 from src.domain.subscriptions.policies.tier_policy import TierPolicy
 from src.domain.subscriptions.value_object.tier import SubscriptionTier
@@ -176,7 +176,7 @@ class FileStorageOperations(Protocol):
 
 
 # Tier → max upload size (bytes). Single source of truth lives in
-# ``application/services/upload_limits.py`` so the dashboard reports the same
+# ``application/services/files/upload_limits.py`` so the dashboard reports the same
 # number this service enforces.
 
 

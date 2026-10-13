@@ -13,13 +13,13 @@ from src.domain.conversions.value_object.job_status import JobStatus
 from src.domain.subscriptions.value_object.tier import SubscriptionTier
 from src.application.exceptions.conversion_job_exception import InvalidConversionJobError
 from src.application.exceptions.file_system_exceptions import FileSystemError
-from src.application.services.conversion_service import (
+from src.application.services.conversions.service import (
     BatchItemRequest,
     BatchOutcome,
     ConversionService,
 )
-from src.application.services.file_service import FileService
-from src.application.services.file_transfer_service import TransferService
+from src.application.services.files.service import FileService
+from src.application.services.files.transfer_service import TransferService
 from src.infrastructure.adapters.repository.sql_conversion_job_repo import SQLConversionJobRepository
 from src.infrastructure.adapters.repository.sql_subscription_repo import SQLSubscriptionRepository
 from src.infrastructure.adapters.security.encryption import FileEncryptionService

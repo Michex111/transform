@@ -14,7 +14,7 @@ from src.application.dtos.assistant_dto import Artifact
 from src.application.exceptions.file_system_exceptions import FileRecordNotFoundError
 from src.application.ports.assistant_account_port import AccountOverview
 from src.application.ports.document_text_port import ExtractedDocument
-from src.application.services.assistant_tools import (
+from src.application.services.assistant.tools import (
     _MAX_EXTENSION_FILTERS,
     _MAX_LIST_LIMIT,
     AssistantToolBox,

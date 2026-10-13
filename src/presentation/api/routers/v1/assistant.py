@@ -44,7 +44,7 @@ from src.presentation.api.error_responses import (
     AI_PROVIDER_ERROR_CODE,
     AI_PROVIDER_ERROR_MESSAGE,
 )
-from src.application.services.assistant_service import (
+from src.application.services.assistant.service import (
     AssistantConversationNotFound,
     AssistantService,
 )

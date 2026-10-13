@@ -10,7 +10,7 @@ Two deliberate properties:
 
 * **No rule is re-implemented here.** Scope decisions, redirect-URI matching,
   resource (audience) binding, revocation and expiry live in
-  :class:`~src.application.services.mcp_access_service.MCPAccessService`. If a
+  :class:`~src.application.services.mcp.access_service.MCPAccessService`. If a
   check appears in this file, it is a bug — the adapter would then disagree with
   the service under some future edit.
 * **A fresh database session per call.** OAuth endpoints and MCP tool calls are
@@ -45,8 +45,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.application.exceptions.mcp_exceptions import MCPAccessError
 from src.application.ports.mcp_oauth_port import OAuthClientRecord
-from src.application.services.mcp_access_service import MCPAccessService, build_redirect_uri
-from src.domain.security.value_object.agent_scope import ALL_SCOPES, AgentScope, scope_string
+from src.application.services.mcp.access_service import MCPAccessService, build_redirect_uri
+from src.domain.security.value_object.agent_scope import (
+    ALL_SCOPES,
+    OFFLINE_ACCESS,
+    AgentScope,
+    scope_string,
+)
 from src.infrastructure.adapters.repository.sql_mcp_repo import SQLMCPRepository
 
 #: How the adapter obtains a database session. Injected so tests can point it at
@@ -237,10 +242,11 @@ class MCPOAuthProvider(
             record = await service.peek_refresh_token(refresh_token)
         if record is None or record.kind != "REFRESH" or record.revoked_at is not None:
             return None
+        sdk_scopes = [scope.value for scope in record.scopes] + [OFFLINE_ACCESS]
         return RefreshToken(
             token=refresh_token,
             client_id=record.client_id,
-            scopes=[scope.value for scope in record.scopes],
+            scopes=sdk_scopes,
             expires_at=int(record.expires_at.timestamp()),
             resource=record.resource,
             subject=record.subject,

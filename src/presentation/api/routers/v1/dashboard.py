@@ -11,8 +11,8 @@ from src.domain.subscriptions.value_object.credit_period import (
     current_period_key,
     next_period_start,
 )
-from src.application.services.upload_limits import tier_max_file_size_bytes
-from src.application.services.user_profile import to_user_response
+from src.application.services.files.upload_limits import tier_max_file_size_bytes
+from src.application.services.users.profile import to_user_response
 from src.infrastructure.adapters.repository.sql_api_key_repo import SQLAPIKeyRepository
 from src.infrastructure.adapters.repository.sql_conversion_job_repo import SQLConversionJobRepository
 from src.infrastructure.adapters.repository.sql_credit_repo import SQLCreditRepository
@@ -118,6 +118,6 @@ async def get_profile(current_user: CurrentUser) -> UserResponse:
 
     ``display_name``/``initials``/``avatar_url`` are computed, so this cannot go
     through ``UserResponse.model_validate`` — see
-    ``application/services/user_profile.py``.
+    ``application/services/users/profile.py``.
     """
     return to_user_response(current_user)

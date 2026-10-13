@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from src.application.services.api_key_service import APIKeyService, hash_api_key
+from src.application.services.developer.api_key_service import APIKeyService, hash_api_key
 from src.domain.security.enitities.api_key import APIKey, APIKeyStatus
 
 

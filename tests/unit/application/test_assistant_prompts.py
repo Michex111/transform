@@ -6,7 +6,7 @@ which tools it must use. These assertions are deliberately about *meaning*
 freely while the safety-critical instructions cannot quietly disappear.
 """
 
-from src.application.services.assistant_prompts import SYSTEM_PROMPT
+from src.application.services.assistant.prompts import SYSTEM_PROMPT
 
 
 def test_the_prompt_forbids_claiming_a_file_was_deleted() -> None:

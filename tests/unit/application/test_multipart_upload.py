@@ -20,7 +20,7 @@ from src.application.exceptions.file_transfer_exceptions import (
     UploadSessionNotFoundError,
     UploadVerificationError,
 )
-from src.application.services.file_transfer_service import TransferService, plan_multipart
+from src.application.services.files.transfer_service import TransferService, plan_multipart
 
 THRESHOLD = 100
 PART_SIZE = 10

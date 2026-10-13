@@ -23,9 +23,9 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 
 from src.application.exceptions.file_system_exceptions import FileSystemError
-from src.application.services.conversion_service import BatchItemRequest, ConversionService
-from src.application.services.file_service import FileService
-from src.application.services.workflow_service import (
+from src.application.services.conversions.service import BatchItemRequest, ConversionService
+from src.application.services.files.service import FileService
+from src.application.services.workflows.service import (
     WorkflowNotFoundError,
     WorkflowRunFile,
     WorkflowService,

@@ -4,7 +4,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from src.application.services.api_key_service import APIKeyService
+from src.application.services.developer.api_key_service import APIKeyService
 from src.presentation.api.dependencies.auth_dependencies import CurrentUser
 from src.presentation.api.dependencies.service_dependencies import get_api_key_service
 from src.presentation.schemas.api_keys import (

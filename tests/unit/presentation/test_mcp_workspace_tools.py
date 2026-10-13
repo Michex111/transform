@@ -28,9 +28,9 @@ from src.application.exceptions.workspace_exceptions import (
     WorkspaceNotFoundError,
     WorkspaceQuotaExceededError,
 )
-from src.application.services.execution_service import ExecutionNotFoundError
-from src.application.services.mcp_toolbox import MCPToolContext
-from src.application.services.mcp_workspace_tools import MCPWorkspaceTools
+from src.application.services.workspaces.execution_service import ExecutionNotFoundError
+from src.application.services.mcp.toolbox import MCPToolContext
+from src.application.services.mcp.workspace_tools import MCPWorkspaceTools
 from src.domain.security.value_object.agent_scope import (
     ALL_SCOPES,
     DEFAULT_SCOPES,
@@ -65,6 +65,7 @@ class FakeWorkspaces:
     def __init__(self) -> None:
         self.created: list[tuple[str, str]] = []
         self.written: dict[str, bytes] = {}
+        self.saved: list[str] = []
         self.raise_on_detail: Exception | None = None
 
     async def list_workspaces(self, user_id: int, *, limit: int, offset: int):
@@ -99,11 +100,37 @@ class FakeWorkspaces:
     async def disk_usage(self, workspace_id: str, user_id: int) -> dict[str, int]:
         return {"used_bytes": 10, "limit_bytes": 100, "remaining_bytes": 90}
 
+    async def save_environment(self, workspace_id: str, user_id: int) -> Any:
+        from types import SimpleNamespace
+
+        self.saved.append(workspace_id)
+        # The real service queues the build, so PENDING is the honest default.
+        return SimpleNamespace(revision_id="rev-1", status="PENDING")
+
 
 class FakeExecutions:
     def __init__(self, *, failure: Exception | None = None) -> None:
         self.submitted: list[dict[str, Any]] = []
+        self.cancelled: list[str] = []
         self._failure = failure
+
+    async def cancel(self, execution_id: str, user_id: int) -> Any:
+        if execution_id == "missing":
+            raise ExecutionNotFoundError(execution_id)
+        self.cancelled.append(execution_id)
+        from src.domain.workspaces.value_object.execution_status import ExecutionStatus
+
+        execution = Execution(
+            execution_id=execution_id,
+            workspace_id="ws-1",
+            user_id=user_id,
+            mode=ExecutionMode.SCRIPT,
+            source="print(1)",
+        )
+        execution.start(runtime_id="rt-1")
+        execution.cancel()
+        assert execution.status is ExecutionStatus.CANCELLED
+        return execution
 
     async def submit(self, *, workspace_id, user_id, mode, source, timeout_seconds=300):
         if self._failure is not None:
@@ -483,7 +510,7 @@ class TestSingleImplementation:
         construction: the agent tools hold the workspace/execution services
         behind ports, and this asserts the ports stay a subset of them.
         """
-        from src.application.services.workspace_service import WorkspaceService
+        from src.application.services.workspaces.workspace_service import WorkspaceService
 
         for name in (
             "list_workspaces",
@@ -497,7 +524,7 @@ class TestSingleImplementation:
             assert hasattr(WorkspaceService, name), name
         # And the capability an agent must NOT have is absent from the port the
         # tools depend on, not merely unused.
-        from src.application.services.mcp_workspace_tools import MCPWorkspacePort
+        from src.application.services.mcp.workspace_tools import MCPWorkspacePort
 
         assert not hasattr(MCPWorkspacePort, "delete_workspace")
 
@@ -521,3 +548,91 @@ def test_no_workspace_path_is_reachable_without_a_scope(tmp_path: Path) -> None:
     for name in public:
         signature = inspect.signature(getattr(MCPWorkspaceTools, name))
         assert "ctx" in signature.parameters, name
+
+
+# --------------------------------------------------------------------------
+# cancel_execution / save_workspace_environment
+#
+# WHY these tools exist: run_code can start minutes of work, and before
+# cancel_execution an agent that had started a run had no way to stop it — a user
+# saying "stop that" was unanswerable. save_workspace_environment closes the
+# mirror-image gap: an agent could install packages it could never persist, so
+# work that looked durable silently was not.
+# --------------------------------------------------------------------------
+
+
+def test_cancel_execution_needs_the_execute_scope() -> None:
+    """Read-only access must not be able to stop the platform's work."""
+    import asyncio
+
+    async def _run() -> None:
+        tools = _tools()
+        denied = await tools.cancel_execution(_ctx(AgentScope.WORKSPACES_READ), "ex-1")
+        assert denied["ok"] is False
+        assert denied["required_scope"] == "workspaces.execute"
+
+    asyncio.run(_run())
+
+
+def test_cancel_execution_reports_the_resulting_status() -> None:
+    import asyncio
+
+    async def _run() -> None:
+        executions = FakeExecutions()
+        tools = _tools(executions=executions)
+        result = await tools.cancel_execution(_ctx(AgentScope.WORKSPACES_EXECUTE), "ex-1")
+        assert result["ok"] is True
+        assert result["status"] == "CANCELLED"
+        assert executions.cancelled == ["ex-1"]
+        # A settled run needs no caveat.
+        assert "note" not in result
+
+    asyncio.run(_run())
+
+
+def test_cancel_execution_of_an_unknown_id_is_a_value() -> None:
+    """One answer for "missing" and "not yours", same as every other tool."""
+    import asyncio
+
+    async def _run() -> None:
+        tools = _tools()
+        result = await tools.cancel_execution(_ctx(AgentScope.WORKSPACES_EXECUTE), "missing")
+        assert result["ok"] is False
+        assert result["error"] == "That execution was not found."
+
+    asyncio.run(_run())
+
+
+def test_save_workspace_environment_needs_the_execute_scope() -> None:
+    import asyncio
+
+    async def _run() -> None:
+        workspaces = FakeWorkspaces()
+        tools = _tools(workspaces=workspaces)
+        denied = await tools.save_workspace_environment(
+            _ctx(AgentScope.WORKSPACES_READ), "ws-1"
+        )
+        assert denied["ok"] is False
+        assert denied["required_scope"] == "workspaces.execute"
+        assert workspaces.saved == []
+
+    asyncio.run(_run())
+
+
+def test_save_workspace_environment_does_not_claim_the_snapshot_is_ready() -> None:
+    """The build is queued, so a "saved" claim would be a lie the agent repeats."""
+    import asyncio
+
+    async def _run() -> None:
+        workspaces = FakeWorkspaces()
+        tools = _tools(workspaces=workspaces)
+        result = await tools.save_workspace_environment(
+            _ctx(AgentScope.WORKSPACES_EXECUTE), "ws-1"
+        )
+        assert result["ok"] is True
+        assert result["status"] == "PENDING"
+        assert result["revision_id"] == "rev-1"
+        assert "not restored until a later start" in result["note"]
+        assert workspaces.saved == ["ws-1"]
+
+    asyncio.run(_run())

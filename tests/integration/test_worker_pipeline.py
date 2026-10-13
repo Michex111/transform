@@ -6,8 +6,8 @@ import pypdfium2 as pdfium
 import pytest
 from PIL import Image
 
-import src.application.services.conversion_service as conversion_service_module
-from src.application.services.conversion_service import ConversionService
+import src.application.services.conversions.service as conversion_service_module
+from src.application.services.conversions.service import ConversionService
 from src.domain.conversions.value_object.job_status import JobStatus
 from src.infrastructure.converters.converter_registry import get_registry
 from tests.fakes.fake_logger import FakeLogger

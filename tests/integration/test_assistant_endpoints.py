@@ -27,7 +27,7 @@ from sqlalchemy.pool import NullPool
 
 import src.presentation.api.main as api_main
 from src.application.dtos.upload_dto import UploadResponse
-from src.application.services.file_service import FileService
+from src.application.services.files.service import FileService
 from src.domain.assistant.exceptions.assistant_exceptions import AssistantQuotaExceeded
 from src.domain.conversions.entities.conversion_job import ConversionJob
 from src.domain.conversions.value_object.conversion_type import ConversionType

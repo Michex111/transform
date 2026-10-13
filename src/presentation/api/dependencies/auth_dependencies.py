@@ -5,7 +5,7 @@ from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.application.services.api_key_service import APIKeyService
+from src.application.services.developer.api_key_service import APIKeyService
 from src.domain.conversions.value_object.job_origin import JobOrigin
 from src.infrastructure.auth.jwt_provider import verify_access_token
 from src.infrastructure.adapters.repository.sql_api_key_repo import SQLAPIKeyRepository

@@ -25,12 +25,12 @@ from src.application.dtos.assistant_dto import (
 from src.application.exceptions.file_system_exceptions import FileRecordNotFoundError
 from src.application.ports.document_text_port import ExtractedDocument
 from src.application.ports.llm_port import LlmMessage, LlmResponse, LlmToolCall, LlmToolSpec
-from src.application.services.assistant_service import (
+from src.application.services.assistant.service import (
     AssistantService,
     build_bounded_history,
 )
-from src.application.services.assistant_tools import AttachmentRef
-from src.application.services.assistant_workspace_tools import WorkspaceTurnContext
+from src.application.services.assistant.tools import AttachmentRef
+from src.application.services.assistant.workspace_tools import WorkspaceTurnContext
 from src.domain.assistant.entities.conversation import (
     Conversation,
     Message,

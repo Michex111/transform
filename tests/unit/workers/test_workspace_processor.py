@@ -24,7 +24,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.application.ports.runtime_provider_port import ExecutionOutcome
-from src.application.services.workspace_service import WorkspaceService
+from src.application.services.workspaces.workspace_service import WorkspaceService
 from src.domain.workspaces.entities.execution import Execution
 from src.domain.workspaces.entities.runtime_image_revision import RuntimeImageRevision
 from src.domain.workspaces.value_object.execution_mode import ExecutionMode

@@ -46,10 +46,47 @@ class InvalidRedirectUriError(MCPAccessError):
 
 
 class InvalidScopeError(MCPAccessError):
-    """A requested scope is not one this server may grant."""
+    """A requested scope is not one this server may grant.
 
-    def __init__(self, scopes: object) -> None:
-        super().__init__("invalid_scope", f"Unsupported or disallowed scope(s): {scopes}.")
+    Three distinct refusals share this error type, and they need different
+    sentences, because they call for different actions:
+
+    * the scope does not exist  → the client is broken, or the user asked for
+      something the product does not offer;
+    * the deployment forbids it → an operator decision, nothing the user can fix;
+    * the *client* never registered for it → the client must register for it (or
+      reconnect), which the user CAN act on.
+
+    The original single sentence said "Unsupported or disallowed scope(s)" for
+    all three. When a client that had omitted ``scope`` at registration asked
+    for workspace access, that message read as "this product has no workspace
+    support" — while the server was advertising five scopes and serving nine
+    workspace tools. The cause was entirely in the client's own registration.
+    """
+
+    def __init__(self, scopes: object, *, reason: str = "unknown") -> None:
+        listed = " ".join(str(s) for s in scopes) if isinstance(scopes, (list, tuple, set)) else str(scopes)
+        if reason == "client":
+            detail = (
+                f"The application did not register for: {listed}. It must request these "
+                "scopes when it registers with this server; reconnecting it will repeat "
+                "the registration."
+            )
+        elif reason == "deployment":
+            detail = (
+                f"This deployment does not grant: {listed}. That is an operator setting, "
+                "not something you can change by reconnecting."
+            )
+        elif reason == "unknown":
+            detail = (
+                f"Unknown scope(s): {listed}. Supported scopes are documents.read, "
+                "documents.convert, documents.write, documents.delete, workspaces.read "
+                "and workspaces.execute."
+            )
+        else:
+            # Callers that predate the reason argument keep the original wording.
+            detail = f"Unsupported or disallowed scope(s): {listed}."
+        super().__init__("invalid_scope", detail)
 
 
 class InvalidTargetError(MCPAccessError):

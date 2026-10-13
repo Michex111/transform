@@ -46,18 +46,42 @@ Check for that line first. Confirm from outside with:
 
 `resource` and `authorization_servers` must both be the public HTTPS origin.
 
-### `offline_access` is not advertised
+### `offline_access` — fixed, and why it needed both halves
 
 Transform issues refresh tokens and supports the `refresh_token` grant, but the
-scope is absent from `scopes_supported`. A client that looks for it — ChatGPT
+scope was absent from `scopes_supported`. A client that looks for it — ChatGPT
 does — may conclude refresh is unavailable and lose the connection when the
 60-minute access token expires.
 
-**Do not simply add it to the metadata.** `MCPAccessService.resolve_scopes` raises
-on any unrecognised scope (a fail-closed rule that stops "grant read" silently
-becoming something broader), so advertising `offline_access` without also
-teaching that resolver to accept it as a *marker* rather than a capability would
-make every authorization request fail. Both halves or neither.
+It is now advertised **and** accepted. Both were required, which is why this was
+not a one-line change: `MCPAccessService.resolve_scopes` raises on any
+unrecognised scope (a fail-closed rule that stops "grant read" silently becoming
+something broader), so advertising `offline_access` without also teaching that
+resolver to accept it would have made **every** authorization request fail.
+
+The constraint that makes it safe is that it stays a *marker*, never a
+capability:
+
+* it is **not** an `AgentScope`, so nothing can call `covers()` against it;
+* `normalize_scopes` only ever yields `ALL_SCOPES` members, so it cannot reach a
+  grant row, a token record, or a checkbox on the consent screen;
+* `KNOWN_REQUEST_SCOPES` (capabilities + markers) is the advertised and accepted
+  vocabulary; `ALL_SCOPES` remains the capabilities alone.
+
+Verified live: the PRM and both authorisation-server metadata documents list it,
+an authorization request containing it succeeds, and the resulting grant holds
+only capabilities. Tests:
+`test_offline_access_is_accepted_in_a_request`,
+`test_offline_access_is_never_granted`,
+`test_offline_access_is_accepted_in_a_client_registration` and
+`test_an_unknown_scope_is_still_refused_alongside_the_marker` in
+`tests/unit/application/test_mcp_access_service.py`.
+
+One thing it still does not do: echo `offline_access` back in the token
+response's `scope`. Doing that would mean persisting the marker on the
+authorization-code record to know it at exchange time — a schema change — and
+the marker's purpose (discovery) is served by advertising it. The response does
+carry the `refresh_token` itself, which is what RFC 6749 tells a client to read.
 
 ### The metadata under-reports auth methods
 

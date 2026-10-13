@@ -31,10 +31,10 @@ os.environ["STRIPE_WEBHOOK_SECRET"] = "whsec_mock_secret"
 
 import stripe  # noqa: E402
 
-import src.application.services.conversion_service as conversion_service_module  # noqa: E402
+import src.application.services.conversions.service as conversion_service_module  # noqa: E402
 import src.presentation.api.main as api_main  # noqa: E402
 from src.application.ports.object_storage_port import StorageUrlGateway  # noqa: E402
-from src.application.services.file_transfer_service import TransferService  # noqa: E402
+from src.application.services.files.transfer_service import TransferService  # noqa: E402
 from src.domain.conversions.entities.conversion_job import ConversionJob  # noqa: E402
 from src.domain.conversions.value_object.conversion_type import ConversionType  # noqa: E402
 from src.infrastructure.adapters.repository.sql_conversion_job_repo import SQLConversionJobRepository  # noqa: E402

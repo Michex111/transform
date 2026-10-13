@@ -35,8 +35,8 @@ from src.application.ports.document_text_port import (
     ExtractedDocument,
 )
 from src.application.ports.llm_port import LlmMessage, LlmToolSpec
-from src.application.services.assistant_prompts import SUMMARY_PROMPT
-from src.application.services.assistant_workspace_tools import (
+from src.application.services.assistant.prompts import SUMMARY_PROMPT
+from src.application.services.assistant.workspace_tools import (
     WORKSPACE_TOOL_NAMES,
     AssistantWorkspaceToolBox,
     WorkspaceTurnContext,

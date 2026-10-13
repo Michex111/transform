@@ -40,17 +40,17 @@ from src.application.ports.assistant_repository_port import (
     ConversationRepositoryPort,
 )
 from src.application.ports.llm_port import LlmMessage, LlmPort, LlmToolCall
-from src.application.services.assistant_prompts import (
+from src.application.services.assistant.prompts import (
     RECOMMEND_PROMPT,
     SYSTEM_PROMPT,
 )
-from src.application.services.assistant_tools import (
+from src.application.services.assistant.tools import (
     AssistantToolBox,
     build_attachment_context,
     format_category,
     format_label,
 )
-from src.application.services.assistant_workspace_tools import build_workspace_context
+from src.application.services.assistant.workspace_tools import build_workspace_context
 from src.domain.assistant.entities.conversation import (
     Conversation,
     Message,

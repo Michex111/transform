@@ -52,6 +52,7 @@ from src.domain.security.value_object.agent_access_scope import FolderAccess, Hi
 from src.domain.security.value_object.agent_scope import (
     ALL_SCOPES,
     DEFAULT_SCOPES,
+    KNOWN_REQUEST_SCOPES,
     AgentScope,
     is_subset,
     normalize_scopes,
@@ -63,7 +64,12 @@ from src.infrastructure.logging.audit import log_connection_control
 ACCESS_TOKEN_KIND = "ACCESS"
 REFRESH_TOKEN_KIND = "REFRESH"
 
-_KNOWN_SCOPE_VALUES = frozenset(scope.value for scope in ALL_SCOPES)
+#: Scope strings this server recognises in a REQUEST. Broader than
+#: ``ALL_SCOPES`` by the request markers (``offline_access``), which are accepted
+#: and then dropped by ``normalize_scopes`` — so they can never be persisted as a
+#: capability. Validating against ``ALL_SCOPES`` instead is what made every
+#: request that asked for ``offline_access`` fail outright.
+_KNOWN_SCOPE_VALUES = frozenset(KNOWN_REQUEST_SCOPES)
 
 
 def hash_secret(value: str) -> str:
@@ -595,6 +601,12 @@ class MCPAccessService:
 
         An empty request yields :data:`DEFAULT_SCOPES` — read, convert and
         write, never delete.
+
+        The result contains only capabilities. A REQUEST MARKER such as
+        ``offline_access`` is accepted here (it is a known scope string, so it is
+        not an unknown-scope error) and then dropped by ``normalize_scopes`` —
+        which is what stops it being echoed back as something the agent holds or
+        rendered as a permission the user could tick.
         """
         client_scope_values = {
             value
@@ -604,15 +616,17 @@ class MCPAccessService:
         raw = [value.strip() for value in (requested or ()) if value and value.strip()]
         unknown = [value for value in raw if value not in _KNOWN_SCOPE_VALUES]
         if unknown:
-            raise InvalidScopeError(unknown)
+            raise InvalidScopeError(unknown, reason="unknown")
         scopes = normalize_scopes(raw) if raw else DEFAULT_SCOPES
         disallowed = [scope.value for scope in scopes if scope not in self._grantable]
         if disallowed:
-            raise InvalidScopeError(disallowed)
+            raise InvalidScopeError(disallowed, reason="deployment")
         if client_scope_values:
             outside = [scope.value for scope in scopes if scope.value not in client_scope_values]
             if outside:
-                raise InvalidScopeError(outside)
+                # Reason matters here: this is the one refusal the user can act
+                # on, by reconnecting the application so it registers for more.
+                raise InvalidScopeError(outside, reason="client")
         return scopes
 
     def validate_resource(self, resource: str | None) -> str:

@@ -1,5 +1,5 @@
 from src.application.ports.queue_port import JobQueuePort
-from src.application.services.queue_priority_router import QueuePriorityRouter
+from src.application.services.conversions.queue_priority_router import QueuePriorityRouter
 from src.domain.conversions.entities.conversion_job import ConversionJob
 from src.domain.subscriptions.value_object.tier import SubscriptionTier
 

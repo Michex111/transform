@@ -35,8 +35,8 @@ from src.application.exceptions.workspace_exceptions import (
     WorkspaceNotFoundError,
     WorkspaceQuotaExceededError,
 )
-from src.application.services.execution_service import ExecutionNotFoundError
-from src.application.services.mcp_toolbox import MCPToolContext
+from src.application.services.workspaces.execution_service import ExecutionNotFoundError
+from src.application.services.mcp.toolbox import MCPToolContext
 from src.domain.security.value_object.agent_scope import AgentScope
 from src.domain.workspaces.value_object.execution_mode import ExecutionMode
 
@@ -81,6 +81,8 @@ class MCPWorkspacePort(Protocol):
 
     async def disk_usage(self, workspace_id: str, user_id: int) -> dict[str, int]: ...
 
+    async def save_environment(self, workspace_id: str, user_id: int) -> Any: ...
+
 
 @runtime_checkable
 class MCPExecutionPort(Protocol):
@@ -99,6 +101,8 @@ class MCPExecutionPort(Protocol):
     async def list_for_workspace(
         self, *, workspace_id: str, user_id: int, limit: int, offset: int
     ) -> tuple[list[Any], int]: ...
+
+    async def cancel(self, execution_id: str, user_id: int) -> Any: ...
 
 
 def _bounded(text: str, limit: int = _MAX_OUTPUT_CHARS) -> tuple[str, bool]:
@@ -412,6 +416,73 @@ class MCPWorkspaceTools:
                 for item in execution.artifacts
             ],
         }
+
+    @failures_as_values
+    async def cancel_execution(
+        self, ctx: MCPToolContext, execution_id: str
+    ) -> dict[str, Any]:
+        """Stop a run that is still going.
+
+        WHY this exists: ``run_code`` can start work that takes minutes — a
+        dependency install, a long script — and until this tool existed an agent
+        that had started one had no way to stop it. A user saying "stop that" was
+        unanswerable, and a runaway run held CPU until its timeout.
+
+        Needs ``workspaces.execute`` rather than ``workspaces.read``: cancelling
+        changes what the platform is doing, so read-only access must not be able
+        to do it.
+        """
+        if not ctx.allows(AgentScope.WORKSPACES_EXECUTE):
+            return _denied(AgentScope.WORKSPACES_EXECUTE, "cancel_execution")
+        execution = await self._executions.cancel(execution_id, ctx.user_id)
+        settled = str(execution.status) in ("CANCELLED", "SUCCEEDED", "FAILED", "TIMED_OUT")
+        payload: dict[str, Any] = {
+            "ok": True,
+            "execution_id": execution.execution_id,
+            "status": str(execution.status),
+            "exit_code": execution.exit_code,
+        }
+        if not settled:
+            # A cancel is a request; the worker may still be tearing the run down.
+            payload["note"] = (
+                "The cancel was recorded but the run has not stopped yet. Call "
+                "get_execution to confirm before telling the user it stopped."
+            )
+        return payload
+
+    @failures_as_values
+    async def save_workspace_environment(
+        self, ctx: MCPToolContext, workspace_id: str
+    ) -> dict[str, Any]:
+        """Snapshot the workspace's installed packages so a restart keeps them.
+
+        WHY this exists: an agent that runs ``uv add`` changes the environment,
+        and without a snapshot those packages are lost when the runtime is
+        replaced. The user's own app offers "Save environment"; an agent that can
+        install but not save would silently leave work that looks durable and is
+        not.
+
+        Needs ``workspaces.execute`` — it changes what the workspace will contain
+        on its next start. The snapshot is built in the background, so this
+        returns a revision that starts PENDING; the note says to check back rather
+        than implying it is ready.
+        """
+        if not ctx.allows(AgentScope.WORKSPACES_EXECUTE):
+            return _denied(AgentScope.WORKSPACES_EXECUTE, "save_workspace_environment")
+        revision = await self._workspaces.save_environment(workspace_id, ctx.user_id)
+        status = str(getattr(revision, "status", "PENDING"))
+        payload: dict[str, Any] = {
+            "ok": True,
+            "workspace_id": workspace_id,
+            "revision_id": getattr(revision, "revision_id", None),
+            "status": status,
+        }
+        if status in ("PENDING", "BUILDING"):
+            payload["note"] = (
+                "The snapshot is being built in the background. It is not restored until "
+                "a later start, so do not tell the user their packages are saved yet."
+            )
+        return payload
 
     @failures_as_values
     async def list_artifacts(self, ctx: MCPToolContext, workspace_id: str) -> dict[str, Any]:

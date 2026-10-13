@@ -45,7 +45,18 @@ os.environ.setdefault(
 # Consequence for future tests: an OS environment variable outranks the declared
 # default, so a settings test asserting `AI_BACKEND`'s default must read the
 # field (or pass the value explicitly), not construct a bare `Settings()`.
-os.environ.setdefault("AI_BACKEND", "echo")
+# Keep assistant tests offline and deterministic even when a developer's
+# .env selects a configured provider.
+os.environ["AI_BACKEND"] = "echo"
+
+# Keep email-related tests independent of credentials and feature flags in a
+# developer's .env. Individual integration fixtures override these values when
+# they need a real transport or an explicitly suspended gate.
+os.environ["EMAIL_BACKEND"] = "auto"
+os.environ["RESEND_API_KEY"] = ""
+os.environ["SMTP_HOST"] = ""
+os.environ["EMAIL_VERIFICATION_REQUIRED"] = "true"
+os.environ["QUEUE_STREAM_PREFIX"] = ""
 
 import pytest  # noqa: E402
 

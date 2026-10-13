@@ -12,7 +12,7 @@ from typing import cast
 import pytest
 from fastapi import HTTPException
 
-from src.application.services.file_transfer_service import TransferService
+from src.application.services.files.transfer_service import TransferService
 from src.domain.conversions.entities.conversion_job import ConversionJob
 from src.domain.conversions.value_object.conversion_type import ConversionType
 from src.infrastructure.adapters.repository.sql_conversion_job_repo import (

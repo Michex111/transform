@@ -32,7 +32,7 @@ for full rationale & gaps).
 | A.5.11 Return of assets | N/A | SaaS-only. |
 | A.5.12 Classification | P | `SecretStr` typing (`settings.py`); PII/file-content identified. |
 | A.5.13 Labelling | N/A | No physical media. |
-| A.5.14 Information transfer | I | `src/application/services/file_transfer_service.py`; `src/infrastructure/adapters/security/encryption.py`; `src/infrastructure/adapters/storage/sanitize.py`. |
+| A.5.14 Information transfer | I | `src/application/services/files/transfer_service.py`; `src/infrastructure/adapters/security/encryption.py`; `src/infrastructure/adapters/storage/sanitize.py`. |
 | A.5.15 Access control | I | `docs/security/access-control-policy.md`; `src/presentation/api/dependencies/auth_dependencies.py`. |
 | A.5.16 Identity mgmt | I | `src/infrastructure/database/migrations/versions/0002_create_users.py`; `user.is_active` check in `auth_dependencies.py`. **Verified email ownership:** `0015_email_verification.py` (`users.email_verified` + hashed token columns, existing accounts grandfathered); sign-in refuses an unverified address (`src/presentation/api/routers/v1/users.py`). |
 | A.5.17 Authentication info | I | `jwt_provider.py` (argon2 via `pwdlib`); `api_key_service.py` (SHA-256 hash, show-once). Email-verification tokens: 32-byte CSPRNG values stored **only** as a SHA-256 digest, single-use, time-boxed (`src/domain/security/enitities/email_verification.py`). |
@@ -134,9 +134,9 @@ for full rationale & gaps).
 | At-rest encryption | `src/infrastructure/adapters/security/encryption.py` |
 | Object-key path-traversal guard | `src/infrastructure/adapters/storage/sanitize.py` |
 | AuthN (JWT, password hashing) | `src/infrastructure/auth/jwt_provider.py` |
-| Email verification (token lifecycle + delivery) | `src/domain/security/enitities/email_verification.py`; `src/infrastructure/adapters/email/*`; `src/application/services/email_templates.py` |
+| Email verification (token lifecycle + delivery) | `src/domain/security/enitities/email_verification.py`; `src/infrastructure/adapters/email/*`; `src/application/services/notifications/email_templates.py` |
 | AuthZ / ownership | `src/presentation/api/dependencies/auth_dependencies.py`; `src/application/services/*.py` |
-| API-key hashing & lifecycle | `src/application/services/api_key_service.py` |
+| API-key hashing & lifecycle | `src/application/services/developer/api_key_service.py` |
 | Stripe webhook verification | `src/presentation/api/routers/v1/webhooks.py` |
 | SSE events (owner-enforced) | `src/presentation/api/routers/v1/events.py` |
 | Worker conversion/orchestration | `workers/converter_workers/processor.py` |

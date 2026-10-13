@@ -36,8 +36,8 @@ from mcp.server import MCPServer
 from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.types import ToolAnnotations
 
-from src.application.services.mcp_toolbox import MCPToolBox, MCPToolContext
-from src.application.services.mcp_workspace_tools import MCPWorkspaceTools
+from src.application.services.mcp.toolbox import MCPToolBox, MCPToolContext
+from src.application.services.mcp.workspace_tools import MCPWorkspaceTools
 from src.domain.security.value_object.agent_scope import normalize_scopes
 from src.presentation.mcp.activity import instrument_tool
 from src.presentation.mcp.dependencies import open_mcp_scope
@@ -60,7 +60,13 @@ Workflow for "convert my X and save the result":
   4. save_file(job_id) — save the converted result into the Drive.
 
 Other things you can do:
-  - download_file(file_id) — read a document's contents (as base64).
+  - list_folders  — find a folder's id, then pass it as folder_id to list_files
+     or save_file. Nothing else returns folder ids.
+  - create_folder(name, parent_id) — make a folder to organise into.
+  - download_file(file_id) — read a document's contents (as base64). Large files
+     arrive in parts: read has_more / next_offset and keep calling until it is
+     false, then concatenate the parts IN ORDER. A single part is not the file.
+     Never summarise a file you have only partly read — say how much you saw.
   - upload_file(file_name, content_base64) — create a new file in the Drive.
   - get_conversion_history — list recent conversions.
   - get_credits — check the user's remaining credits.
@@ -85,6 +91,11 @@ documents.* ones and are NOT granted by default.
      `stored: false` means it only ever existed inside the runtime.
   7. create_workspace(name) — only when the user asks for a new one.
   8. list_workspace_files / read_workspace_file — inspect the workspace.
+  9. cancel_execution(execution_id) — stop a run that is taking too long. A run
+     can last minutes, and this is the only way to end one.
+ 10. save_workspace_environment(workspace_id) — after installing packages, so
+     they survive the runtime being replaced. It is built in the background, so
+     it is not saved until a later call shows it ready.
 
 What a workspace does and does not preserve: files, pyproject.toml, uv.lock and
 installed packages survive stopping and restarting. Running processes, open
@@ -315,32 +326,134 @@ def register_tools(mcp: MCPServer) -> None:
         structured_output=True,
     )
     @instrument_tool("download_file")
-    async def download_file(file_id: str) -> dict[str, Any]:
+    async def download_file(
+        file_id: str,
+        offset: int = 0,
+        max_bytes: int | None = None,
+    ) -> dict[str, Any]:
         """Return the CONTENTS of one of the user's files, base64-encoded.
 
         Use this when the user asks you to read, summarise, quote or translate a
         document's text. Conversions only return a new file; they do not expose
-        content. For anything but a small document, prefer converting it or
-        having the user open it in the Transform web app — a single tool call is
-        the wrong channel for a large transfer.
+        content.
+
+        Large files arrive in parts. A chunk of about 128 KB comes back per call
+        and the file is returned in order, so read it like this:
+
+        1. Call with just `file_id`. You get the first part plus `has_more`.
+        2. While `has_more` is true, call again with `offset` set to the
+           `next_offset` from the previous reply.
+        3. Concatenate the decoded bytes in the order you received them. A single
+           part decoded on its own is NOT the file.
+
+        Do not stop early and do not report the content of a file you have only
+        partly read — say it was truncated and how much you saw.
 
         Args:
             file_id: The id returned by list_files. It must belong to the
                 signed-in user.
+            offset: Byte offset to start from. Omit for the beginning; use the
+                `next_offset` from the previous call to continue.
+            max_bytes: Preferred part size in bytes. Clamped to the tool's own
+                per-call maximum, so a large value cannot exceed the transport
+                limit. Omit for the default.
 
         Returns:
-            {"ok": true, "file_name", "extension", "size_bytes",
-            "content_base64"} — decode the base64 to get the raw bytes.
+            {"ok": true, "file_name", "extension", "size_bytes" (the WHOLE
+            file), "offset", "bytes_returned", "has_more", "content_base64"}.
+            `next_offset` and a `note` are present when more parts follow.
             {"ok": false, "error"} when the file is missing, outside this
-            connection's folder, or larger than the size limit for this tool
-            (in which case the error says to use the web app).
+            connection's folder, larger than the total size limit for this tool
+            (the error says to use the web app), or when `offset` is past the
+            end of the file.
 
         Read-only. Requires documents.read. A file that exists but is not
         reachable by this connection is reported exactly as a file that does not
         exist.
         """
         async with _tool_scope() as (toolbox, ctx):
-            return await toolbox.download_file(ctx, file_id)
+            return await toolbox.download_file(ctx, file_id, offset, max_bytes)
+
+    @mcp.tool(
+        name="list_folders",
+        title="List your folders",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=False,
+        ),
+        structured_output=True,
+    )
+    @instrument_tool("list_folders")
+    async def list_folders(
+        parent_id: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """List the folders in the user's Drive.
+
+        Use this to find a folder's id before passing it as `folder_id` to
+        `list_files` or `save_file`. Nothing else returns folder ids, so this is
+        how you discover them.
+
+        Args:
+            parent_id: Optional folder id. Omit to list the top level; pass an id
+                to list the folders directly inside it.
+            limit: Maximum folders to return (1-50, default 20).
+            offset: How many folders to skip, for paging.
+
+        Returns:
+            {"ok": true, "folders": [{folder_id, name, created_at}], "total",
+            "returned"} — or {"ok": false, "error"}.
+
+        Read-only. Requires documents.read. A folder outside this connection's
+        allowed folder is reported as unavailable, exactly like one that does not
+        exist.
+        """
+        async with _tool_scope() as (toolbox, ctx):
+            return await toolbox.list_folders(ctx, parent_id, limit, offset)
+
+    @mcp.tool(
+        name="create_folder",
+        title="Create a folder",
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=False,
+            # Not idempotent: calling it twice makes two folders (the second
+            # only if the name differs, which the tool reports).
+            idempotent_hint=False,
+            open_world_hint=False,
+        ),
+        structured_output=True,
+    )
+    @instrument_tool("create_folder")
+    async def create_folder(
+        name: str,
+        parent_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Create a folder, so the user's Drive can be organised.
+
+        Creating a folder is the only structural change an agent may make to the
+        Drive. Renaming, moving and deleting folders are deliberately not
+        available.
+
+        Args:
+            name: The folder name. Must not be blank or already used at that
+                location.
+            parent_id: Optional parent folder id. Omit for the top level.
+
+        Returns:
+            {"ok": true, "folder": {folder_id, name, created_at}} or
+            {"ok": false, "error"} when the name is blank, too long, already
+            taken at that location, or the parent is not available.
+            Requires documents.write.
+
+        Ask the user before creating a folder they did not ask for; this changes
+        their Drive.
+        """
+        async with _tool_scope() as (toolbox, ctx):
+            return await toolbox.create_folder(ctx, name, parent_id)
 
     @mcp.tool(
         name="get_conversion_status",
@@ -474,7 +587,8 @@ def register_tools(mcp: MCPServer) -> None:
         Returns:
             {"ok": true, "job": {...}, "note"} where job.job_id is passed to
             get_conversion_status and save_file. On an unsupported pair:
-            {"ok": false, "error", "source_format", "supported_target_formats"}.
+            {"ok": false, "error", "source_format", "target_formats", "hint"}
+            when that conversion does not exist.
 
         Creates a new conversion; the original file is preserved. Requires
         documents.convert.
@@ -879,6 +993,72 @@ def register_tools(mcp: MCPServer) -> None:
         """
         async with _workspace_scope() as (tools, ctx):
             return await tools.list_artifacts(ctx, workspace_id)
+
+    @mcp.tool(
+        name="cancel_execution",
+        title="Stop a run",
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=True,
+            idempotent_hint=True,
+            open_world_hint=False,
+        ),
+        structured_output=True,
+    )
+    @instrument_tool("cancel_execution")
+    async def cancel_execution(execution_id: str) -> dict[str, Any]:
+        """Stop a run that is still going.
+
+        Use this when a run is taking too long or the user asks you to stop it.
+        `run_code` returns immediately and a run can last minutes, so this is how
+        you end one.
+
+        Args:
+            execution_id: The id returned by run_code.
+
+        Returns:
+            {"ok": true, "execution_id", "status", "exit_code"} — plus a `note`
+            when the run had not stopped yet at the time of the call. A cancel is
+            a request, so call `get_execution` to confirm before telling the user
+            it has stopped.
+
+        Requires workspaces.execute. Stopping a finished run is not an error.
+        """
+        async with _workspace_scope() as (tools, ctx):
+            return await tools.cancel_execution(ctx, execution_id)
+
+    @mcp.tool(
+        name="save_workspace_environment",
+        title="Save a workspace's environment",
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=False,
+        ),
+        structured_output=True,
+    )
+    @instrument_tool("save_workspace_environment")
+    async def save_workspace_environment(workspace_id: str) -> dict[str, Any]:
+        """Save the workspace's installed packages, so a restart keeps them.
+
+        Call this after installing packages (a `PROJECT` run of `uv add`) so the
+        work is not lost when the runtime is replaced. The runtime must be
+        running.
+
+        Args:
+            workspace_id: The workspace to snapshot.
+
+        Returns:
+            {"ok": true, "workspace_id", "revision_id", "status"} — `status` is
+            usually `PENDING` or `BUILDING` because the snapshot is built in the
+            background, with a `note` saying so. Do not tell the user their
+            packages are saved until a later call shows the revision ready.
+
+        Requires workspaces.execute.
+        """
+        async with _workspace_scope() as (tools, ctx):
+            return await tools.save_workspace_environment(ctx, workspace_id)
 
 
 __all__ = ["INSTRUCTIONS", "register_tools"]

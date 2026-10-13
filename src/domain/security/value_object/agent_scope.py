@@ -48,6 +48,50 @@ ALL_SCOPES: tuple[AgentScope, ...] = (
     AgentScope.WORKSPACES_EXECUTE,
 )
 
+#: ``offline_access`` — a request MARKER, deliberately not an
+#: :class:`AgentScope`.
+#:
+#: It is an OIDC convention rather than a scope this product models: a client
+#: sends it to say "issue me a refresh token". Transform always issues one, so the
+#: marker grants nothing that is not already granted — and it must never be
+#: stored as a capability. A grant row listing it would claim the agent holds a
+#: permission the product does not have, and a `covers()` check against it would
+#: be a check against nothing.
+#:
+#: WHY it is advertised at all: several clients (ChatGPT among them) decide
+#: whether to attempt a refresh by looking for this scope in
+#: ``scopes_supported``. Absent, they conclude refresh is unavailable and drop the
+#: connection when the 60-minute access token expires — even though the refresh
+#: token was issued and works.
+#:
+#: The rule that keeps it safe is one line long: it is accepted in a *request* and
+#: produced by :func:`normalize_scopes`, which only ever yields capabilities, so it
+#: cannot reach a grant, a token record or a consent checkbox.
+OFFLINE_ACCESS = "offline_access"
+
+#: Every scope string recognised in a REQUEST: the capabilities plus the markers.
+#:
+#: This — not :data:`ALL_SCOPES` — is what the server advertises and what its
+#: validators accept, so a client asking for a marker is not told its request is
+#: unsupported. Anything outside this set is still refused (fail closed).
+KNOWN_REQUEST_SCOPES: tuple[str, ...] = (
+    *(scope.value for scope in ALL_SCOPES),
+    OFFLINE_ACCESS,
+)
+
+#: The capability values, for deciding whether a string could ever be granted.
+_CAPABILITY_VALUES: frozenset[str] = frozenset(scope.value for scope in ALL_SCOPES)
+
+
+def is_capability(value: str) -> bool:
+    """Whether ``value`` is a grantable capability rather than a request marker.
+
+    Used to keep the two apart at the boundaries: a marker is accepted on input
+    and dropped by :func:`normalize_scopes`, so it can never be persisted as
+    something the agent holds.
+    """
+    return value in _CAPABILITY_VALUES
+
 #: Scopes offered by default on the consent screen. ``documents.delete`` is
 #: deliberately absent: an agent that can read, convert and save does not need
 #: the ability to destroy data, and making destruction opt-in is the whole
@@ -84,6 +128,10 @@ def normalize_scopes(values: Iterable[str] | None) -> tuple[AgentScope, ...]:
     Unknown values are **dropped** (fail closed), duplicates collapse, and the
     result is ordered by :data:`ALL_SCOPES` so the persisted value and every
     rendered sentence are deterministic. ``None`` and ``""`` yield no scopes.
+
+    This is also what keeps request markers out of storage: it only ever yields
+    members of :data:`ALL_SCOPES`, so ``offline_access`` cannot reach a grant or a
+    token record through it.
     """
     requested = {value.strip() for value in (values or ()) if value and value.strip()}
     return tuple(scope for scope in ALL_SCOPES if scope.value in requested)

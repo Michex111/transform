@@ -29,7 +29,7 @@ from src.application.dtos.assistant_dto import (
 from src.application.ports.llm_port import LlmUnavailableError
 from src.infrastructure.adapters.ai import LlmRequestError
 from src.infrastructure.config.settings import get_settings
-from src.application.services.assistant_service import AssistantConversationNotFound
+from src.application.services.assistant.service import AssistantConversationNotFound
 from src.domain.assistant.exceptions.assistant_exceptions import (
     AssistantAttachmentLimitExceeded,
     AssistantAttachmentNotFound,

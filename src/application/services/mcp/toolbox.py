@@ -38,9 +38,10 @@ from typing import Any, Protocol, runtime_checkable
 from src.application.exceptions.file_system_exceptions import (
     FileRecordNotFoundError,
     FileSystemError,
+    FolderNameConflictError,
     FolderNotFoundError,
 )
-from src.application.services.credit_service import CreditBalance
+from src.application.services.billing.credit_service import CreditBalance
 from src.domain.conversions.entities.conversion_job import ConversionJob
 from src.domain.conversions.policies.job_ownership import is_job_owner
 from src.domain.conversions.value_object.job_origin import JobOrigin
@@ -78,10 +79,27 @@ _MAX_TARGET_FORMATS_REPORTED = 40
 #: the per-tier caps (which can be gigabytes) because a tool call is the wrong
 #: channel for a large transfer.
 _MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # 25 MiB
-#: Ceiling on bytes ``download_file`` will return to the model. Base64 inflates
-#: the payload by ~33%, and a large document would blow the context window and
-#: the bill; above this the tool tells the caller to use the web app.
+#: Ceiling on bytes ``download_file`` will return to the model in ONE call.
+#: Base64 inflates the payload by ~33%, and a large document would blow the
+#: context window and the bill; above the total cap the tool tells the caller to
+#: use the web app.
 _MAX_DOWNLOAD_BYTES = 25 * 1024 * 1024  # 25 MiB
+#: Bytes of file content ``download_file`` returns per call by default.
+#:
+#: MEASURED, not guessed. A tool result travels as one Streamable-HTTP
+#: server-sent event, and the transport caps an event at 1 MiB. A
+#: ``structured_output=True`` tool puts the payload in the event TWICE — once as
+#: ``content[0].text`` and once as ``structuredContent`` — so the event is
+#: roughly ``2 x 4/3 x bytes``. Measured against a live server: 256 KiB of file
+#: content succeeds, 384 KiB fails with
+#: ``SSE stream failed: Server-sent event exceeded the 1048576 byte limit``.
+#:
+#: Before this chunking existed the tool advertised 25 MiB and broke at ~340 KiB,
+#: which made an ordinary 1 MB PDF unreadable — and the failure was a client-side
+#: transport error naming no file and offering no way to proceed. 128 KiB gives a
+#: ~341 KiB event, a three-fold margin under the cap, and keeps every document a
+#: model would sensibly read in a single call.
+_DOWNLOAD_CHUNK_BYTES = 128 * 1024  # 128 KiB
 #: File-tool denial wording. There is deliberately ONE message for "missing"
 #: and "exists but outside the agent's folder", and the two cases must never be
 #: given different text: a distinct message turns the tool into an existence
@@ -150,6 +168,20 @@ class MCPFileServicePort(Protocol):
     async def delete_file(self, user_id: int, file_id: str) -> None: ...
 
     async def complete_upload(self, user_id: int, session: Any) -> str: ...
+
+    async def list_root_folders(
+        self, user_id: int, *, offset: int = 0, limit: int = 20
+    ) -> tuple[list[Any], int]: ...
+
+    async def get_folder_contents(
+        self, user_id: int, folder_id: str, *, offset: int = 0, limit: int = 50
+    ) -> tuple[Any, list[Any], int, list[UserFileModel], int]:
+        """(folder, subfolders, total_folders, files, total_files)."""
+        ...
+
+    async def create_folder(
+        self, user_id: int, name: str, parent_id: str | None = None
+    ) -> Any: ...
 
     async def resolve_folder_scope(self, user_id: int, folder_id: str) -> set[str] | None:
         """Ids in ``folder_id``'s subtree (itself included), or None.
@@ -252,7 +284,17 @@ class MCPObjectStorePort(Protocol):
 
     async def put_object(self, object_key: str, data: bytes) -> None: ...
 
-    async def read_object(self, object_key: str, max_bytes: int | None = None) -> bytes: ...
+    async def read_object(
+        self, object_key: str, max_bytes: int | None = None, *, user_id: str
+    ) -> bytes:
+        """Return the PLAINTEXT of an object, at most ``max_bytes`` of it.
+
+        ``user_id`` is part of the contract because at-rest content is encrypted
+        per user: the bytes in the bucket are ciphertext for anything the worker
+        stored (every conversion output), and the key is derived from the owner.
+        An implementation that ignores ``user_id`` would hand an agent ciphertext.
+        """
+        ...
 
 
 @runtime_checkable
@@ -501,6 +543,135 @@ class MCPToolBox:
             payload["note"] = note
         return payload
 
+    def _folder_payload(self, row: Any) -> dict[str, Any]:
+        """Serialize a folder for an agent.
+
+        Deliberately no `parent_id`: the caller either asked for the root or for
+        a folder it already named, so echoing the parent adds nothing a model can
+        use, and a folder id is a handle rather than a secret.
+        """
+        return {
+            "folder_id": getattr(row, "id", None),
+            "name": getattr(row, "name", ""),
+            "created_at": _iso(getattr(row, "created_at", None)),
+        }
+
+    async def list_folders(
+        self,
+        ctx: MCPToolContext,
+        parent_id: str | None = None,
+        limit: Any = 20,
+        offset: Any = 0,
+    ) -> dict[str, Any]:
+        """List the caller's folders, so their ids can be discovered.
+
+        WHY this exists: ``list_files`` accepts a ``folder_id``, but nothing
+        returned one — a file payload carries the id of the folder a file is in,
+        and the root listing shows files from every folder mixed together. An
+        agent therefore could not browse a Drive, only be told a folder id by the
+        user. This closes that: every folder id an agent can use is one it got
+        from here (or from a file's ``folder_id``).
+        """
+        denied = self._require(ctx, AgentScope.DOCUMENTS_READ, "list_folders")
+        if denied:
+            return denied
+        folder = await self._resolve_folder(ctx, "list_folders")
+        if folder.denial:
+            return folder.denial
+        if parent_id is not None and not folder.allows(parent_id):
+            return self._folder_unavailable(ctx, "list_folders")
+        bounded = self._clamp_limit(limit, default=20)
+        start = max(0, self._as_int(offset, 0) or 0)
+
+        # A confined grant with no folder argument defaults to its BOUND folder,
+        # exactly as ``list_files`` does. Listing the Drive root instead would
+        # return folders it is not allowed to see and then filter every one of
+        # them out, so a confined agent could never browse its own folder.
+        target_parent = parent_id
+        if target_parent is None and folder.subtree is not None:
+            target_parent = ctx.folder_id
+
+        if target_parent is None:
+            rows, total = await self._files.list_root_folders(
+                ctx.user_id, offset=start, limit=bounded
+            )
+        else:
+            try:
+                _folder, rows, total, _files, _total_files = (
+                    await self._files.get_folder_contents(
+                        ctx.user_id, target_parent, offset=start, limit=bounded
+                    )
+                )
+            except FolderNotFoundError:
+                return self._folder_unavailable(ctx, "list_folders")
+
+        # A confined grant must not learn about folders outside its subtree, even
+        # when the listing itself was for an allowed parent.
+        visible = [row for row in rows if folder.allows(getattr(row, "id", None))]
+        if folder.subtree is not None:
+            # Report the count the caller can actually reach. The repository's
+            # total covers folders it may not see, and reporting that would tell
+            # it folders exist that it will never be given.
+            total = len(visible)
+        self._audit(ctx, "list_folders", f"folders:{len(visible)}")
+        payload: dict[str, Any] = {
+            "ok": True,
+            "folders": [self._folder_payload(row) for row in visible],
+            "total": total,
+            "returned": len(visible),
+        }
+        if target_parent is not None:
+            payload["parent_id"] = target_parent
+        if not visible:
+            payload["note"] = (
+                "No folders here. `list_files` without a folder_id still lists every "
+                "file in the Drive, whichever folder it is in."
+            )
+        return payload
+
+    async def create_folder(
+        self,
+        ctx: MCPToolContext,
+        name: str,
+        parent_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Create a folder, optionally inside one the caller may write to.
+
+        Requires ``documents.write`` — a folder is a change to the user's Drive,
+        and read-only access must not be able to alter its shape. This is the one
+        structural change an agent may make; renaming, moving and deleting
+        folders are deliberately absent.
+        """
+        denied = self._require(ctx, AgentScope.DOCUMENTS_WRITE, "create_folder")
+        if denied:
+            return denied
+        folder = await self._resolve_folder(ctx, "create_folder")
+        if folder.denial:
+            return folder.denial
+        cleaned = (name or "").strip()
+        if not cleaned:
+            return {"ok": False, "error": "A folder name is required."}
+        if len(cleaned) > 255:
+            return {"ok": False, "error": "That folder name is too long (255 characters max)."}
+        if parent_id is not None and not folder.allows(parent_id):
+            return self._folder_unavailable(ctx, "create_folder")
+        # A confined grant with no parent: create inside its bound folder rather
+        # than at the root, which it is not allowed to touch.
+        target_parent = parent_id
+        if target_parent is None and folder.subtree is not None:
+            target_parent = ctx.folder_id
+        try:
+            created = await self._files.create_folder(ctx.user_id, cleaned, target_parent)
+        except FolderNotFoundError:
+            return self._folder_unavailable(ctx, "create_folder")
+        except FolderNameConflictError:
+            return {
+                "ok": False,
+                "error": f"A folder named {cleaned!r} already exists in that location.",
+            }
+        self._audit(ctx, "create_folder", f"folder:{getattr(created, 'id', '')}")
+        return {"ok": True, "folder": self._folder_payload(created)}
+
     async def get_file(self, ctx: MCPToolContext, file_id: str) -> dict[str, Any]:
         """Describe one of the caller's files."""
         denied = self._require(ctx, AgentScope.DOCUMENTS_READ, "get_file")
@@ -598,8 +769,22 @@ class MCPToolBox:
         self._audit(ctx, "get_credits", "credits")
         return {"ok": True, "balance": balance.balance, "resets_at": _iso(balance.resets_at)}
 
-    async def download_file(self, ctx: MCPToolContext, file_id: str) -> dict[str, Any]:
-        """Return one file's contents as base64, if it is inside the allowed folder."""
+    async def download_file(
+        self,
+        ctx: MCPToolContext,
+        file_id: str,
+        offset: Any = 0,
+        max_bytes: Any = None,
+    ) -> dict[str, Any]:
+        """Return a slice of one file's contents as base64.
+
+        Paged because a tool result travels as a single transport event and the
+        transport caps an event at 1 MiB (see ``_DOWNLOAD_CHUNK_BYTES``). The
+        first call returns the beginning of the file plus ``has_more`` and
+        ``next_offset``; passing ``next_offset`` back returns the following
+        slice. A file that fits in one chunk is returned whole, so the common
+        case is still a single call.
+        """
         denied = self._require(ctx, AgentScope.DOCUMENTS_READ, "download_file")
         if denied:
             return denied
@@ -609,41 +794,111 @@ class MCPToolBox:
         row = await self._owned_file_in_scope(ctx, file_id, folder)
         if isinstance(row, dict):
             return row
+        oversized = {
+            "ok": False,
+            "error": (
+                f"This file is larger than the {_MAX_DOWNLOAD_BYTES // (1024 * 1024)} MB "
+                "limit for returning content to the model. Open it in the Transform web "
+                "app to download or convert it instead."
+            ),
+        }
         if (row.file_size_bytes or 0) > _MAX_DOWNLOAD_BYTES:
-            return {
-                "ok": False,
-                "error": (
-                    f"This file is larger than the {_MAX_DOWNLOAD_BYTES // (1024 * 1024)} MB "
-                    "limit for returning content to the model. Open it in the Transform web "
-                    "app to download or convert it instead."
-                ),
-            }
+            return oversized
+
+        # The model writes these, so they are untrusted. A negative or absent
+        # offset means "the start"; the chunk size is clamped to the chunk
+        # constant whatever is asked for, so a caller cannot request a slice big
+        # enough to exceed the transport cap.
+        start = max(0, self._as_int(offset, 0) or 0)
+        requested = self._as_int(max_bytes, None)
+        chunk = _DOWNLOAD_CHUNK_BYTES
+        if requested is not None and requested > 0:
+            chunk = min(requested, _DOWNLOAD_CHUNK_BYTES)
+
         try:
-            data = await self._store.read_object(row.file_key, max_bytes=_MAX_DOWNLOAD_BYTES + 1)
+            data = await self._store.read_object(
+                row.file_key, max_bytes=_MAX_DOWNLOAD_BYTES + 1, user_id=str(ctx.user_id)
+            )
         except FileSystemError as exc:
             logger.warning("MCP download_file failed for file %s: %s", file_id, exc)
             return {"ok": False, "error": "The file could not be read from storage."}
-        except Exception as exc:  # noqa: BLE001 - storage failures
+        except Exception as exc:  # noqa: BLE001 - storage or decryption failures
             logger.warning("MCP download_file failed for file %s: %s", file_id, exc)
             return {"ok": False, "error": "The file could not be read from storage."}
         if len(data) > _MAX_DOWNLOAD_BYTES:
             # The row's recorded size was stale; the measured read is the truth.
+            return oversized
+
+        total = len(data)
+        if start >= total and total > 0:
+            # Past the end. Say so rather than returning an empty success the
+            # caller could mistake for "the file is empty".
             return {
                 "ok": False,
                 "error": (
-                    f"This file is larger than the {_MAX_DOWNLOAD_BYTES // (1024 * 1024)} MB "
-                    "limit for returning content to the model. Open it in the Transform web "
-                    "app to download or convert it instead."
+                    f"offset {start} is past the end of this file, which is {total} bytes."
                 ),
+                "size_bytes": total,
             }
+        window = data[start : start + chunk]
+        end = start + len(window)
+        has_more = end < total
+
         self._audit(ctx, "download_file", f"file:{row.id}")
-        return {
+        payload: dict[str, Any] = {
             "ok": True,
             "file_name": row.file_name,
             "extension": row.file_extension,
-            "size_bytes": len(data),
-            "content_base64": base64.b64encode(data).decode("ascii"),
+            # The WHOLE file's size, not this slice's: the caller needs it to
+            # decide whether it has everything, and a per-slice size would be
+            # silently misread as the file size.
+            "size_bytes": total,
+            "offset": start,
+            "bytes_returned": len(window),
+            "has_more": has_more,
+            "content_base64": base64.b64encode(window).decode("ascii"),
         }
+        if has_more:
+            payload["next_offset"] = end
+            payload["note"] = (
+                f"This is bytes {start}-{end} of {total}. Call download_file again with "
+                f"offset={end} for the next part; the content only decodes correctly "
+                "once every part has been concatenated in order."
+            )
+        elif start > 0:
+            payload["note"] = f"This is the final part (bytes {start}-{end} of {total})."
+        return payload
+
+    @staticmethod
+    def _as_int(value: Any, default: int | None) -> int | None:
+        """Best-effort integer, for arguments a model may have written loosely.
+
+        Accepts a numeric string and a float with no fractional part, because a
+        model writing ``"128"`` or ``128.0`` means ``128`` and refusing it would
+        be friction for no security gain; anything else falls back rather than
+        raising.
+        """
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            # ``True`` is an int in Python, and ``offset=True`` meaning 1 would
+            # be a surprise rather than an intention.
+            return default
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            return int(value) if value.is_integer() else default
+        if isinstance(value, str):
+            text = value.strip()
+            try:
+                return int(text)
+            except ValueError:
+                try:
+                    parsed = float(text)
+                except ValueError:
+                    return default
+                return int(parsed) if parsed.is_integer() else default
+        return default
 
     # ------------------------------------------------------------------
     # Mutating tools
@@ -675,11 +930,21 @@ class MCPToolBox:
             return {"ok": False, "error": "target_format must be a file extension such as 'pdf'."}
         supported = self._map.get(source, [])
         if target not in supported:
+            # ``target_formats`` — the SAME key ``get_supported_conversions``
+            # returns for this concept. It used to be ``supported_target_formats``
+            # here and ``target_formats`` there, so an agent that read this error
+            # and then queried the lookup tool had to notice the rename. An error
+            # should be immediately actionable, which means the same word for the
+            # same thing everywhere.
             return {
                 "ok": False,
                 "error": f"Cannot convert {source or 'that file'} to {target}.",
                 "source_format": source,
-                "supported_target_formats": supported[:_MAX_TARGET_FORMATS_REPORTED],
+                "target_formats": supported[:_MAX_TARGET_FORMATS_REPORTED],
+                "hint": (
+                    "Pick one of target_formats, or call get_supported_conversions "
+                    f"with source_format={source!r} for the same list."
+                ),
             }
 
         job = await self._conversions.convert_library_file(
@@ -1058,11 +1323,10 @@ class MCPToolBox:
             return {"ok": False, "error": _FILE_NOT_FOUND_ERROR}
         return row
 
-    def _clamp_limit(self, limit: Any) -> int:
-        try:
-            value = int(limit)
-        except (TypeError, ValueError):
-            value = 20
+    def _clamp_limit(self, limit: Any, default: int = 20) -> int:
+        value = self._as_int(limit, default)
+        if value is None:
+            value = default
         return max(1, min(value, self._max_list_limit))
 
     @staticmethod

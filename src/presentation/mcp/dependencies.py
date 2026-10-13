@@ -26,14 +26,14 @@ from collections.abc import AsyncGenerator
 from dataclasses import dataclass
 from functools import lru_cache
 
-from src.application.services.conversion_service import ConversionService
-from src.application.services.credit_service import CreditService
-from src.application.services.file_service import FileService
-from src.application.services.file_transfer_service import TransferService
-from src.application.services.mcp_toolbox import MCPToolBox
-from src.application.services.mcp_workspace_tools import MCPWorkspaceTools
-from src.application.services.priority_queue_dispatcher import PriorityQueueDispatcher
-from src.application.services.queue_priority_router import QueuePriorityRouter
+from src.application.services.conversions.service import ConversionService
+from src.application.services.billing.credit_service import CreditService
+from src.application.services.files.service import FileService
+from src.application.services.files.transfer_service import TransferService
+from src.application.services.mcp.toolbox import MCPToolBox
+from src.application.services.mcp.workspace_tools import MCPWorkspaceTools
+from src.application.services.conversions.priority_queue_dispatcher import PriorityQueueDispatcher
+from src.application.services.conversions.queue_priority_router import QueuePriorityRouter
 from src.domain.security.value_object.agent_access_scope import FolderAccess, HistoryScope
 from src.domain.subscriptions.value_object.tier import SubscriptionTier
 from src.infrastructure.adapters.repository.sql_conversion_job_repo import (
@@ -45,10 +45,14 @@ from src.infrastructure.adapters.repository.sql_subscription_repo import SQLSubs
 from src.infrastructure.adapters.repository.sql_user_file_repo import SQLUserFileRepository
 from src.infrastructure.adapters.repository.sql_user_folder_repo import SQLUserFolderRepository
 from src.infrastructure.adapters.security.mcp_oauth_provider import MCPOAuthProvider
+from src.infrastructure.adapters.storage.decrypting_object_reader import (
+    DecryptingObjectReader,
+)
 from src.infrastructure.adapters.storage.object_copier import MinioObjectCopier
 from src.infrastructure.config.settings import get_settings
 from src.infrastructure.database.session import get_session_factory
 from src.presentation.api.dependencies.service_dependencies import (
+    get_encryption_service,
     get_job_queue_port,
     get_minio_download_adapter,
     get_minio_url_storage,
@@ -142,7 +146,15 @@ async def open_mcp_scope(
                 folder_id = grant.folder_id
                 history_scope = grant.history_scope
 
-        object_store = get_minio_download_adapter()
+        # Read-side storage is wrapped so a download returns the file's real
+        # bytes: anything the worker stored is at-rest ciphertext, and reading it
+        # raw (as this used to) handed agents binary noise instead of their
+        # document. Writes pass through unchanged, as uploads are plaintext.
+        # See ``DecryptingObjectReader``.
+        object_store = DecryptingObjectReader(
+            storage=get_minio_download_adapter(),
+            encryption_service=get_encryption_service(),
+        )
         yield MCPServiceScope(
             file_service=file_service,
             conversion_service=conversion_service,

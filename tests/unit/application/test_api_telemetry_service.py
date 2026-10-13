@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from src.application.ports.api_telemetry_port import ApiLogFilters, EventPage
-from src.application.services.api_telemetry_service import (
+from src.application.services.developer.api_telemetry_service import (
     ApiTelemetryService,
     InvalidRangeError,
     resolve_range,

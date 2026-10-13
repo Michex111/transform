@@ -706,7 +706,7 @@ class Settings(BaseSettings):
         configured = self.EMAIL_BACKEND.strip().lower()
         if configured != "auto":
             return configured
-        if self.RESEND_API_KEY is not None:
+        if self.RESEND_API_KEY and self.RESEND_API_KEY.get_secret_value().strip():
             return "resend"
         if self.SMTP_HOST:
             return "smtp"
@@ -1052,7 +1052,13 @@ class Settings(BaseSettings):
                 f"Unsupported EMAIL_BACKEND {self.EMAIL_BACKEND!r}; expected one of "
                 f"{sorted(self._SUPPORTED_EMAIL_BACKENDS)}."
             )
-        if email_backend == "resend" and self.RESEND_API_KEY is None:
+        if (
+            email_backend == "resend"
+            and (
+                self.RESEND_API_KEY is None
+                or not self.RESEND_API_KEY.get_secret_value().strip()
+            )
+        ):
             raise RuntimeError("EMAIL_BACKEND=resend requires RESEND_API_KEY.")
         if email_backend == "smtp" and not self.SMTP_HOST:
             raise RuntimeError("EMAIL_BACKEND=smtp requires SMTP_HOST.")

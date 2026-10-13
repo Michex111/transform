@@ -13,9 +13,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.responses import StreamingResponse
 
 from src.application.exceptions.file_system_exceptions import FileSystemError
-from src.application.services.file_service import FileService
-from src.application.services.file_transfer_service import TransferService
-from src.application.services.mime_types import FALLBACK_MIME_TYPE, mime_type_for
+from src.application.services.files.service import FileService
+from src.application.services.files.transfer_service import TransferService
+from src.application.services.files.mime_types import FALLBACK_MIME_TYPE, mime_type_for
 from src.infrastructure.adapters.repository.sql_conversion_job_repo import SQLConversionJobRepository
 from src.infrastructure.adapters.repository.sql_user_file_repo import SQLUserFileRepository
 from src.infrastructure.adapters.security.encryption import FileEncryptionService

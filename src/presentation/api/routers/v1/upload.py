@@ -11,9 +11,9 @@ from src.application.exceptions.file_transfer_exceptions import (
 	UploadSessionNotFoundError,
 	UploadVerificationError,
 )
-from src.application.services.conversion_service import ConversionService
-from src.application.services.file_service import FileService
-from src.application.services.file_transfer_service import TransferService
+from src.application.services.conversions.service import ConversionService
+from src.application.services.files.service import FileService
+from src.application.services.files.transfer_service import TransferService
 from src.presentation.api.dependencies.auth_dependencies import CurrentUser
 from src.presentation.api.dependencies.job_access import assert_job_owner
 from src.presentation.api.dependencies.service_dependencies import (

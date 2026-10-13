@@ -44,7 +44,7 @@ from mcp.server.auth.settings import (
 from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import AnyHttpUrl
 
-from src.domain.security.value_object.agent_scope import ALL_SCOPES, DEFAULT_SCOPES
+from src.domain.security.value_object.agent_scope import KNOWN_REQUEST_SCOPES
 from src.infrastructure.adapters.security.mcp_oauth_provider import MCPOAuthProvider
 from src.infrastructure.config.settings import get_settings
 from src.presentation.mcp.dependencies import get_mcp_oauth_provider
@@ -62,8 +62,30 @@ def client_registration_options() -> ClientRegistrationOptions:
         # The server refuses to register a client for a scope it cannot grant,
         # so a client cannot ask for a capability that does not exist and then
         # be surprised at token time.
-        valid_scopes=[scope.value for scope in ALL_SCOPES],
-        default_scopes=[scope.value for scope in DEFAULT_SCOPES],
+        #
+        # Advertised as the full REQUEST vocabulary rather than ``ALL_SCOPES``,
+        # because ``offline_access`` is a marker a client legitimately registers
+        # for and requesting it here is not an error. It is still never granted:
+        # the resolver drops markers before the capability set is built.
+        valid_scopes=list(KNOWN_REQUEST_SCOPES),
+        # ``default_scopes`` fills in a client's ``scope`` when it registers
+        # WITHOUT one (see the SDK's register handler), and that value is then
+        # treated as the client's own cap: the consent endpoint refuses any
+        # scope outside it. It therefore must be the FULL set, not the consent
+        # default.
+        #
+        # Using DEFAULT_SCOPES here was a real defect: most MCP clients omit
+        # ``scope`` at registration (RFC 7591 makes it optional) and rely on
+        # ``scopes_supported`` discovery, so they were silently capped to
+        # read/convert/write. ``documents.delete`` and both ``workspaces.*``
+        # scopes then became impossible to grant — the consent screen refused
+        # them as "outside the client's registered scope", even though the
+        # server advertises them and 10 of its 20 tools require them.
+        #
+        # The genuinely conservative default still applies where it belongs: an
+        # authorization request that names no scope resolves to
+        # ``DEFAULT_SCOPES`` in ``MCPAccessService.resolve_scopes``.
+        default_scopes=list(KNOWN_REQUEST_SCOPES),
     )
 
 
@@ -81,7 +103,13 @@ def build_protected_resource_metadata() -> dict[str, Any]:
         authorization_servers=[AnyHttpUrl(settings.mcp_issuer_url())],
         # Scope requirements are per tool, so this is the *advertised* set
         # rather than a route-level requirement (see the module docstring).
-        scopes_supported=[scope.value for scope in ALL_SCOPES],
+        #
+        # This includes ``offline_access`` on purpose. It is a request marker,
+        # not a capability, but clients decide whether to attempt a refresh by
+        # looking for it here — absent, they conclude refresh is unavailable and
+        # drop the connection when the 60-minute access token expires, even
+        # though a refresh token was issued and works.
+        scopes_supported=list(KNOWN_REQUEST_SCOPES),
         resource_name="Transform File Converter",
     ).model_dump(mode="json", exclude_none=True)
 

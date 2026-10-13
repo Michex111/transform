@@ -17,6 +17,7 @@ import json
 import secrets
 from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Generator
 
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -25,7 +26,11 @@ from starlette.testclient import TestClient
 
 import src.presentation.api.main as api_main
 import src.presentation.mcp.dependencies as mcp_deps
-from src.domain.security.value_object.agent_scope import ALL_SCOPES
+from src.domain.security.value_object.agent_scope import (
+    ALL_SCOPES,
+    KNOWN_REQUEST_SCOPES,
+    OFFLINE_ACCESS,
+)
 from src.infrastructure.auth.jwt_provider import hash_password
 from src.infrastructure.database.models import UserFileModel, UserFolderModel, UserModel
 from src.infrastructure.database.session import Base, get_db_session
@@ -261,9 +266,14 @@ def test_protected_resource_metadata_is_served_at_the_canonical_url(tmp_path) ->
             # discovers what it may ask for from this list, so a new scope that
             # is not advertised here is a scope nobody can request. Asserting the
             # mapping (not a literal) is what keeps the two from drifting.
-            assert payload["scopes_supported"] == [scope.value for scope in ALL_SCOPES]
+            #
+            # The advertised set is the REQUEST vocabulary, which is the
+            # capabilities plus ``offline_access`` — a marker, not a capability,
+            # but one a client looks for to decide whether refresh is available.
+            assert payload["scopes_supported"] == list(KNOWN_REQUEST_SCOPES)
             assert "workspaces.read" in payload["scopes_supported"]
             assert "workspaces.execute" in payload["scopes_supported"]
+            assert "offline_access" in payload["scopes_supported"]
 
 
 def test_the_authorization_server_metadata_is_reachable_by_both_derivations(tmp_path) -> None:
@@ -584,6 +594,83 @@ def _get_consent(
         },
         headers={"Authorization": f"Bearer {token}"},
     )
+
+
+def test_offline_access_refresh_marker_is_not_a_granted_scope(tmp_path) -> None:
+    with mcp_env(str(tmp_path / "mcp.db")) as env:
+        env.seed_user()
+        client_info = env.register_client(CONSENT_REDIRECT)
+        verifier, challenge = _pkce()
+        user_token = env.sign_in()
+        requested_scope = f"documents.read {OFFLINE_ACCESS}"
+
+        consent = _get_consent(
+            env, token=user_token, client_info=client_info, scope=requested_scope
+        )
+        assert consent.status_code == 200, consent.text
+        assert OFFLINE_ACCESS not in {item["scope"] for item in consent.json()["scopes"]}
+
+        approval = _post_consent(
+            env,
+            token=user_token,
+            client_info=client_info,
+            challenge=challenge,
+            scope=requested_scope,
+            approved=["documents.read"],
+        )
+        assert approval.status_code == 200, approval.text
+        redirect_url = approval.json()["redirect_url"]
+        code = redirect_url.split("code=", 1)[1].split("&", 1)[0]
+
+        exchanged = env.client.post(
+            "/mcp/token",
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "code_verifier": verifier,
+                "redirect_uri": CONSENT_REDIRECT,
+                "client_id": client_info["client_id"],
+                "resource": "http://localhost:8000/mcp",
+            },
+        )
+        assert exchanged.status_code == 200, exchanged.text
+        tokens = exchanged.json()
+        assert tokens["scope"] == "documents.read"
+        assert tokens["refresh_token"]
+
+        refreshed = env.client.post(
+            "/mcp/token",
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": tokens["refresh_token"],
+                "client_id": client_info["client_id"],
+                "resource": "http://localhost:8000/mcp",
+                "scope": requested_scope,
+            },
+        )
+        assert refreshed.status_code == 200, refreshed.text
+        refreshed_tokens = refreshed.json()
+        assert refreshed_tokens["scope"] == "documents.read"
+        assert refreshed_tokens["refresh_token"] != tokens["refresh_token"]
+
+        refreshed_without_marker = env.client.post(
+            "/mcp/token",
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": refreshed_tokens["refresh_token"],
+                "client_id": client_info["client_id"],
+                "resource": "http://localhost:8000/mcp",
+            },
+        )
+        assert refreshed_without_marker.status_code == 200, refreshed_without_marker.text
+        assert refreshed_without_marker.json()["scope"] == "documents.read"
+
+        apps = env.client.get(
+            "/api/v1/mcp/connected-apps",
+            headers={"Authorization": f"Bearer {user_token}"},
+        ).json()["apps"]
+        assert len(apps) == 1
+        assert apps[0]["scopes"] == ["documents.read"]
 
 
 def test_get_authorize_lists_folders_and_the_default_binding(tmp_path) -> None:
@@ -1185,3 +1272,100 @@ def test_patch_narrowing_stops_an_already_issued_agent_token(tmp_path) -> None:
         )
         assert after.status_code == 401, after.text
 
+
+
+# ---------------------------------------------------------------------------
+# The advertised tool set vs the documentation
+# ---------------------------------------------------------------------------
+
+
+def _advertised_tool_names(env: MCPEnv) -> set[str]:
+    # The tool list is only reachable with a token, and minting one requires a
+    # user to approve it.
+    env.seed_user()
+    client, token = _authorize_and_redeem(env)
+    assert client["client_id"]
+    frame = _sse_json(
+        env.mcp_post(
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+            token=token,
+        )
+    )
+    return {tool["name"] for tool in frame["result"]["tools"]}
+
+
+def test_every_advertised_tool_is_documented(tmp_path) -> None:
+    """The docs must not describe a tool set that does not exist.
+
+    WHY this test exists: `docs/mcp.md` and `web/src/lib/mcpAgentPrompt.ts` both
+    said there was **no upload tool** and omitted all nine workspace tools,
+    long after upload_file and the workspace surface had shipped. That is worse
+    than a gap — an agent told a capability does not exist will not try it, and
+    a user reading the scope table is told to request scopes that do not exist
+    for the work they want. Documentation that describes a different product is
+    a bug, and this is the cheapest available guard against it recurring.
+
+    Asserted as "every advertised tool is mentioned", not an exact list: the docs
+    are allowed to say more, they are not allowed to omit a tool an agent can
+    call, or to invent one it cannot.
+    """
+    root = Path(__file__).resolve().parents[2]
+    documented_in = {
+        "docs/mcp.md": (root / "docs" / "mcp.md").read_text(),
+        "web/src/lib/mcpAgentPrompt.ts": (
+            root / "web" / "src" / "lib" / "mcpAgentPrompt.ts"
+        ).read_text(),
+    }
+    with mcp_env(str(tmp_path / "mcp.db")) as env:
+        advertised = _advertised_tool_names(env)
+
+    assert advertised, "the server advertised no tools at all"
+    for path, text in documented_in.items():
+        missing = sorted(name for name in advertised if name not in text)
+        assert not missing, f"{path} does not mention: {missing}"
+
+
+def test_every_advertised_scope_is_documented(tmp_path) -> None:
+    """Same guard for scopes: a scope absent from the docs is one nobody asks for."""
+    root = Path(__file__).resolve().parents[2]
+    with mcp_env(str(tmp_path / "mcp.db")) as env:
+        payload = env.client.get("/.well-known/oauth-protected-resource/mcp").json()
+        advertised = set(payload["scopes_supported"])
+
+    assert advertised
+    for relative in ("docs/mcp.md", "web/src/lib/mcpAgentPrompt.ts"):
+        text = (root / relative).read_text()
+        missing = sorted(scope for scope in advertised if scope not in text)
+        assert not missing, f"{relative} does not mention scopes: {missing}"
+
+
+def test_every_capability_is_offered_by_the_settings_editor(tmp_path) -> None:
+    """The Settings editor must offer every permission the server can grant.
+
+    WHY this test exists: ``web/src/lib/connectedAppPermissions.ts`` hand-lists the
+    permissions the editor shows, because a settings response has no reason to
+    carry the whole vocabulary. That list had drifted to the four ``documents.*``
+    scopes, so a user could neither see that an agent held workspace access nor
+    grant it — every workspace tool refused with "needs the workspaces.read
+    permission" and the app offered no remedy.
+
+    A frontend test cannot catch this, because the SPA has no authoritative list
+    to compare against; only the server knows the vocabulary. Reading the file
+    here is the cheap version of that check, and it is the same guard used for the
+    documentation.
+
+    ``offline_access`` is deliberately NOT required: it is a request marker, not a
+    permission, so the editor must not offer it as one.
+    """
+
+    root = Path(__file__).resolve().parents[2]
+    text = (root / "web" / "src" / "lib" / "connectedAppPermissions.ts").read_text()
+
+    missing = [scope.value for scope in ALL_SCOPES if scope.value not in text]
+    assert not missing, (
+        "the settings editor cannot show or grant these permissions: " + ", ".join(missing)
+    )
+    assert OFFLINE_ACCESS not in text, (
+        "offline_access is a request marker, not a permission, and must not be "
+        "offered as one in the settings editor"
+    )

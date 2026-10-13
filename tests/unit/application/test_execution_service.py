@@ -17,7 +17,7 @@ from src.application.exceptions.workspace_exceptions import (
     WorkspaceNotFoundError,
     WorkspaceNotUsableError,
 )
-from src.application.services.execution_service import (
+from src.application.services.workspaces.execution_service import (
     MAX_EXECUTION_TIMEOUT_SECONDS,
     ExecutionNotFoundError,
     ExecutionService,
@@ -45,7 +45,7 @@ class Harness:
         self.workspace_id: str = ""
 
     async def setup_workspace(self, name: str = "ws") -> str:
-        from src.application.services.workspace_service import WorkspaceService
+        from src.application.services.workspaces.workspace_service import WorkspaceService
         from tests.fakes.fake_runtime_provider import FakeRuntimeProvider
 
         workspaces = WorkspaceService(
@@ -205,7 +205,7 @@ class TestSubmit:
         async def scenario() -> None:
             harness = await _harness(tmp_path)
             try:
-                from src.application.services.workspace_service import WorkspaceService
+                from src.application.services.workspaces.workspace_service import WorkspaceService
                 from tests.fakes.fake_runtime_provider import FakeRuntimeProvider
 
                 workspaces = WorkspaceService(
