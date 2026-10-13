@@ -250,9 +250,19 @@ class TestWorkspaceCrud:
         )
 
     def test_authentication_is_required(self, tmp_path) -> None:
-        """With no override, the real dependency runs and refuses."""
-        with TestClient(api_main.app) as client:
-            assert client.get("/api/v1/workspaces").status_code in (401, 403)
+        """The real auth dependency refuses before any workspace service runs."""
+        del tmp_path
+        original_init = api_main.initialize_database
+
+        async def _noop() -> None:
+            return None
+
+        api_main.initialize_database = _noop  # type: ignore[assignment]
+        try:
+            with TestClient(api_main.app) as client:
+                assert client.get("/api/v1/workspaces").status_code in (401, 403)
+        finally:
+            api_main.initialize_database = original_init
 
 
 class TestRuntimeEndpoints:
