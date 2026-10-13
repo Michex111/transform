@@ -104,6 +104,14 @@ async def _add_job(factory, *, job_id: str, user_id: int | None, age_hours: floa
         await session.commit()
 
 
+async def _set_job_status(factory, job_id: str, status: JobStatus) -> None:
+    async with factory() as session:
+        job = await session.get(ConversionJobModel, job_id)
+        assert job is not None
+        job.status = status
+        await session.commit()
+
+
 async def _add_file(factory, *, file_id: str, user_id: int, age_hours: float, expires_hours_ago: float | None, file_key: str) -> None:
     async with factory() as session:
         session.add(
@@ -300,6 +308,29 @@ def test_archive_old_jobs_removes_history_and_objects() -> None:
         asyncio.run(_run())
 
 
+def test_archive_old_jobs_keeps_active_jobs_and_objects() -> None:
+    with sqlite_session_factory() as factory:
+
+        async def _run() -> None:
+            user = await _add_user(factory)
+            storage = FakeCleanupStorage({"user/active-in.pdf": b"active"})
+            await _add_job(
+                factory, job_id="active-old", user_id=user.id, age_hours=24 * 40,
+                input_key="user/active-in.pdf", output_key=None,
+            )
+            await _set_job_status(factory, "active-old", JobStatus.PROCESSING)
+
+            worker = _make_worker(storage, factory, job_archive_days=30)
+            archived = await worker._archive_old_jobs()
+
+            assert archived == 0
+            assert "user/active-in.pdf" not in storage.removed
+            async with factory() as session:
+                assert await session.get(ConversionJobModel, "active-old") is not None
+
+        asyncio.run(_run())
+
+
 def test_cleanup_cycle_runs_all_tasks() -> None:
     with sqlite_session_factory() as factory:
 
@@ -438,4 +469,3 @@ def test_cleanup_startup_endpoint_hides_credentials(monkeypatch) -> None:
     assert endpoint == "db.example:5432/transform"
     assert "sup3rs3cret" not in endpoint
     assert "transform:" not in endpoint
-

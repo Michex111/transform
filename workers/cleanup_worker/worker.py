@@ -29,6 +29,7 @@ from src.infrastructure.database.models import (
     McpToolInvocationModel,
     UserFileModel,
 )
+from src.domain.conversions.value_object.job_status import JobStatus
 
 logger = logging.getLogger(__name__)
 
@@ -297,7 +298,12 @@ class CleanupWorker:
 
         async with self._db_factory() as session:
             result = await session.execute(
-                select(ConversionJobModel).where(ConversionJobModel.created_at < cutoff)
+                select(ConversionJobModel).where(
+                    ConversionJobModel.created_at < cutoff,
+                    ConversionJobModel.status.in_(
+                        (JobStatus.COMPLETED, JobStatus.FAILED)
+                    ),
+                )
             )
             rows = result.scalars().all()
 

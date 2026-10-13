@@ -889,13 +889,15 @@ export class ApiClient {
       })
 
     let job: ConversionJobResponse
+    let encrypted = Boolean(fencr)
     try {
-      job = await makeJob(Boolean(fencr))
+      job = await makeJob(encrypted)
     } catch (err) {
       // The backend only rejects `client_encrypted: true` when the master key is
       // unset. Fall back to plaintext in that case so the feature degrades
       // gracefully instead of erroring the whole conversion.
       if (fencr && isClientEncryptionDisabledError(err)) {
+        encrypted = false
         job = await makeJob(false)
       } else {
         throw err
@@ -903,7 +905,7 @@ export class ApiClient {
     }
 
     // The object we PUT: the FENCR ciphertext when encrypted, else the original.
-    const uploadBytes = fencr ? fencr.encrypted : file
+    const uploadBytes = encrypted && fencr ? fencr.encrypted : file
 
     // 2. Create an upload session.
     const upload = await this.createUploadSession({ file_extension: source, file_name: name })
@@ -1125,10 +1127,12 @@ export class ApiClient {
       })
 
     let job: GuestJobResponse
+    let encrypted = Boolean(fencr)
     try {
-      job = await makeJob(Boolean(fencr))
+      job = await makeJob(encrypted)
     } catch (err) {
       if (fencr && isClientEncryptionDisabledError(err)) {
+        encrypted = false
         job = await makeJob(false)
       } else {
         throw err
@@ -1136,7 +1140,7 @@ export class ApiClient {
     }
 
     const guestToken = job.guest_token
-    const uploadBytes = fencr ? fencr.encrypted : file
+    const uploadBytes = encrypted && fencr ? fencr.encrypted : file
 
     const upload = await this.guestCreateUploadSession({
       file_extension: source,

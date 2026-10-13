@@ -2,6 +2,13 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 const ABSOLUTE_API_BASE = "https://transform-api-7b3g.onrender.com/api";
 
+const fencrMocks = vi.hoisted(() => ({
+  encryptFileToFencr: vi.fn(),
+  fencrDataKeyToBase64: vi.fn(),
+}));
+
+vi.mock("@/lib/fencr", () => fencrMocks);
+
 /**
  * Load a fresh copy of the client module with `VITE_API_BASE_URL` stubbed.
  *
@@ -147,6 +154,105 @@ describe("cross-origin request URLs", () => {
     const [url, options] = fetchMock.mock.calls[0];
     expect(url).toBe(`${API_BASE}/v1/events/jobs/job-2`);
     expect((options as RequestInit).headers).toEqual({ Authorization: "Bearer tok-123" });
+  });
+});
+
+describe("client-encryption fallback", () => {
+  const originalFile = new Blob(["plain-text"], { type: "text/plain" });
+  const encryptedFile = new Blob(["encrypted"], { type: "application/octet-stream" });
+
+  afterEach(() => {
+    fencrMocks.encryptFileToFencr.mockReset();
+    fencrMocks.fencrDataKeyToBase64.mockReset();
+  });
+
+  it("uploads the original file after authenticated encryption fallback", async () => {
+    fencrMocks.encryptFileToFencr.mockResolvedValue({
+      encrypted: encryptedFile,
+      dataKey: new Uint8Array(32),
+    });
+    fencrMocks.fencrDataKeyToBase64.mockReturnValue("encoded-key");
+
+    const fetchMock = vi.fn(async (url: string, options?: RequestInit) => {
+      if (url === "/api/conversions/jobs") {
+        const body = JSON.parse(options?.body as string);
+        if (body.client_encrypted) {
+          return jsonResponse(400, {
+            detail: "Client-side encryption is not enabled on this deployment",
+          });
+        }
+        return jsonResponse(201, {
+          job_id: "job-1",
+          status: "pending",
+          source_format: "txt",
+          target_format: "pdf",
+          input_file: "notes.txt",
+        });
+      }
+      if (url === "/api/uploads/sessions") {
+        return jsonResponse(201, {
+          upload_id: "upload-1",
+          object_key: "uploads/notes.txt",
+          upload_url: "https://storage.example/upload-1",
+        });
+      }
+      return jsonResponse(200, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    stubLocalStorage();
+
+    const { api } = await loadClient();
+    await api.convertWithFile("txt", "pdf", originalFile, "notes.txt");
+
+    const put = fetchMock.mock.calls.find(([url]) => url === "https://storage.example/upload-1");
+    expect(put?.[1]).toMatchObject({ method: "PUT" });
+    expect((put?.[1] as RequestInit).body).toBe(originalFile);
+  });
+
+  it("uploads the original file after guest encryption fallback", async () => {
+    fencrMocks.encryptFileToFencr.mockResolvedValue({
+      encrypted: encryptedFile,
+      dataKey: new Uint8Array(32),
+    });
+    fencrMocks.fencrDataKeyToBase64.mockReturnValue("encoded-key");
+
+    const fetchMock = vi.fn(async (url: string, options?: RequestInit) => {
+      if (url === "/api/guest/conversions/jobs") {
+        const body = JSON.parse(options?.body as string);
+        if (body.client_encrypted) {
+          return jsonResponse(400, {
+            detail: "Client-side encryption is not enabled on this deployment",
+          });
+        }
+        return jsonResponse(201, {
+          job_id: "guest-job-1",
+          guest_token: "guest-token",
+          status: "pending",
+          source_format: "txt",
+          target_format: "pdf",
+          input_file: "notes.txt",
+        });
+      }
+      if (url === "/api/guest/uploads/sessions") {
+        return jsonResponse(201, {
+          upload_id: "guest-upload-1",
+          object_key: "guest/notes.txt",
+          upload_url: "https://storage.example/guest-upload-1",
+        });
+      }
+      return jsonResponse(200, {});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    stubLocalStorage();
+
+    const { api } = await loadClient();
+    await api.guestConvertWithFile("txt", "pdf", originalFile, "notes.txt");
+
+    const put = fetchMock.mock.calls.find(
+      ([url]) => url === "https://storage.example/guest-upload-1",
+    );
+    expect(put?.[1]).toMatchObject({ method: "PUT" });
+    expect((put?.[1] as RequestInit).body).toBe(originalFile);
   });
 });
 
@@ -604,4 +710,3 @@ describe("assistantResolveDeletion", () => {
     expect(err.code).toBe("DELETION_NOT_FOUND");
   });
 });
-

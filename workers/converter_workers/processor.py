@@ -44,6 +44,8 @@ except ImportError:  # pragma: no cover - added by the backend agent in parallel
 
 type JobProcess = Callable[[WorkerContext, ConversionJob], Coroutine[None, None, None]] 
 
+USER_FACING_FAILURE_MESSAGE = "Conversion failed. Please try again later."
+
 settings = get_settings()
 
 # Upper bound for a single object-storage transfer. Storage calls are blocking
@@ -55,8 +57,6 @@ settings = get_settings()
 # Note that this bounds the *await*, not the underlying thread — a thread stuck
 # in the SDK call keeps running (see the timeout test in test_processor.py).
 _STORAGE_OP_TIMEOUT_SECONDS = 600
-
-
 @retry_on_exception(logger=worker_logger)
 async def _download_input_file(context: WorkerContext, job: ConversionJob, input_dest: Path) -> Path:
     """
@@ -486,11 +486,17 @@ async def process_job(context: WorkerContext, job: ConversionJob) -> None:
     except Exception as e:
         error_message = str(e)
         _mark_failed(job, error_message)
+        worker_logger.error(
+            f"Conversion failed for job {job.job_id}: {error_message}",
+            extra=log_context,
+        )
         # Keep how far it got, so a reloaded card shows where the job stopped
         # rather than falling back to an indeterminate sweep.
         job.progress = event.progress
         await _persist(terminal=True)
-        await context.event_port.publish(**event.failed(error_message).to_dict())
+        await context.event_port.publish(
+            **event.failed(USER_FACING_FAILURE_MESSAGE).to_dict()
+        )
         raise RuntimeError(error_message)
 
 

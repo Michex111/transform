@@ -21,6 +21,7 @@ from workers.converter_workers.processor import (
     process_job,
     resolve_path,
 )
+from workers.converter_workers.processor import USER_FACING_FAILURE_MESSAGE
 from workers.converter_workers.processor import resolve_input_path, resolve_output_path
 
 
@@ -362,6 +363,9 @@ def test_process_job_raises_and_marks_failed_when_converter_missing(
         asyncio.run(process_job(context, conversion_job))
 
     assert conversion_job.status == JobStatus.FAILED
+    terminal = fake_event_publisher.published_events[-1]
+    assert terminal["message"] == USER_FACING_FAILURE_MESSAGE
+    assert "wrapped data key" not in terminal["message"]
 
 
 def test_process_job_marks_failed_when_converter_raises(
