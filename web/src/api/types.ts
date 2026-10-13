@@ -1138,6 +1138,15 @@ export interface AssistantChatRequest {
    * pathname only — never a full URL, which would leak the query string.
    */
   context?: string
+  /**
+   * Cloud workspace this turn should work in.
+   *
+   * Optional: when omitted, the API reuses the workspace the conversation
+   * already used. It is context, not authority — the server re-checks ownership
+   * before every tool call — so sending an id the user does not own buys
+   * nothing.
+   */
+  workspace_id?: string
 }
 
 /**
@@ -1157,7 +1166,17 @@ export interface AssistantChatRequest {
  * instead of being dropped.
  */
 export interface AssistantArtifact {
-  type: "file" | "job" | "folder" | "delete" | "unknown"
+  /**
+   * The kinds the API can emit. Kept as a union rather than an enum so a new
+   * kind is a deliberate addition here, and `"unknown"` exists because an
+   * older SPA must render a chip for a kind a newer API invented rather than
+   * dropping it silently.
+   *
+   * `workspace` / `execution` / `workspace_file` arrive from the cloud-workspace
+   * tools: the AI's activity in a workspace is navigable to the workspace page,
+   * where the real execution state lives.
+   */
+  type: "file" | "job" | "folder" | "delete" | "workspace" | "execution" | "workspace_file" | "unknown"
   id: string
   name: string
   meta?: Record<string, unknown> | null

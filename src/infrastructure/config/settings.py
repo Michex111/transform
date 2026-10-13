@@ -4,6 +4,15 @@ import logging
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import SecretStr
 
+# The base image the workspace runtime is created from is owned by the domain
+# (it is part of the runtime configuration that gets fingerprinted), so the
+# default here is taken from there rather than restated. Restating it is how the
+# built image and the image the API believes it runs drift apart.
+from src.domain.workspaces.value_object.runtime_config import (
+    DEFAULT_BASE_IMAGE as _DEFAULT_RUNTIME_BASE_IMAGE,
+    DEFAULT_BASE_IMAGE_REVISION as _DEFAULT_RUNTIME_BASE_IMAGE_REVISION,
+)
+
 
 logger = logging.getLogger(__name__)
 
@@ -506,6 +515,94 @@ class Settings(BaseSettings):
     JOB_ARCHIVE_AFTER_DAYS: int = 30             # full job history retention
 
     # ------------------------------------------------------------------
+    # Cloud workspaces (persistent Python runtimes)
+    # ------------------------------------------------------------------
+    # Where a workspace runtime actually runs. ``docker`` is the only provider
+    # implemented; the setting exists so a managed sandbox adapter can be added
+    # without a code change at every call site. An unknown value is a
+    # configuration error rather than a silent fall back to Docker, because a
+    # deployment that asked for a different isolation model and quietly got
+    # containers instead is a security surprise.
+    #
+    # NOTE (deployment): the API container on Render cannot reach a Docker
+    # daemon, so runtimes are created by the workspace WORKER, which runs where
+    # the daemon is. See docs/cloud-workspaces.md.
+    WORKSPACE_RUNTIME_PROVIDER: str = "docker"
+    # The versioned base image the runtime is created from. Defaults are taken
+    # from the domain's runtime configuration so the image that is built and the
+    # image the API believes it runs cannot drift apart.
+    WORKSPACE_RUNTIME_BASE_IMAGE: str = (
+        f"{_DEFAULT_RUNTIME_BASE_IMAGE}:{_DEFAULT_RUNTIME_BASE_IMAGE_REVISION}"
+    )
+    # Namespace for the durable volume / container / snapshot names per workspace.
+    WORKSPACE_RUNTIME_VOLUME_PREFIX: str = "transform-ws-state-"
+    WORKSPACE_RUNTIME_CONTAINER_PREFIX: str = "transform-ws-rt-"
+    WORKSPACE_RUNTIME_SNAPSHOT_REPOSITORY: str = "transform-ws-env"
+    # Outbound network policy for executed code. ENFORCED by the container's
+    # network topology — never by a flag that nothing applies.
+    #
+    #   none         (default) the runtime is created with no network at all
+    #                (``network_mode: none``). Genuinely enforced by Docker, and
+    #                not bypassable from inside because the container runs with
+    #                all capabilities dropped and ``no-new-privileges`` — so it
+    #                cannot bring an interface up or alter its own rules.
+    #                CONSEQUENCE: dependency installation is impossible, so
+    #                ``uv`` project operations are refused with a clear message.
+    #   proxy        the runtime is attached ONLY to an operator-provided
+    #                internal network (WORKSPACE_RUNTIME_PROXY_NETWORK), and the
+    #                proxy variables below are injected. The sandbox can reach
+    #                nothing but the proxy; the proxy decides what leaves. This
+    #                is the only mode that is both useful and defensible, and it
+    #                requires running that proxy — see docs/cloud-workspaces.md.
+    #   unrestricted the runtime keeps the default bridge network. NOT SAFE for
+    #                untrusted code (the container can reach any routable
+    #                address, including cloud metadata endpoints). Explicit
+    #                opt-in only, and the API logs a warning at boot whenever it
+    #                is selected.
+    WORKSPACE_RUNTIME_EGRESS: str = "none"
+    #: Name of the operator's internal (``internal: true``) Docker network that
+    #: carries proxy traffic. Required by ``WORKSPACE_RUNTIME_EGRESS=proxy``.
+    WORKSPACE_RUNTIME_PROXY_NETWORK: str | None = None
+    #: Proxy endpoint injected into a ``proxy``-mode runtime, e.g.
+    #: ``http://transform-egress-proxy:3128``. Injected as ``HTTP_PROXY``,
+    #: ``HTTPS_PROXY`` and ``UV_INDEX_URL``; the proxy is what enforces the
+    #: allow-list, so a runtime that ignores the variables still cannot reach
+    #: anything except the proxy network.
+    WORKSPACE_RUNTIME_PROXY_URL: str | None = None
+
+    # Per-workspace disk quota, in MB. ENFORCED in two places: every write into
+    # a workspace is refused if it would exceed this, and an execution is refused
+    # once the workspace is already over it. Recorded and surfaced otherwise.
+    #
+    # What it is NOT: a filesystem quota. A single execution can overshoot before
+    # the post-run measurement sees it, because plain Docker named volumes have no
+    # quota support (``--storage-opt size`` needs overlay2-on-XFS with ``pquota``,
+    # or devicemapper). The provider requests that flag when the daemon supports
+    # it and records whether it took effect; see docs/cloud-workspaces.md for the
+    # precise guarantee and the infrastructure that would make it hard.
+    WORKSPACE_DISK_QUOTA_MB: int = 5120
+
+    # Artifacts: files an execution leaves in this workspace-relative directory are
+    # copied into object storage so they outlive the runtime that produced them.
+    # Bounded on both axes because the directory is written by user code: an
+    # unbounded copy would let one run fill the bucket.
+    WORKSPACE_ARTIFACT_DIRECTORY: str = "outputs"
+    WORKSPACE_MAX_ARTIFACTS: int = 20
+    WORKSPACE_MAX_ARTIFACT_BYTES: int = 25 * 1024 * 1024
+    WORKSPACE_RUNTIME_STOP_GRACE_SECONDS: int = 30
+    # Seconds a container-side execution may run before the runtime kills it. The
+    # ceiling a client may request is validated against this by the API schema.
+    WORKSPACE_EXECUTION_TIMEOUT_SECONDS: int = 300
+    # Bytes captured from each of stdout/stderr. Bounded at the provider so a
+    # runaway ``print`` loop cannot exhaust the host's memory.
+    WORKSPACE_MAX_OUTPUT_BYTES: int = 1_048_576
+    # Guards rather than targets: they exist so one account cannot occupy the
+    # execution host indefinitely.
+    WORKSPACE_MAX_PER_USER: int = 20
+    WORKSPACE_MAX_ACTIVE_EXECUTIONS: int = 5
+    WORKSPACE_SNAPSHOT_RETENTION: int = 5
+
+    # ------------------------------------------------------------------
     # Developer observability (API Logs + MCP Activity)
     # ------------------------------------------------------------------
     # Master switch for capturing API request events. Turning it off stops new
@@ -588,6 +685,15 @@ class Settings(BaseSettings):
     _SUPPORTED_SMS_BACKENDS = frozenset({"auto", "console", "twilio"})
 
     _SUPPORTED_AI_BACKENDS = frozenset({"auto", "openai", "gemini", "echo"})
+
+    #: Runtime providers this deployment can construct. ``docker`` is the only
+    #: adapter implemented; a managed sandbox would be added here and in
+    #: ``adapters/runtime/factory.py``.
+    _SUPPORTED_RUNTIME_PROVIDERS = frozenset({"docker"})
+
+    #: Outbound-network policies the provider adapter can actually build. Each
+    #: maps to a concrete container network topology — see the settings block.
+    _SUPPORTED_EGRESS_POLICIES = frozenset({"none", "proxy", "unrestricted"})
 
     def _resolve_email_backend(self) -> str:
         """The concrete email transport to use: console | smtp | resend.
@@ -883,6 +989,58 @@ class Settings(BaseSettings):
         silently shadows a pydantic API.
         """
         environment = self.ENVIRONMENT.strip().lower()
+
+        # Workspace runtime provider. An unknown value is rejected rather than
+        # falling back to Docker: a deployment that asked for a different
+        # isolation model must not silently receive containers instead.
+        provider = self.WORKSPACE_RUNTIME_PROVIDER.strip().lower()
+        if provider not in self._SUPPORTED_RUNTIME_PROVIDERS:
+            raise RuntimeError(
+                f"Unsupported WORKSPACE_RUNTIME_PROVIDER "
+                f"{self.WORKSPACE_RUNTIME_PROVIDER!r}; expected one of "
+                f"{sorted(self._SUPPORTED_RUNTIME_PROVIDERS)}."
+            )
+        for name in (
+            "WORKSPACE_EXECUTION_TIMEOUT_SECONDS",
+            "WORKSPACE_MAX_OUTPUT_BYTES",
+            "WORKSPACE_MAX_PER_USER",
+            "WORKSPACE_MAX_ACTIVE_EXECUTIONS",
+            "WORKSPACE_SNAPSHOT_RETENTION",
+            "WORKSPACE_DISK_QUOTA_MB",
+        ):
+            if getattr(self, name) <= 0:
+                raise RuntimeError(f"{name} must be positive.")
+
+        # Egress policy. An unknown value is rejected rather than falling back,
+        # because "we asked for an isolated runtime and quietly got an
+        # unrestricted one" is the single worst way this setting could fail.
+        egress = self.WORKSPACE_RUNTIME_EGRESS.strip().lower()
+        if egress not in self._SUPPORTED_EGRESS_POLICIES:
+            raise RuntimeError(
+                f"Unsupported WORKSPACE_RUNTIME_EGRESS {self.WORKSPACE_RUNTIME_EGRESS!r}; "
+                f"expected one of {sorted(self._SUPPORTED_EGRESS_POLICIES)}."
+            )
+        if egress == "proxy":
+            # Both are load-bearing: without the network the runtime would land
+            # on the default bridge (unrestricted), and without the URL nothing
+            # would use the proxy. Failing the boot is better than starting a
+            # proxy-policy deployment that is silently unrestricted.
+            if not self.WORKSPACE_RUNTIME_PROXY_NETWORK:
+                raise RuntimeError(
+                    "WORKSPACE_RUNTIME_EGRESS=proxy requires "
+                    "WORKSPACE_RUNTIME_PROXY_NETWORK."
+                )
+            if not self.WORKSPACE_RUNTIME_PROXY_URL:
+                raise RuntimeError(
+                    "WORKSPACE_RUNTIME_EGRESS=proxy requires "
+                    "WORKSPACE_RUNTIME_PROXY_URL."
+                )
+        elif egress == "unrestricted":
+            logger.warning(
+                "WORKSPACE_RUNTIME_EGRESS=unrestricted: executed code can reach any "
+                "routable address, including cloud metadata endpoints. This is not "
+                "safe for untrusted code; use 'none' or 'proxy'."
+            )
 
         # Email transport. An explicit choice is honoured or rejected — never
         # silently downgraded to the console sink, because that would drop real

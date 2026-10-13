@@ -54,6 +54,15 @@ class ChatRequest(BaseModel):
         max_length=200,
         description="Untrusted hint about the page the user is viewing",
     )
+    workspace_id: str | None = Field(
+        default=None,
+        max_length=64,
+        description=(
+            "Cloud workspace this turn should work in. Optional: when omitted, "
+            "the workspace used earlier in the conversation is reused. Always "
+            "re-checked for ownership server-side — it is context, not access."
+        ),
+    )
 
 
 class CreateConversationRequest(BaseModel):

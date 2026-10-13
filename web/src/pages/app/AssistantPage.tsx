@@ -24,6 +24,7 @@ import { createAssistantChatStore, type AssistantChatStore } from "@/lib/assista
 import { fileNameExtension } from "@/lib/format";
 import { readRailCollapsed, writeRailCollapsed } from "@/lib/layoutPrefs";
 import { useAssistantChat } from "@/lib/useAssistantChat";
+import { AssistantWorkspaceBar } from "@/components/assistant/AssistantWorkspaceBar";
 
 /** Navigation state the Files page uses to hand a file question to the assistant. */
 interface AssistantPrefill {
@@ -220,6 +221,11 @@ export function AssistantPage() {
     return list.slice(0, attachmentCap);
   }
 
+  // The workspace the assistant should work in. Held here (not in the chat
+  // store) because it is a decision about *this* composer, and the API already
+  // carries it forward from the transcript for follow-up turns.
+  const [workspaceId, setWorkspaceId] = useState<string | null>(null);
+
   function send(raw?: string) {
     const text = (raw ?? input).trim();
     if (!text || chat.streaming || tierBlocked) return;
@@ -227,7 +233,11 @@ export function AssistantPage() {
     setInput("");
     setAttachments([]);
     setContext(null);
-    sendTurn(text, { attachments: outgoing, context: location.pathname });
+    sendTurn(text, {
+      attachments: outgoing,
+      context: location.pathname,
+      ...(workspaceId ? { workspaceId } : {}),
+    });
   }
 
   function newChat() {    resetChat();
@@ -388,6 +398,13 @@ export function AssistantPage() {
           <UnavailablePanel tierBlocked={tierBlocked} />
         ) : (
           <>
+            {/* Which workspace the assistant will work in. Placed above the
+                transcript so the target of any code it runs is a fact the user
+                can see before sending — not something inferred afterwards. */}
+            <AssistantWorkspaceBar
+              workspaceId={workspaceId}
+              onChange={setWorkspaceId}
+            />
             {historyLoading ? (
               <MessageList messages={[]} tools={[]} stage={null} streaming={false} loading />
             ) : (

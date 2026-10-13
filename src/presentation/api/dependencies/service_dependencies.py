@@ -68,6 +68,18 @@ def _shared_redis_client():
     return create_redis_client(get_settings().REDIS_URL.get_secret_value())
 
 
+def get_shared_redis_client():
+    """The process-wide Redis client, for dependency modules that live elsewhere.
+
+    Exposed publicly because the cloud-workspace factories are in their own
+    module (they would otherwise make this one enormous), and reaching into
+    ``_shared_redis_client`` by its private name from another module is the kind
+    of coupling that makes a rename dangerous. The value is still the single
+    cached client — this is an accessor, not a second connection pool.
+    """
+    return _shared_redis_client()
+
+
 @lru_cache
 def _shared_minio_client() -> Minio:
     settings = get_settings()
@@ -393,6 +405,7 @@ def get_assistant_account_port(
 
 
 def get_assistant_toolbox(
+    db: Annotated[AsyncSession, Depends(get_db_session)],
     models: Annotated[AssistantModelResolver, Depends(get_assistant_model_registry)],
     extractor: Annotated[DocumentTextExtractorPort, Depends(get_document_text_extractor)],
     file_service: Annotated[FileService, Depends(get_file_service)],
@@ -406,8 +419,33 @@ def get_assistant_toolbox(
     Built per request because the folder/file repositories are bound to the
     request's database session; the expensive collaborators (the model
     registry, the extractor) are themselves cached dependencies.
+
+    The workspace/code-execution tools are attached here, from the *same*
+    session and through the same service builders the REST router uses. That is
+    the whole point of the integration: an AI tool call and a browser request
+    cannot diverge in what they authorise, because there is one implementation
+    underneath both.
+
+    The import is function-local because ``workspace_dependencies`` reads a
+    couple of helpers from this module; a module-level import here would be a
+    genuine cycle, and the ordering would then be load-bearing rather than
+    obviously correct.
     """
+    from src.presentation.api.dependencies.workspace_dependencies import (
+        build_execution_service,
+        build_workspace_service,
+    )
+    from src.application.services.assistant_workspace_tools import (
+        AssistantWorkspaceToolBox,
+    )
+
     settings = get_settings()
+    workspace_tools = AssistantWorkspaceToolBox(
+        workspaces=build_workspace_service(db),
+        executions=build_execution_service(db),
+        default_timeout_seconds=settings.WORKSPACE_EXECUTION_TIMEOUT_SECONDS,
+        max_active_executions=settings.WORKSPACE_MAX_ACTIVE_EXECUTIONS,
+    )
     return AssistantToolBox(
         file_service=file_service,
         conversion_service=conversion_service,
@@ -418,6 +456,7 @@ def get_assistant_toolbox(
         account_port=account_port,
         max_document_bytes=settings.AI_MAX_DOCUMENT_BYTES,
         summary_max_input_chars=settings.AI_SUMMARY_MAX_INPUT_CHARS,
+        workspace_tools=workspace_tools,
     )
 
 

@@ -30,6 +30,7 @@ from src.application.services.assistant_service import (
     build_bounded_history,
 )
 from src.application.services.assistant_tools import AttachmentRef
+from src.application.services.assistant_workspace_tools import WorkspaceTurnContext
 from src.domain.assistant.entities.conversation import (
     Conversation,
     Message,
@@ -196,11 +197,27 @@ class ScriptedToolBox:
         artifacts: list[Artifact],
         conversation_id: str | None = None,
         origin: JobOrigin = JobOrigin.WEB,
+        workspace_context=None,
     ) -> dict:
-        del user_id, tier, conversation_id, origin
+        del user_id, tier, conversation_id, origin, workspace_context
         self.executed.append((name, arguments))
         artifacts.extend(self.artifacts.get(name, []))
         return self.results.get(name, {})
+
+    async def resolve_workspace_context(
+        self, user_id: int, workspace_id: str | None, *, source: str = "selected"
+    ):
+        """Stand-in for the real resolver: no workspace, by default.
+
+        Defaults to "no workspace" because most of these tests are about
+        document tools, and the honest default for a double is the state the
+        feature is off in — a double that invented a workspace would make the
+        service look like it was passing context it never had.
+        """
+        del user_id, source
+        return WorkspaceTurnContext(workspace_id=workspace_id), (
+            {"name": "scripted", "runtime_state": "STOPPED"} if workspace_id else None
+        )
 
     async def delete_owned_file(self, user_id: int, file_id: str) -> str:
         """The confirm-only deletion the service calls; records what it removed."""
@@ -776,15 +793,61 @@ def test_the_loop_is_bounded_and_falls_back_to_a_message() -> None:
 
     done = events[-1]
     assert isinstance(done, AssistantDone)
-    assert "narrow it down" in done.content
+    assert "reached this turn's limit" in done.content
+    # The fallback must agree with the transcript above it: the tool events are
+    # rendered as successes, so it cannot claim nothing was done.
+    assert "could not finish" not in done.content
     # The exhausted fallback reports the persisted user message too.
     assert conversations.messages["conv-1"][0].role is MessageRole.USER
     assert done.user_message_id == conversations.messages["conv-1"][0].id
-    # 2 iterations, each with exactly one model call.
-    assert len(llm.calls) == 2
+    # 2 tool iterations, each with exactly one model call, plus the final
+    # tool-free completion that is allowed to answer.
+    assert len(llm.calls) == 3
+    # And that last call really did offer no tools — that is what makes it a
+    # bound and not an extra round of the loop.
+    assert llm.calls[2][1] == ()
     # The exhausted fallback is a normal assistant message, so it also records
     # the turn's (empty here) artifacts for a reopened conversation.
     assert conversations.messages["conv-1"][-1].meta == {"artifacts": []}
+
+
+def test_the_final_tool_free_turn_answers_instead_of_apologising() -> None:
+    """Running out of tool rounds is not the same as having nothing to say.
+
+    The regression this pins: a turn whose tools all succeeded still ended in a
+    fixed apology that contradicted the transcript. The fix spends one last
+    completion with no tools offered, so the model can narrate what it gathered.
+    """
+    toolbox = ScriptedToolBox({"list_files": {"count": 3}})
+    llm = FakeLlmPort(
+        [
+            tool_response("list_files", {}),
+            tool_response("list_files", {}),
+            # The third and final completion, which the loop only reaches because
+            # the budget ran out. It answers because it is offered no tools.
+            text_response("The workspace has 3 files."),
+        ]
+    )
+    events = _chat(
+        _service(
+            llm=llm,
+            toolbox=toolbox,
+            conversations=FakeConversationRepository(),
+            max_tool_iterations=2,
+        )
+    )
+
+    done = events[-1]
+    assert isinstance(done, AssistantDone)
+    assert done.content == "The workspace has 3 files."
+    # Streamed to the user, not just persisted.
+    assert any(
+        getattr(event, "text", "") == "The workspace has 3 files." for event in events
+    )
+    # Two tool rounds ran, and each one's result is still in the transcript the
+    # final turn was given.
+    final_messages = llm.calls[2][0]
+    assert [m.role for m in final_messages].count("tool") == 2
 
 
 def test_history_is_bounded_on_the_wire() -> None:
@@ -808,10 +871,12 @@ def test_history_is_bounded_on_the_wire() -> None:
           message="newest", conversation_id="conv-9")
 
     sent = llm.calls[0][0]
-    # system + the bounded window, which already contains the new user message.
-    assert len(sent) == 1 + 4
+    # system + the workspace line + the bounded window, which already contains
+    # the new user message.
+    assert len(sent) == 2 + 4
     assert sent[-1].content == "newest"
-    assert sent[1].content == "message 17"
+    # The history window starts after the two server-authored system messages.
+    assert sent[2].content == "message 17"
 
 
 # ---------------------------------------------------------------------------
@@ -1189,17 +1254,24 @@ def test_attachments_are_resolved_injected_and_persisted() -> None:
     )
 
     sent = llm.calls[0][0]
-    # system prompt, then the injected attachment context, then the history.
+    # system prompt, then the injected turn context, then the workspace line,
+    # then the history.
     assert sent[0].role == "system"
     assert sent[1].role == "system"
     assert "resume.pdf" in sent[1].content
     assert "file_id: file-1" in sent[1].content
     assert "27 KB" in sent[1].content
-    assert sent[2].role == "user"
+    # The workspace line is always present, and says explicitly that no
+    # workspace is selected rather than staying silent — silence is what lets a
+    # model assume one.
+    assert sent[2].role == "system"
+    assert "No cloud workspace is selected" in sent[2].content
+    assert sent[3].role == "user"
 
     stored = conversations.messages["conv-1"][0]
     assert stored.meta == {
-        "attachments": [{"id": "file-1", "name": "resume.pdf", "extension": "pdf"}]
+        "attachments": [{"id": "file-1", "name": "resume.pdf", "extension": "pdf"}],
+        "workspace_id": None,
     }
 
 
@@ -1212,7 +1284,10 @@ def test_an_unknown_attachment_is_refused_before_streaming() -> None:
 def test_a_turn_without_attachments_persists_an_empty_list() -> None:
     conversations = FakeConversationRepository()
     _chat(_service(conversations=conversations), message="hello")
-    assert conversations.messages["conv-1"][0].meta == {"attachments": []}
+    assert conversations.messages["conv-1"][0].meta == {
+        "attachments": [],
+        "workspace_id": None,
+    }
 
 
 def test_context_adds_a_currently_viewing_system_line() -> None:
@@ -1237,9 +1312,17 @@ def test_attachments_and_context_share_one_system_message() -> None:
     llm = FakeLlmPort([text_response("ok")])
     _chat(_service(llm=llm, toolbox=toolbox), message="hi", file_ids=["f1"], context="files")
     sent = llm.calls[0][0]
-    assert [message.role for message in sent[:3]] == ["system", "system", "user"]
+    # ONE message carries both the attachments and the page context; the
+    # workspace line is a separate, later system message.
+    assert [message.role for message in sent[:4]] == [
+        "system",
+        "system",
+        "system",
+        "user",
+    ]
     assert "attached" in sent[1].content
     assert "currently viewing" in sent[1].content
+    assert "workspace" in sent[2].content.lower()
 
 
 def test_bounded_history_is_unaffected_by_attachment_meta() -> None:
@@ -1285,13 +1368,27 @@ def test_the_resolved_model_depends_on_the_tier() -> None:
     assert resolver.resolved[-1] == SubscriptionTier.PRO
 
 
+def _tool_rounds(llm: FakeLlmPort) -> int:
+    """How many completions the turn made *with tools on the table*.
+
+    The loop's bound is a bound on tool rounds. A turn may also spend one final
+    tool-free completion to answer, so the raw call count is always one higher
+    than the budget — counting tool-bearing calls is what the bound is about.
+    """
+    return sum(1 for _messages, tools in llm.calls if tools)
+
+
 def test_the_tool_iteration_bound_is_capped_by_the_settings_ceiling() -> None:
     """The deployment ceiling wins over the tier entitlement."""
     llm = FakeLlmPort([tool_response("list_files")] * 10)
     service = _service(llm=llm, max_tool_iterations=2)
     _chat(service, message="go")
     # FREE is entitled to 4 steps, but the ceiling is 2 — the lower of the two.
-    assert len(llm.calls) == 2
+    # Counted as tool-bearing completions rather than total calls: the turn also
+    # spends one final toll-free completion, which is not a step of the loop and
+    # must not be mistaken for the bound being exceeded.
+    assert _tool_rounds(llm) == 2
+    assert len(llm.calls) == 3
 
 
 def test_a_free_turn_gets_fewer_tool_steps_than_the_ceiling_allows() -> None:
@@ -1299,7 +1396,7 @@ def test_a_free_turn_gets_fewer_tool_steps_than_the_ceiling_allows() -> None:
     llm = FakeLlmPort([tool_response("list_files")] * 10)
     service = _service(llm=llm, max_tool_iterations=6)
     _chat(service, message="go")  # tier FREE -> 4 iterations
-    assert len(llm.calls) == 4
+    assert _tool_rounds(llm) == 4
 
 
 def test_more_attachments_than_the_tier_allows_is_refused() -> None:

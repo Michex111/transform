@@ -64,6 +64,14 @@ const FilesPage = lazy(() =>
 const WorkflowsPage = lazy(() =>
   import("@/pages/app/WorkflowsPage").then((m) => ({ default: m.WorkflowsPage })),
 );
+const WorkspacesPage = lazy(() =>
+  import("@/pages/app/WorkspacesPage").then((m) => ({ default: m.WorkspacesPage })),
+);
+const WorkspaceDetailPage = lazy(() =>
+  import("@/pages/app/WorkspaceDetailPage").then((m) => ({
+    default: m.WorkspaceDetailPage,
+  })),
+);
 const BillingPage = lazy(() =>
   import("@/pages/app/BillingPage").then((m) => ({ default: m.BillingPage })),
 );
@@ -154,6 +162,12 @@ export default function App() {
           <Route path="/app/convert" element={<ConvertPage />} />
           <Route path="/app/queue" element={<QueuePage />} />
           <Route path="/app/workflows" element={<WorkflowsPage />} />
+          {/* The list route is a string literal so the stub plugin (which reads
+              this file as text) writes a build-time shell for it. The detail
+              route is dynamic, so it is deliberately NOT stubbed — a dynamic
+              path cannot have a static stub, and the host rewrite covers it. */}
+          <Route path="/app/workspaces" element={<WorkspacesPage />} />
+          <Route path="/app/workspaces/:workspaceId" element={<WorkspaceDetailPage />} />
           <Route path="/app/history" element={<HistoryPage />} />
           <Route path="/app/files" element={<FilesPage />} />
           <Route path="/app/billing" element={<BillingPage />} />

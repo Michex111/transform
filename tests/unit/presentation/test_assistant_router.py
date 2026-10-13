@@ -231,6 +231,8 @@ class StubAssistantService:
         #: those endpoints have no model-facing fallback for.
         self.read_error = read_error
         self.resolved: list[tuple[str, str, bool]] = []
+        #: Workspace ids the router passed into each chat turn, in order.
+        self.workspace_ids: list[str | None] = []
 
     async def stream_chat(
         self,
@@ -242,8 +244,12 @@ class StubAssistantService:
         file_ids=None,
         context=None,
         origin: JobOrigin = JobOrigin.WEB,
+        workspace_id: str | None = None,
     ):
         del user_id, tier, message, conversation_id, file_ids, context, origin
+        # Recorded so a test can assert the router forwards the caller's
+        # workspace selection rather than dropping it.
+        self.workspace_ids.append(workspace_id)
         if self.error is not None:
             raise self.error
         yield AssistantTextDelta(text="Hello")

@@ -25,6 +25,7 @@ from starlette.testclient import TestClient
 
 import src.presentation.api.main as api_main
 import src.presentation.mcp.dependencies as mcp_deps
+from src.domain.security.value_object.agent_scope import ALL_SCOPES
 from src.infrastructure.auth.jwt_provider import hash_password
 from src.infrastructure.database.models import UserFileModel, UserFolderModel, UserModel
 from src.infrastructure.database.session import Base, get_db_session
@@ -256,12 +257,13 @@ def test_protected_resource_metadata_is_served_at_the_canonical_url(tmp_path) ->
             payload = env.client.get(path).json()
             assert payload["resource"].endswith("/mcp")
             assert payload["authorization_servers"] == [payload["resource"]]
-            assert payload["scopes_supported"] == [
-                "documents.read",
-                "documents.convert",
-                "documents.write",
-                "documents.delete",
-            ]
+            # Derived from the scope vocabulary rather than hard-coded: a client
+            # discovers what it may ask for from this list, so a new scope that
+            # is not advertised here is a scope nobody can request. Asserting the
+            # mapping (not a literal) is what keeps the two from drifting.
+            assert payload["scopes_supported"] == [scope.value for scope in ALL_SCOPES]
+            assert "workspaces.read" in payload["scopes_supported"]
+            assert "workspaces.execute" in payload["scopes_supported"]
 
 
 def test_the_authorization_server_metadata_is_reachable_by_both_derivations(tmp_path) -> None:

@@ -28,6 +28,14 @@ class AgentScope(StrEnum):
     DOCUMENTS_CONVERT = "documents.convert"
     DOCUMENTS_WRITE = "documents.write"
     DOCUMENTS_DELETE = "documents.delete"
+    #: See a user's cloud workspaces: their names, runtime state, files and
+    #: execution history. Read-only.
+    WORKSPACES_READ = "workspaces.read"
+    #: Run code in a user's cloud workspace, and write files into it. Separate
+    #: from ``documents.*`` because a workspace is not a document: this scope
+    #: grants an agent CPU on the platform, so it is opt-in on its own and is
+    #: never implied by any document permission.
+    WORKSPACES_EXECUTE = "workspaces.execute"
 
 
 #: Every scope the authorization server understands, in a stable display order.
@@ -36,6 +44,8 @@ ALL_SCOPES: tuple[AgentScope, ...] = (
     AgentScope.DOCUMENTS_CONVERT,
     AgentScope.DOCUMENTS_WRITE,
     AgentScope.DOCUMENTS_DELETE,
+    AgentScope.WORKSPACES_READ,
+    AgentScope.WORKSPACES_EXECUTE,
 )
 
 #: Scopes offered by default on the consent screen. ``documents.delete`` is
@@ -59,6 +69,12 @@ SCOPE_DESCRIPTIONS: dict[AgentScope, str] = {
     AgentScope.DOCUMENTS_CONVERT: "Convert your files to another format",
     AgentScope.DOCUMENTS_WRITE: "Save new files and organise your Drive",
     AgentScope.DOCUMENTS_DELETE: "Permanently delete your files",
+    AgentScope.WORKSPACES_READ: (
+        "See your cloud workspaces, their files and their execution history"
+    ),
+    AgentScope.WORKSPACES_EXECUTE: (
+        "Write files in your workspaces and run code there"
+    ),
 }
 
 

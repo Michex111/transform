@@ -1226,6 +1226,24 @@ describe("normalizeAssistantArtifact", () => {
     const artifact = normalizeAssistantArtifact({ type: "delete", meta: "nope" });
     expect(artifact).toEqual({ type: "delete", id: "", name: "", meta: null });
   });
+
+  it("keeps the cloud-workspace kinds instead of folding them to unknown", () => {
+    // Regression: the whitelist here listed only file/job/folder/delete, so an
+    // artifact the assistant reported from a workspace arrived as "unknown" and
+    // rendered as an inert chip — the link branches in ArtifactChips never ran,
+    // even though they were implemented and correct.
+    for (const type of ["workspace", "execution", "workspace_file"] as const) {
+      const artifact = normalizeAssistantArtifact({ type, id: "w1", name: "Sales analysis" });
+      expect(artifact.type).toBe(type);
+      expect(artifact.name).toBe("Sales analysis");
+    }
+  });
+
+  it("still degrades a kind it genuinely does not know", () => {
+    expect(normalizeAssistantArtifact({ type: "workspace_run", id: "x" }).type).toBe(
+      "unknown",
+    );
+  });
 });
 
 describe("normalizeAssistantDeletion", () => {

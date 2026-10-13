@@ -1188,11 +1188,24 @@ export function normalizeAssistantArtifact(value: unknown): AssistantArtifact {
     // a kind added by a newer API, or plain junk — degrades to `unknown`
     // rather than being dropped, so the chip still renders something.
     //
+    // The list below must stay in step with the `AssistantArtifact` union. It
+    // was once only file/job/folder/delete, which silently coerced the
+    // cloud-workspace kinds to `unknown` — so an artifact the assistant reported
+    // from a workspace rendered as an inert chip with no link, even though the
+    // renderer had a working branch for it. A kind that is missing here does not
+    // fail loudly; it just quietly does less.
+    //
     // `"delete"` must be listed explicitly or a pending deletion would collapse
     // to the neutral `unknown` chip: the card that asks the user to confirm the
     // deletion would never render, and the file would look merely *mentioned*.
     type:
-      rawType === "file" || rawType === "job" || rawType === "folder" || rawType === "delete"
+      rawType === "file" ||
+      rawType === "job" ||
+      rawType === "folder" ||
+      rawType === "delete" ||
+      rawType === "workspace" ||
+      rawType === "execution" ||
+      rawType === "workspace_file"
         ? rawType
         : "unknown",
     id: asString(o.id),

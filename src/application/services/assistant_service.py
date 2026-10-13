@@ -50,6 +50,7 @@ from src.application.services.assistant_tools import (
     format_category,
     format_label,
 )
+from src.application.services.assistant_workspace_tools import build_workspace_context
 from src.domain.assistant.entities.conversation import (
     Conversation,
     Message,
@@ -111,10 +112,14 @@ _DEFAULT_REASONS: dict[str, str] = {
 
 _FALLBACK_CONFIDENCES: tuple[float, ...] = (0.85, 0.7, 0.6, 0.5)
 
-#: Shown when the model used up its tool budget without producing an answer.
+#: Last-resort reply when the model produced no text even with the tool budget
+#: spent. Worded to agree with the transcript rather than contradict it: the tool
+#: events above it are shown as successes, so this must not claim nothing was
+#: done. It names the limit and what the user can do about it.
 _EXHAUSTED_MESSAGE = (
-    "I gathered what I could but could not finish that in one go. Could you "
-    "narrow it down — for example by naming the file you mean?"
+    "I reached this turn's limit on tool calls before I could sum up, so I "
+    "stopped here rather than guess. The steps above did run — ask me to "
+    "continue and I will pick it up from there."
 )
 
 
@@ -235,6 +240,26 @@ def _tool_call_id_of(message: Message) -> str | None:
     meta = message.meta or {}
     value = meta.get("tool_call_id")
     return value if isinstance(value, str) else None
+
+
+def _recall_workspace_id(messages: Sequence[Message]) -> str | None:
+    """The most recent workspace a turn in this conversation recorded.
+
+    Walks backwards and returns the first one found, so "keep going in the same
+    workspace" survives a message that had no workspace at all (a question about
+    conversions, say) rather than resetting the context to nothing.
+
+    This is a *candidate*, not a decision: the caller resolves it through the
+    tool box, which re-validates ownership. Reading it back out of the transcript
+    must never be enough to reach a workspace — the stored value is user-visible
+    history, and history is not an authorization token.
+    """
+    for message in reversed(messages):
+        meta = message.meta or {}
+        value = meta.get("workspace_id")
+        if isinstance(value, str) and value:
+            return value
+    return None
 
 
 def _to_llm_message(message: Message) -> LlmMessage:
@@ -358,6 +383,7 @@ class AssistantService:
         file_ids: list[str] | None = None,
         context: str | None = None,
         origin: JobOrigin = JobOrigin.WEB,
+        workspace_id: str | None = None,
     ) -> AsyncGenerator[AssistantEvent]:
         """Run one turn, yielding deltas, tool events and a terminal event.
 
@@ -403,6 +429,20 @@ class AssistantService:
         conversation = await self._load_or_create_conversation(
             user_id=user_id, conversation_id=conversation_id, first_message=message
         )
+        # Resolved BEFORE the user message is written, so the turn's workspace is
+        # recorded on the message that opened the turn. ``workspace_source``
+        # distinguishes "the client said so" from "we recalled it", which is the
+        # difference between a deliberate instruction and a convenience.
+        recalled = workspace_id or _recall_workspace_id(
+            await self._conversations.list_messages(
+                conversation.id, limit=self._max_history_messages
+            )
+        )
+        workspace_context, workspace_summary = await self._toolbox.resolve_workspace_context(
+            user_id,
+            recalled,
+            source="selected" if workspace_id else "conversation",
+        )
         user_message = await self._append_message(
             conversation.id,
             role=MessageRole.USER,
@@ -418,7 +458,12 @@ class AssistantService:
                         "extension": item.extension,
                     }
                     for item in attachments
-                ]
+                ],
+                # Carried so a later turn can recall the workspace this
+                # conversation is working in. Read back only as a *candidate*:
+                # it is re-validated on every use, so a stored id cannot become
+                # an access token.
+                "workspace_id": workspace_context.workspace_id,
             },
         )
 
@@ -432,6 +477,16 @@ class AssistantService:
             # server-authored guidance for this turn, not part of what the user
             # said, and it must not push the system prompt out of the prompt.
             llm_messages.append(LlmMessage(role="system", content=prompt_context))
+        # The workspace line is server-authored for the same reason, and it is
+        # what stops the model inferring the target workspace from conversational
+        # text: the id, its name and its runtime state are stated, or the absence
+        # of a workspace is stated.
+        llm_messages.append(
+            LlmMessage(
+                role="system",
+                content=build_workspace_context(workspace_context, workspace_summary),
+            )
+        )
         llm_messages.extend(build_bounded_history(history, self._max_history_messages))
         tools = self._toolbox.specs()
 
@@ -500,6 +555,9 @@ class AssistantService:
                     # How this HTTP request authenticated, so a conversion the
                     # assistant starts is labelled API for an X-API-Key turn.
                     origin=origin,
+                    # Which workspace this turn is about. Passed per call rather
+                    # than stored on the toolbox, which is shared across users.
+                    workspace_context=workspace_context,
                 )
                 produced = list(artifacts[before:])
                 collected.extend(produced)
@@ -533,16 +591,37 @@ class AssistantService:
                     },
                 )
 
+        # The tool budget ran out. The old behaviour stopped here and replied
+        # with a fixed apology, which read as a contradiction: the transcript
+        # above it showed tool after tool succeeding, then the assistant claimed
+        # it "could not finish". The gather usually *did* succeed — what ran out
+        # was the rounds available to narrate it.
+        #
+        # So spend one last completion with no tools at all. The tool results are
+        # already in ``llm_messages``, so the model has everything it needs to
+        # answer; the only thing it lacked was a turn in which it was allowed to
+        # stop calling tools. Offering none guarantees the loop cannot restart,
+        # which is what makes this bounded rather than a way to evade the limit.
+        final_text = ""
+        async for chunk in llm.stream(messages=llm_messages, tools=()):
+            if chunk.kind == "text":
+                if chunk.text:
+                    final_text += chunk.text
+                    yield AssistantTextDelta(text=chunk.text)
+            elif chunk.response is not None and chunk.response.content:
+                final_text = chunk.response.content
+
+        content = final_text.strip() or _EXHAUSTED_MESSAGE
         persisted = await self._append_message(
             conversation.id,
             role=MessageRole.ASSISTANT,
-            content=_EXHAUSTED_MESSAGE,
+            content=content,
             meta={"artifacts": [_artifact_to_dict(a) for a in collected]},
         )
         yield AssistantDone(
             conversation_id=conversation.id,
             message_id=persisted.id,
-            content=_EXHAUSTED_MESSAGE,
+            content=content,
             artifacts=tuple(collected),
             user_message_id=user_message.id,
         )

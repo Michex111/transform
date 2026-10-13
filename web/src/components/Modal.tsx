@@ -132,7 +132,15 @@ export function Modal({
             <div className="flex shrink-0 items-start justify-between gap-3 border-b border-outline px-5 py-4">
               <div className="min-w-0">
                 <h2 className="font-display text-lg font-semibold text-on-background">{title}</h2>
-                {description && <p className="mt-0.5 truncate text-sm text-muted">{description}</p>}
+                {/*
+                  Wrapping, deliberately. This carried `truncate` (nowrap +
+                  clipped), so a confirmation whose whole point was to warn
+                  "It cannot be undone." hid that warning on a narrow dialog.
+                  A description is content, not a label, and must not be cut off.
+                */}
+                {description && (
+                  <p className="mt-0.5 text-sm text-muted text-pretty">{description}</p>
+                )}
               </div>
               <button
                 type="button"

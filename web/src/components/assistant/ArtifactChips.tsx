@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { FileText, FolderSimple } from "@phosphor-icons/react";
+import { Cube, FileCode, FileText, FolderSimple, Play } from "@phosphor-icons/react";
 import type { AssistantArtifact } from "@/api/types";
 import { ConversionCard } from "@/components/assistant/ConversionCard";
 import { DeletionCard } from "@/components/assistant/DeletionCard";
@@ -133,6 +133,65 @@ function ArtifactChip({ artifact }: { artifact: AssistantArtifact }) {
         <span className={NAME_CLASS}>{name || "Folder"}</span>
       </Link>
     );
+  }
+
+  if (artifact.type === "workspace") {
+    // A workspace chip is a link to the workspace page, where the user can see
+    // the runtime, the files and the full execution history. The id is in the
+    // artifact, so nothing has to be looked up to make the link work.
+    return (
+      <Link
+        to={`/app/workspaces/${encodeURIComponent(artifact.id)}`}
+        className={CHIP_CLASS}
+        aria-label={`Open workspace ${name}`}
+      >
+        <Cube size={14} className="shrink-0 text-muted" aria-hidden />
+        <span className={NAME_CLASS}>{name || "Workspace"}</span>
+      </Link>
+    );
+  }
+
+  if (artifact.type === "execution") {
+    // Deliberately a link to the workspace rather than a claimed result: the
+    // execution's real state is on the workspace page, and a chip that implied
+    // "this finished" would be the UI version of an invented tool result.
+    const workspaceId = typeof artifact.meta?.workspace_id === "string" ? artifact.meta.workspace_id : "";
+    if (!workspaceId) {
+      return (
+        <span className={CHIP_CLASS}>
+          <Play size={14} className="shrink-0 text-muted" aria-hidden />
+          <span className={NAME_CLASS}>{name || "Execution"}</span>
+        </span>
+      );
+    }
+    const status = typeof artifact.meta?.status === "string" ? artifact.meta.status : "";
+    return (
+      <Link
+        to={`/app/workspaces/${encodeURIComponent(workspaceId)}`}
+        className={CHIP_CLASS}
+        aria-label={`See this run in the workspace${status ? ` (${status})` : ""}`}
+      >
+        <Play size={14} className="shrink-0 text-muted" aria-hidden />
+        <span className={NAME_CLASS}>{"Run in workspace"}</span>
+      </Link>
+    );
+  }
+
+  if (artifact.type === "workspace_file") {
+    const workspaceId =
+      typeof artifact.meta?.workspace_id === "string" ? artifact.meta.workspace_id : "";
+    if (workspaceId) {
+      return (
+        <Link
+          to={`/app/workspaces/${encodeURIComponent(workspaceId)}`}
+          className={CHIP_CLASS}
+          aria-label={`Open ${name} in its workspace`}
+        >
+          <FileCode size={14} className="shrink-0 text-muted" aria-hidden />
+          <span className={NAME_CLASS}>{name || "File"}</span>
+        </Link>
+      );
+    }
   }
 
   return (

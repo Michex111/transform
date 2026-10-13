@@ -33,6 +33,15 @@ export interface AssistantTurnInput {
   attachments?: AssistantAttachment[];
   /** The page the question came from, e.g. "/app/dashboard". */
   context?: string;
+  /**
+   * Cloud workspace this turn should work in.
+   *
+   * Optional. The API reuses the workspace the conversation already used when
+   * this is absent, so a follow-up ("now add a chart") stays in the same place
+   * without the caller having to remember. `AssistantWorkspaceBar` in the
+   * transcript header is what sets it.
+   */
+  workspaceId?: string;
 }
 
 export interface UseAssistantChatOptions {
@@ -192,6 +201,10 @@ export function useAssistantChat({
         ...(conversationId ? { conversation_id: conversationId } : {}),
         ...(fileIds.length ? { file_ids: fileIds } : {}),
         ...(input?.context ? { context: input.context } : {}),
+        // Sent as *context*. The server re-validates ownership before every
+        // tool call, so this can only ever narrow where the assistant works —
+        // never widen what it may reach.
+        ...(input?.workspaceId ? { workspace_id: input.workspaceId } : {}),
       },
       {
         onEvent: (event) => {

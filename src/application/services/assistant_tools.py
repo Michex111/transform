@@ -36,6 +36,11 @@ from src.application.ports.document_text_port import (
 )
 from src.application.ports.llm_port import LlmMessage, LlmToolSpec
 from src.application.services.assistant_prompts import SUMMARY_PROMPT
+from src.application.services.assistant_workspace_tools import (
+    WORKSPACE_TOOL_NAMES,
+    AssistantWorkspaceToolBox,
+    WorkspaceTurnContext,
+)
 from src.domain.assistant.exceptions.assistant_exceptions import (
     AssistantAttachmentNotFound,
 )
@@ -487,6 +492,7 @@ class AssistantToolBox:
         account_port: AssistantAccountPort,
         max_document_bytes: int,
         summary_max_input_chars: int,
+        workspace_tools: AssistantWorkspaceToolBox | None = None,
     ) -> None:
         self._files = file_service
         self._conversions = conversion_service
@@ -503,6 +509,14 @@ class AssistantToolBox:
         #: so an operator can lower the ceiling and a plan can stay cheaper.
         self._max_document_bytes = max_document_bytes
         self._summary_max_input_chars = summary_max_input_chars
+        #: The workspace/code-execution tools. Held as a collaborator rather
+        #: than as more ``_dispatch`` branches so the one part of the surface
+        #: that can run arbitrary code stays readable in one file — and so a
+        #: deployment without the feature can pass ``None`` and keep the
+        #: assistant working exactly as before. ``None`` is not a stub: it
+        #: removes the tools from ``specs()``, so the model is never told about
+        #: a capability that is not wired.
+        self._workspace_tools = workspace_tools
 
     async def resolve_attachments(
         self, user_id: int, file_ids: Sequence[str]
@@ -537,7 +551,11 @@ class AssistantToolBox:
     # ------------------------------------------------------------------
 
     def specs(self) -> list[LlmToolSpec]:
-        """Every tool, described for the model."""
+        """Every tool, described for the model.
+
+        The workspace tools are appended last and only when they are wired, so a
+        deployment with no runtime provider advertises no runtime tools.
+        """
         return [
             LlmToolSpec(
                 name="list_files",
@@ -815,13 +833,34 @@ class AssistantToolBox:
                     }
                 ),
             ),
+            # The workspace/code-execution tools. Appended rather than merged so
+            # this list stays the document-tools list, and so a deployment with
+            # no runtime provider advertises no runtime tools at all.
+            *(self._workspace_tools.specs() if self._workspace_tools else []),
         ]
 
     @staticmethod
     def label_for(name: str) -> str:
         """Human phrasing shown in the UI while ``name`` runs."""
+        if name in WORKSPACE_TOOL_NAMES:
+            return AssistantWorkspaceToolBox.label_for(name)
         return _TOOL_LABELS.get(name, "Working on it")
 
+    async def resolve_workspace_context(
+        self, user_id: int, workspace_id: str | None, *, source: str = "selected"
+    ) -> tuple[WorkspaceTurnContext, dict[str, Any] | None]:
+        """The turn's workspace, validated — or no workspace.
+
+        Lives here so the service never reaches into the workspace toolbox
+        directly: when the tools are not wired (``workspace_tools is None``) the
+        honest answer is "no workspace", and the assistant behaves exactly as it
+        did before this feature existed.
+        """
+        if self._workspace_tools is None:
+            return WorkspaceTurnContext(workspace_id=None, source="none"), None
+        return await self._workspace_tools.resolve_context(
+            user_id, workspace_id, source=source
+        )
     @staticmethod
     def describe(name: str, result: dict[str, Any]) -> str:
         """One-line, user-facing summary of a finished tool call.
@@ -834,6 +873,10 @@ class AssistantToolBox:
         error = result.get("error")
         if isinstance(error, str):
             return error
+        if name in WORKSPACE_TOOL_NAMES:
+            # Delegated so a workspace summary can never drift from the tool that
+            # produced it; the workspace toolbox derives it from the result dict.
+            return AssistantWorkspaceToolBox.describe(name, result)
         if name == "list_files":
             return f"Found {result.get('count', 0)} matching file(s)"
         if name == "list_folders":
@@ -896,6 +939,7 @@ class AssistantToolBox:
         artifacts: list[Artifact],
         conversation_id: str | None = None,
         origin: JobOrigin = JobOrigin.WEB,
+        workspace_context: WorkspaceTurnContext | None = None,
     ) -> dict[str, Any]:
         """Run tool ``name`` and return a JSON-safe result.
 
@@ -914,6 +958,11 @@ class AssistantToolBox:
         assistant starts is labelled ``API`` for an ``X-API-Key`` turn instead of
         always ``WEB``. It is a per-call parameter, not toolbox state, because the
         toolbox is shared across requests.
+
+        ``workspace_context`` carries the workspace this turn is about. It is
+        request state for the same reason as ``origin`` — the toolbox outlives
+        the request — and it is *context only*: every workspace tool re-validates
+        ownership through the service before acting on anything.
         """
         try:
             return await self._dispatch(
@@ -924,6 +973,7 @@ class AssistantToolBox:
                 artifacts=artifacts,
                 conversation_id=conversation_id,
                 origin=origin,
+                workspace_context=workspace_context or WorkspaceTurnContext(),
             )
         except Exception as exc:  # noqa: BLE001 — a tool must never abort the loop
             # Deliberately broad: every failure mode of a tool (a storage error,
@@ -943,7 +993,25 @@ class AssistantToolBox:
         artifacts: list[Artifact],
         conversation_id: str | None,
         origin: JobOrigin = JobOrigin.WEB,
+        workspace_context: WorkspaceTurnContext | None = None,
     ) -> dict[str, Any]:
+        if name in WORKSPACE_TOOL_NAMES:
+            if self._workspace_tools is None:
+                # Only reachable if a model retries a tool that was advertised by
+                # a differently-wired deployment; answering in words keeps the
+                # turn alive instead of failing it.
+                return {
+                    "error": (
+                        "Workspace tools are not available in this deployment."
+                    )
+                }
+            return await self._workspace_tools.execute(
+                name,
+                arguments,
+                user_id=user_id,
+                artifacts=artifacts,
+                context=workspace_context or WorkspaceTurnContext(),
+            )
         if name == "list_files":
             return await self._list_files(user_id, arguments, artifacts)
         if name == "list_folders":

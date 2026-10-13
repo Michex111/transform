@@ -35,6 +35,16 @@ JOB_TIER_STREAMS = (
 JOB_EVENT_STREAM = "conversion_job_events"
 JOB_DEAD_LETTER_STREAM = f"{JOB_STREAM}:dead"
 
+#: Workspace work: executions and environment snapshots share ONE stream.
+#:
+#: A single stream rather than one per kind, because both are handled by the same
+#: worker process and both are short, independent units of work. Two streams
+#: would mean two consumer groups, two PELs and two stale-reclaim paths to keep
+#: correct, for no isolation that matters — an execution is not starved by a
+#: snapshot in any way a user would notice.
+WORKSPACE_WORK_STREAM = "workspace_work"
+WORKSPACE_WORK_DEAD_LETTER_STREAM = f"{WORKSPACE_WORK_STREAM}:dead"
+
 
 def stream_prefix() -> str:
     """Return the configured stream namespace (``""`` when unset).

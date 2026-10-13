@@ -342,6 +342,11 @@ async def chat(
         # assistant starts is labelled with it so the worker picks the right
         # credit spend order instead of always assuming WEB.
         origin=origin,
+        # Which cloud workspace this turn works in. Passed straight through: it
+        # is *context*, and the toolbox re-validates ownership before any tool
+        # acts on it, so an id from a client cannot become access to somebody
+        # else's workspace.
+        workspace_id=payload.workspace_id,
     )
 
     # Pull the first event eagerly: the access checks (quota, tier, conversation

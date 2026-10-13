@@ -15,6 +15,7 @@ import {
   ChartBar,
   ChartLine,
   ClockCounterClockwise,
+  Cpu,
   CreditCard,
   FolderOpen,
   GearSix,
@@ -54,6 +55,10 @@ export const NAV: NavItem[] = [
   // you would otherwise repeat on the Convert page, so it belongs with the
   // conversion surfaces rather than in Account or Developer.
   { to: "/app/workflows", label: "Workflows", icon: Lightning },
+  // A workspace is a place you return to and run code in, so it sits with the
+  // other places you work rather than under Developer — the fact that it executes
+  // Python is what it does, not who it is for.
+  { to: "/app/workspaces", label: "Workspaces", icon: Cpu },
   // Entering History from the navigation means "show me my history", so it asks
   // for the whole window rather than resuming whatever range the last visit
   // left persisted. Narrower windows are one tap away in the page's own
@@ -144,6 +149,7 @@ export const NAV_GROUPS: NavGroup[] = [
       "/app/files",
       "/app/queue",
       "/app/workflows",
+      "/app/workspaces",
       "/app/history",
     ].map(navItemFor),
   },

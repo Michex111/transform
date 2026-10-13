@@ -37,6 +37,7 @@ from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.types import ToolAnnotations
 
 from src.application.services.mcp_toolbox import MCPToolBox, MCPToolContext
+from src.application.services.mcp_workspace_tools import MCPWorkspaceTools
 from src.domain.security.value_object.agent_scope import normalize_scopes
 from src.presentation.mcp.activity import instrument_tool
 from src.presentation.mcp.dependencies import open_mcp_scope
@@ -64,15 +65,47 @@ Other things you can do:
   - get_conversion_history — list recent conversions.
   - get_credits — check the user's remaining credits.
 
+Cloud workspaces (persistent Python environments):
+A workspace keeps its files, project configuration and installed packages between
+sessions, so work survives you closing the connection. These tools need the
+workspaces.read and workspaces.execute permissions, which are separate from the
+documents.* ones and are NOT granted by default.
+
+  1. list_workspaces — find one. Ask the user which to use; never assume one.
+  2. get_workspace(workspace_id) — runtime state, toolchain and disk budget.
+  3. write_workspace_file(workspace_id, path, content) — write real file content
+     verbatim (this is also how you create a directory).
+  4. run_code(workspace_id, source, mode) — SCRIPT (Python), COMMAND (shell) or
+     PROJECT (`sync`, `lock`, `add <package>`). Returns an execution id
+     immediately.
+  5. get_execution(execution_id) — the status, exit_code, stdout, stderr and
+     artifacts. Call this until the status is terminal.
+  6. list_artifacts(workspace_id) — files recent runs produced. `stored: true`
+     means the file was copied into durable storage and will outlive the runtime;
+     `stored: false` means it only ever existed inside the runtime.
+  7. create_workspace(name) — only when the user asks for a new one.
+  8. list_workspace_files / read_workspace_file — inspect the workspace.
+
+What a workspace does and does not preserve: files, pyproject.toml, uv.lock and
+installed packages survive stopping and restarting. Running processes, open
+files and in-memory variables do NOT. Never tell a user their Python variables are
+still there.
+
 Notes:
   - Every tool acts only on the signed-in user's own data. An id that is not
     theirs is reported as "not found", which is intentional.
   - This connection may be confined to ONE folder of the user's Drive. Files
     outside it are reported as "not found", and folder arguments outside it are
     refused. Do not tell the user a file exists somewhere you cannot reach.
-  - Conversions are asynchronous: convert_file returns immediately.
+    Workspaces are not in the Drive, so that confinement does not apply to them.
+  - Conversions are asynchronous: convert_file returns immediately. So is
+    run_code — NEVER say code ran or succeeded until get_execution says so.
+  - A workspace's runtime may be created with no outbound network. When that is
+    the case, PROJECT operations (`uv add`) are refused with an explanation.
+    Plain scripts still work. Report the refusal rather than retrying.
   - delete_file is permanent and needs the documents.delete permission, which
-    is not granted by default. Always confirm with the user first.
+    is not granted by default. Always confirm with the user first. There is no
+    tool that deletes a workspace — that is deliberate.
   - Never claim to have read a document's text unless you used download_file.
 """
 
@@ -108,6 +141,42 @@ async def _tool_scope() -> AsyncGenerator[tuple[MCPToolBox, MCPToolContext]]:
             # The folder confinement and history scope come from the stored
             # grant, loaded by ``open_mcp_scope``. They are part of the token's
             # authority, never a tool argument.
+            folder_access=scope.folder_access,
+            folder_id=scope.folder_id,
+            history_scope=scope.history_scope,
+        )
+
+
+@contextlib.asynccontextmanager
+async def _workspace_scope() -> AsyncGenerator[tuple["MCPWorkspaceTools", MCPToolContext]]:
+    """Resolve the caller and the workspace tools for this call.
+
+    Same identity resolution as ``_tool_scope``: the caller comes from the
+    verified token and nothing else. Kept as a second helper rather than one
+    mega-scope so a workspace tool cannot accidentally receive the document
+    toolbox (and therefore cannot reach the folder-confinement code path it has
+    no business in).
+    """
+    token = get_access_token()
+    if token is None or not token.subject:
+        raise RuntimeError("MCP tool invoked without an authenticated access token.")
+    try:
+        user_id = int(token.subject)
+    except (TypeError, ValueError) as exc:  # pragma: no cover - provider writes an int
+        raise RuntimeError("MCP access token has a malformed subject.") from exc
+
+    scopes = normalize_scopes(token.scopes or ())
+    claims = token.claims or {}
+    grant_id = str(claims.get("grant_id", ""))
+    async with open_mcp_scope(user_id, grant_id) as scope:
+        if scope.workspace_tools is None:  # pragma: no cover - always wired
+            raise RuntimeError("Workspace tools are not configured.")
+        yield scope.workspace_tools, MCPToolContext(
+            user_id=user_id,
+            scopes=scopes,
+            tier=scope.tier,
+            client_id=token.client_id,
+            grant_id=grant_id,
             folder_access=scope.folder_access,
             folder_id=scope.folder_id,
             history_scope=scope.history_scope,
@@ -537,6 +606,279 @@ def register_tools(mcp: MCPServer) -> None:
         """
         async with _tool_scope() as (toolbox, ctx):
             return await toolbox.delete_file(ctx, file_id)
+
+    # ------------------------------------------------------------------
+    # Cloud workspaces
+    # ------------------------------------------------------------------
+    #
+    # Separated by scope rather than grouped by resource: the read-only tools
+    # need workspaces.read, and everything that can write or run code needs
+    # workspaces.execute. An agent connected for reading cannot reach the
+    # execution tools even if it asks for them, because the refusal is a scope
+    # check in the tool body — not a description in a prompt.
+
+    @mcp.tool(
+        name="list_workspaces",
+        title="List cloud workspaces",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=False,
+        ),
+        structured_output=True,
+    )
+    @instrument_tool("list_workspaces")
+    async def list_workspaces(limit: int = 20) -> dict[str, Any]:
+        """List the user's cloud workspaces.
+
+        A workspace is a persistent Python environment that keeps its files and
+        installed packages between sessions. Read-only.
+
+        Args:
+            limit: Maximum workspaces to return (default 20, maximum 50).
+
+        Returns:
+            {"ok": true, "total", "workspaces": [{workspace_id, name,
+            description, python_version, state, execution_count}]} or
+            {"ok": false, "error", "required_scope": "workspaces.read"}.
+        """
+        async with _workspace_scope() as (tools, ctx):
+            return await tools.list_workspaces(ctx, limit=limit)
+
+    @mcp.tool(
+        name="get_workspace",
+        title="Get one cloud workspace",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=False,
+        ),
+        structured_output=True,
+    )
+    @instrument_tool("get_workspace")
+    async def get_workspace(workspace_id: str) -> dict[str, Any]:
+        """Status of one workspace: runtime state, toolchain, disk budget, runs.
+
+        Args:
+            workspace_id: The id of a workspace the user owns (from
+                list_workspaces).
+
+        Returns:
+            {"ok": true, "runtime_state", "python_version", "uv_version",
+            "disk", "recent_executions", ...} or {"ok": false, "error"}.
+            Requires workspaces.read.
+        """
+        async with _workspace_scope() as (tools, ctx):
+            return await tools.get_workspace(ctx, workspace_id)
+
+    @mcp.tool(
+        name="create_workspace",
+        title="Create a cloud workspace",
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=False,
+            idempotent_hint=False,
+            open_world_hint=False,
+        ),
+        structured_output=True,
+    )
+    @instrument_tool("create_workspace")
+    async def create_workspace(name: str, description: str = "") -> dict[str, Any]:
+        """Create a workspace. This starts no compute and is reversible.
+
+        Args:
+            name: A short human name for the workspace.
+            description: Optional note about what it is for.
+
+        Returns:
+            {"ok": true, "workspace_id", "name", "runtime_state": "STOPPED"}
+            or {"ok": false, "error"}. Requires workspaces.execute.
+        """
+        async with _workspace_scope() as (tools, ctx):
+            return await tools.create_workspace(ctx, name, description)
+
+    @mcp.tool(
+        name="list_workspace_files",
+        title="List workspace files",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=False,
+        ),
+        structured_output=True,
+    )
+    @instrument_tool("list_workspace_files")
+    async def list_workspace_files(workspace_id: str, path: str = ".") -> dict[str, Any]:
+        """List one directory inside a workspace.
+
+        The workspace's runtime is started automatically if it is not running.
+
+        Args:
+            workspace_id: The workspace to list.
+            path: Directory relative to the workspace root; omit for the root.
+
+        Returns:
+            {"ok": true, "path", "count", "entries": [{name, path, is_dir,
+            size_bytes}]} or {"ok": false, "error"}. Requires workspaces.read.
+        """
+        async with _workspace_scope() as (tools, ctx):
+            return await tools.list_workspace_files(ctx, workspace_id, path)
+
+    @mcp.tool(
+        name="read_workspace_file",
+        title="Read a workspace file",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=False,
+        ),
+        structured_output=True,
+    )
+    @instrument_tool("read_workspace_file")
+    async def read_workspace_file(workspace_id: str, path: str) -> dict[str, Any]:
+        """Read a text file from a workspace. Binary files are refused.
+
+        Args:
+            workspace_id: The workspace to read from.
+            path: File path relative to the workspace root.
+
+        Returns:
+            {"ok": true, "path", "content", "size_bytes", "truncated"} or
+            {"ok": false, "error"}. Requires workspaces.read.
+        """
+        async with _workspace_scope() as (tools, ctx):
+            return await tools.read_workspace_file(ctx, workspace_id, path)
+
+    @mcp.tool(
+        name="write_workspace_file",
+        title="Write a workspace file",
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=False,
+            idempotent_hint=False,
+            open_world_hint=False,
+        ),
+        structured_output=True,
+    )
+    @instrument_tool("write_workspace_file")
+    async def write_workspace_file(
+        workspace_id: str, path: str, content: str
+    ) -> dict[str, Any]:
+        """Write a text file into a workspace, creating parent directories.
+
+        The content is written verbatim, so pass real file content rather than a
+        description of it. The runtime is started automatically if needed.
+
+        Args:
+            workspace_id: The workspace to write into.
+            path: File path relative to the workspace root.
+            content: The exact file content (maximum 2 MB).
+
+        Returns:
+            {"ok": true, "path", "bytes_written"} or {"ok": false, "error"}.
+            Requires workspaces.execute.
+        """
+        async with _workspace_scope() as (tools, ctx):
+            return await tools.write_workspace_file(ctx, workspace_id, path, content)
+
+    @mcp.tool(
+        name="run_code",
+        title="Run code in a workspace",
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=False,
+            idempotent_hint=False,
+            open_world_hint=False,
+        ),
+        structured_output=True,
+    )
+    @instrument_tool("run_code")
+    async def run_code(
+        workspace_id: str,
+        source: str,
+        mode: str = "SCRIPT",
+        timeout_seconds: int = 300,
+    ) -> dict[str, Any]:
+        """Run Python, a shell command, or a `uv` operation in a workspace.
+
+        Asynchronous: this returns as soon as the run is queued or started, with
+        an execution id. Call get_execution to learn whether it succeeded — do
+        not assume success from this response.
+
+        Args:
+            workspace_id: The workspace to run in.
+            source: The Python code, the shell command line, or a `uv`
+                operation (`sync`, `lock`, `add <package>`).
+            mode: SCRIPT (default), COMMAND, or PROJECT.
+            timeout_seconds: Time limit, 1-3600 (default 300).
+
+        Returns:
+            {"ok": true, "execution_id", "status"} or {"ok": false, "error"}.
+            Requires workspaces.execute.
+        """
+        async with _workspace_scope() as (tools, ctx):
+            return await tools.run_code(
+                ctx, workspace_id, source, mode=mode, timeout_seconds=timeout_seconds
+            )
+
+    @mcp.tool(
+        name="get_execution",
+        title="Get an execution's result",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=False,
+        ),
+        structured_output=True,
+    )
+    @instrument_tool("get_execution")
+    async def get_execution(execution_id: str) -> dict[str, Any]:
+        """Status, exit code and bounded output of one execution.
+
+        Args:
+            execution_id: The id returned by run_code.
+
+        Returns:
+            {"ok": true, "status", "exit_code", "stdout", "stderr",
+            "artifacts"} or {"ok": false, "error"}. Requires
+            workspaces.read.
+        """
+        async with _workspace_scope() as (tools, ctx):
+            return await tools.get_execution(ctx, execution_id)
+
+    @mcp.tool(
+        name="list_artifacts",
+        title="List workspace artifacts",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=False,
+        ),
+        structured_output=True,
+    )
+    @instrument_tool("list_artifacts")
+    async def list_artifacts(workspace_id: str) -> dict[str, Any]:
+        """Files recent executions produced, and whether they are stored.
+
+        `stored: true` means the bytes were copied into durable storage, so the
+        file survives the runtime being replaced. `stored: false` means it only
+        ever existed inside the runtime.
+
+        Args:
+            workspace_id: The workspace whose artifacts to list.
+
+        Returns:
+            {"ok": true, "artifacts": [{execution_id, path, size_bytes,
+            stored}]} or {"ok": false, "error"}. Requires workspaces.read.
+        """
+        async with _workspace_scope() as (tools, ctx):
+            return await tools.list_artifacts(ctx, workspace_id)
 
 
 __all__ = ["INSTRUCTIONS", "register_tools"]

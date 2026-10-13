@@ -6,6 +6,7 @@ import { Logo } from "@/components/ui";
 import { ProfileMenu } from "@/components/ProfileMenu";
 import { AssistantLauncher } from "@/components/assistant/AssistantLauncher";
 import { MORE, NAV_GROUPS, PRIMARY } from "@/components/navItems";
+import { titleForPath } from "@/lib/documentTitle";
 import { PHONE_MENU, SIDEBAR_MENU } from "@/lib/profileMenu";
 
 export function AppShell() {
@@ -16,6 +17,16 @@ export function AppShell() {
   // Close the mobile "More" menu when the route changes.
   useEffect(() => {
     setMoreOpen(false);
+  }, [location.pathname]);
+
+  // Name the page in the tab and in the history list. The SPA ships a single
+  // `index.html`, so without this every signed-in route kept the marketing title
+  // and a tab among many read "Transform — Convert, store, and automate your
+  // documents" no matter where you were. A detail page that knows a better name
+  // (a workspace's own) sets it after loading and wins, because this only runs
+  // when the path changes.
+  useEffect(() => {
+    document.title = titleForPath(location.pathname);
   }, [location.pathname]);
 
   // Close when clicking/tapping outside the popover.

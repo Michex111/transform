@@ -31,6 +31,7 @@ from src.application.services.credit_service import CreditService
 from src.application.services.file_service import FileService
 from src.application.services.file_transfer_service import TransferService
 from src.application.services.mcp_toolbox import MCPToolBox
+from src.application.services.mcp_workspace_tools import MCPWorkspaceTools
 from src.application.services.priority_queue_dispatcher import PriorityQueueDispatcher
 from src.application.services.queue_priority_router import QueuePriorityRouter
 from src.domain.security.value_object.agent_access_scope import FolderAccess, HistoryScope
@@ -54,6 +55,10 @@ from src.presentation.api.dependencies.service_dependencies import (
     get_session_cache,
     get_transfer_service,
 )
+from src.presentation.api.dependencies.workspace_dependencies import (
+    build_execution_service,
+    build_workspace_service,
+)
 
 
 @dataclass
@@ -66,6 +71,11 @@ class MCPServiceScope:
     credit_service: CreditService
     toolbox: MCPToolBox
     tier: SubscriptionTier
+    #: Workspace and code-execution tools. Composed from the same application
+    #: services the REST API uses, over the same request-scoped session, so an
+    #: agent cannot reach a capability the web UI cannot or bypass a rule those
+    #: services enforce.
+    workspace_tools: MCPWorkspaceTools | None = None
     #: The grant's folder confinement and history scope, threaded from the
     #: ``AgentGrant`` this token was minted for. Carried here (not read again in
     #: the toolbox) so one call has one consistent view of the binding.
@@ -145,6 +155,13 @@ async def open_mcp_scope(
                 copier=MinioObjectCopier(storage=get_minio_download_adapter()),
                 credits=credit_service,
                 object_store=object_store,
+            ),
+            # Built from the same session and the same builders the REST router
+            # uses; see ``workspace_dependencies``.
+            workspace_tools=MCPWorkspaceTools(
+                workspaces=build_workspace_service(session),
+                executions=build_execution_service(session),
+                default_timeout_seconds=get_settings().WORKSPACE_EXECUTION_TIMEOUT_SECONDS,
             ),
             tier=tier,
             folder_access=folder_access,

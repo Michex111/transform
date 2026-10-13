@@ -51,6 +51,7 @@ from src.presentation.api.routers.v1 import (
     users,
     webhooks,
     workflows,
+    workspaces,
 )
 from src.presentation.api.routers.v1 import mcp as mcp_routes
 from src.presentation.mcp.server import (
@@ -381,6 +382,7 @@ app.include_router(dashboard.router)
 app.include_router(events.router)
 app.include_router(assistant.router)
 app.include_router(workflows.router)
+app.include_router(workspaces.router)
 # Developer observability: API logs + MCP activity. Excluded from request
 # telemetry capture (see the middleware) so the instrument does not measure
 # itself.

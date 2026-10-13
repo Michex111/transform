@@ -57,6 +57,7 @@ export const SPA_ROUTES = [
   "/app/convert",
   "/app/queue",
   "/app/workflows",
+  "/app/workspaces",
   "/app/history",
   "/app/files",
   "/app/billing",

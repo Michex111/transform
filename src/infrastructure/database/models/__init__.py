@@ -28,6 +28,12 @@ from src.infrastructure.database.models.telemetry import (
 )
 from src.infrastructure.database.models.user import UserModel
 from src.infrastructure.database.models.workflow import SavedWorkflowModel
+from src.infrastructure.database.models.workspace import (
+    ExecutionModel,
+    RuntimeImageRevisionModel,
+    WorkspaceModel,
+    WorkspaceRuntimeModel,
+)
 
 __all__ = [
     "APIKeyModel",
@@ -36,15 +42,19 @@ __all__ = [
     "ApiRequestEventModel",
     "ConversionJobModel",
     "CreditTransactionModel",
+    "ExecutionModel",
     "MCPAgentGrantModel",
     "MCPAuthorizationCodeModel",
     "MCPOAuthClientModel",
     "MCPTokenModel",
     "McpToolInvocationModel",
+    "RuntimeImageRevisionModel",
     "SavedWorkflowModel",
     "MonthlyCreditModel",
     "UserFileModel",
     "UserFolderModel",
     "UserModel",
     "UserSubscriptionModel",
+    "WorkspaceModel",
+    "WorkspaceRuntimeModel",
 ]

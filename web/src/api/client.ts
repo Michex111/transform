@@ -75,6 +75,24 @@ import {
   normalizeMcpControl,
   normalizeMcpSummary,
 } from './developerNormalize'
+import {
+  normalizeEnvironment,
+  normalizeExecution,
+  normalizeExecutionList,
+  normalizeImageRevision,
+  normalizeRuntimeConfiguration,
+  normalizeRuntimeSummary,
+  normalizeWorkspace,
+  normalizeWorkspaceArtifacts,
+  normalizeWorkspaceFileContent,
+  normalizeWorkspaceFileList,
+  normalizeWorkspaceList,
+} from './workspaceNormalize'
+import type {
+  ExecutionCreateRequest,
+  WorkspaceCreateRequest,
+  WorkspaceUpdateRequest,
+} from './workspaceTypes'
 import type {
   ApiLogFilters,
   ApiLogRange,
@@ -1945,6 +1963,167 @@ export class ApiClient {
       `/v1/developer/mcp/connections/${encodeURIComponent(id)}/revoke`,
       { method: 'POST' },
     ).then(normalizeMcpControl)
+
+  // ---- Cloud workspaces ----
+
+  /**
+   * Creates a workspace. The runtime is NOT started: creating a workspace is a
+   * cheap durable act, and starting compute should be a deliberate one.
+   */
+  createWorkspace = (body: WorkspaceCreateRequest) =>
+    this.request<unknown>('/v1/workspaces', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }).then(normalizeWorkspace)
+
+  listWorkspaces = (page = 1, pageSize = 20) =>
+    this.request<unknown>(`/v1/workspaces?page=${page}&page_size=${pageSize}`).then(
+      normalizeWorkspaceList,
+    )
+
+  getWorkspace = (workspaceId: string) =>
+    this.request<unknown>(`/v1/workspaces/${encodeURIComponent(workspaceId)}`).then(
+      normalizeWorkspace,
+    )
+
+  updateWorkspace = (workspaceId: string, body: WorkspaceUpdateRequest) =>
+    this.request<unknown>(`/v1/workspaces/${encodeURIComponent(workspaceId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }).then(normalizeWorkspace)
+
+  deleteWorkspace = (workspaceId: string) =>
+    this.request<void>(`/v1/workspaces/${encodeURIComponent(workspaceId)}`, {
+      method: 'DELETE',
+    })
+
+  archiveWorkspace = (workspaceId: string) =>
+    this.request<unknown>(
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/archive`,
+      { method: 'POST' },
+    ).then(normalizeWorkspace)
+
+  reactivateWorkspace = (workspaceId: string) =>
+    this.request<unknown>(
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/reactivate`,
+      { method: 'POST' },
+    ).then(normalizeWorkspace)
+
+  /**
+   * Starts the runtime. Idempotent on the server: calling it on a running
+   * runtime returns the current state rather than allocating a second one.
+   */
+  startWorkspaceRuntime = (workspaceId: string) =>
+    this.request<unknown>(
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/runtime/start`,
+      { method: 'POST' },
+    ).then(normalizeRuntimeSummary)
+
+  stopWorkspaceRuntime = (workspaceId: string, force = false) =>
+    this.request<unknown>(
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/runtime/stop?force=${
+        force ? 'true' : 'false'
+      }`,
+      { method: 'POST' },
+    ).then(normalizeRuntimeSummary)
+
+  restartWorkspaceRuntime = (workspaceId: string, force = false) =>
+    this.request<unknown>(
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/runtime/restart?force=${
+        force ? 'true' : 'false'
+      }`,
+      { method: 'POST' },
+    ).then(normalizeRuntimeSummary)
+
+  workspaceRuntimeConfiguration = (workspaceId: string) =>
+    this.request<unknown>(
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/runtime/configuration`,
+    ).then(normalizeRuntimeConfiguration)
+
+  workspaceEnvironment = (workspaceId: string) =>
+    this.request<unknown>(
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/environment`,
+    ).then(normalizeEnvironment)
+
+  /** Queues an environment snapshot. Resolves to a PENDING revision. */
+  saveWorkspaceEnvironment = (workspaceId: string) =>
+    this.request<unknown>(
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/environment/save`,
+      { method: 'POST' },
+    ).then(normalizeImageRevision)
+
+  submitWorkspaceExecution = (workspaceId: string, body: ExecutionCreateRequest) =>
+    this.request<unknown>(
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/executions`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ).then(normalizeExecution)
+
+  listWorkspaceExecutions = (workspaceId: string, page = 1, pageSize = 20) =>
+    this.request<unknown>(
+      `/v1/workspaces/${encodeURIComponent(
+        workspaceId,
+      )}/executions?page=${page}&page_size=${pageSize}`,
+    ).then(normalizeExecutionList)
+
+  execution = (executionId: string) =>
+    this.request<unknown>(`/v1/executions/${encodeURIComponent(executionId)}`).then(
+      normalizeExecution,
+    )
+
+  cancelExecution = (executionId: string) =>
+    this.request<unknown>(
+      `/v1/executions/${encodeURIComponent(executionId)}/cancel`,
+      { method: 'POST' },
+    ).then(normalizeExecution)
+
+  workspaceArtifacts = (workspaceId: string) =>
+    this.request<unknown>(
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/artifacts`,
+    ).then(normalizeWorkspaceArtifacts)
+
+  workspaceFiles = (workspaceId: string, path = '.') =>
+    this.request<unknown>(
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/files?path=${encodeURIComponent(path)}`,
+    ).then(normalizeWorkspaceFileList)
+
+  readWorkspaceFile = (workspaceId: string, path: string) =>
+    this.request<unknown>(
+      `/v1/workspaces/${encodeURIComponent(
+        workspaceId,
+      )}/files/content?path=${encodeURIComponent(path)}`,
+    ).then(normalizeWorkspaceFileContent)
+
+  writeWorkspaceFile = (
+    workspaceId: string,
+    path: string,
+    content: string,
+    encoding: 'utf-8' | 'base64' = 'utf-8',
+  ) =>
+    this.request<void>(`/v1/workspaces/${encodeURIComponent(workspaceId)}/files/content`, {
+      method: 'PUT',
+      body: JSON.stringify({ path, content, encoding }),
+    })
+
+  /**
+   * Mint a download URL for an artifact an execution produced.
+   *
+   * Returns a short-lived object-storage URL rather than bytes: the API checks
+   * that the caller owns the execution before signing it, so knowing an
+   * artifact's path is not a way to read it. A 404 means the artifact was
+   * recorded but never copied out of the runtime (its run produced it while
+   * object storage was unreachable), which is worth distinguishing from an
+   * error — there is simply nothing to fetch.
+   */
+  artifactDownload = (executionId: string, path: string) =>
+    this.request<{ url: string; path: string; size_bytes: number; content_type: string }>(
+      `/v1/executions/${encodeURIComponent(executionId)}/artifacts/download?path=${encodeURIComponent(path)}`,
+    )
+
+  deleteWorkspaceFile = (workspaceId: string, path: string) =>
+    this.request<void>(
+      `/v1/workspaces/${encodeURIComponent(workspaceId)}/files/delete`,
+      { method: 'POST', body: JSON.stringify({ path }) },
+    )
 }
 
 /**

@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import { AnimatePresence, motion } from "motion/react";
 import { CaretDown, Check } from "@phosphor-icons/react";
+import { dropdownIdBase } from "@/lib/dropdownId";
 
 export interface DropdownOption<T extends string = string> {
   value: T;
@@ -16,10 +17,31 @@ interface DropdownProps<T extends string = string> {
   /** Small helper text prefix inside the trigger, e.g. "Sort". */
   label?: string;
   ariaLabel?: string;
+  /**
+   * Id of the element that explains this control (a hint, a warning).
+   * Forwarded to the trigger button, which is the element that takes focus.
+   */
+  ariaDescribedBy?: string;
+  /**
+   * `sm` matches `Button`'s `sm` (h-8) for dense toolbars and definition lists;
+   * `md` is the default filter-bar size. Both keep the 8px radius and the same
+   * tokens, so the two only differ in height — never in colour or shape.
+   */
+  size?: "md" | "sm";
   align?: "left" | "right";
   className?: string;
   disabled?: boolean;
 }
+
+const TRIGGER_SIZE = {
+  sm: "h-8 px-3 text-sm",
+  md: "h-9 px-3 text-sm",
+};
+
+const OPTION_SIZE = {
+  sm: "px-2.5 py-1.5 text-sm",
+  md: "px-3 py-2 text-sm",
+};
 
 /** A modern, app-themed dropdown (custom popover with animated open/close,
  *  full keyboard support, and a check on the selected item). Replaces native
@@ -30,6 +52,8 @@ export function Dropdown<T extends string = string>({
   options,
   label,
   ariaLabel,
+  ariaDescribedBy,
+  size = "md",
   align = "left",
   className = "",
   disabled = false,
@@ -40,6 +64,9 @@ export function Dropdown<T extends string = string>({
   const listRef = useRef<HTMLUListElement>(null);
   const selected = options.find((o) => o.value === value);
   const selectedIndex = options.findIndex((o) => o.value === value);
+
+  const reactId = useId();
+  const idBase = dropdownIdBase(ariaLabel, reactId);
 
   // Move real DOM focus onto the option button at `activeIndex`. Prefer real
   // focus so screen readers announce each option as it is reached.
@@ -135,15 +162,16 @@ export function Dropdown<T extends string = string>({
         type="button"
         onClick={() => setOpen((v) => !v)}
         aria-label={ariaLabel}
+        aria-describedby={ariaDescribedBy}
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-activedescendant={
           open && activeIndex >= 0 && options[activeIndex]
-            ? `${ariaLabel ?? "dropdown"}-opt-${options[activeIndex].value}`
+            ? `${idBase}-opt-${options[activeIndex].value}`
             : undefined
         }
         disabled={disabled}
-        className="inline-flex h-9 items-center gap-2 rounded-lg border border-outline-strong bg-surface-variant px-3 text-sm text-on-background transition-colors hover:border-primary/60 focus:border-primary focus:outline-none disabled:cursor-not-allowed disabled:opacity-50"
+        className={`inline-flex items-center gap-2 rounded-lg border border-outline-strong bg-surface-variant text-on-background transition-colors hover:border-primary/60 focus:border-primary focus:outline-none disabled:cursor-not-allowed disabled:opacity-50 ${TRIGGER_SIZE[size]}`}
       >
         {label && <span className="font-medium text-muted">{label}</span>}
         <span className="font-medium">{selected?.label ?? value}</span>
@@ -173,7 +201,7 @@ export function Dropdown<T extends string = string>({
                 <li key={opt.value}>
                   <button
                     type="button"
-                    id={`${ariaLabel ?? "dropdown"}-opt-${opt.value}`}
+                    id={`${idBase}-opt-${opt.value}`}
                     role="option"
                     aria-selected={isSel}
                     onClick={() => {
@@ -183,7 +211,7 @@ export function Dropdown<T extends string = string>({
                       // keyboard user's place on the trigger.
                       focusTrigger();
                     }}
-                    className={`flex w-full items-center gap-2 rounded-md px-3 py-2 text-left text-sm transition-colors ${
+                    className={`flex w-full items-center gap-2 rounded-md text-left transition-colors ${OPTION_SIZE[size]} ${
                       isSel
                         ? "bg-primary-container text-on-primary-container"
                         : "text-on-background hover:bg-surface-variant"
