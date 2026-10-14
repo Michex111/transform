@@ -309,6 +309,7 @@ def _authorize_and_redeem(
     username: str = "ada",
     approved: list[str] | None = None,
     redirect_uri: str = "https://agent.example.test/callback",
+    state: str = "abc",
 ) -> tuple[dict[str, Any], str]:
     """Run registration → consent → token exchange. Returns (client, tokens)."""
     client_info = env.register_client(redirect_uri)
@@ -353,7 +354,7 @@ def _authorize_and_redeem(
             "code_challenge": challenge,
             "scope": "documents.read documents.convert",
             "resource": "http://localhost:8000/mcp",
-            "state": "abc",
+            "state": state,
             "approved_scopes": approved or ["documents.read", "documents.convert"],
         },
         headers={"Authorization": f"Bearer {token}"},
@@ -361,7 +362,7 @@ def _authorize_and_redeem(
     assert approval.status_code == 200, approval.text
     redirect_url = approval.json()["redirect_url"]
     assert redirect_url.startswith(redirect_uri)
-    assert "state=abc" in redirect_url
+    assert f"state={state}" in redirect_url
     code = redirect_url.split("code=", 1)[1].split("&", 1)[0]
 
     exchanged = env.client.post(
@@ -377,6 +378,13 @@ def _authorize_and_redeem(
     )
     assert exchanged.status_code == 200, exchanged.text
     return client_info, exchanged.json()["access_token"]
+
+
+def test_a_long_oauth_state_round_trips_through_consent(tmp_path) -> None:
+    """Gemini sends a state well over 500 characters; it must not 422."""
+    with mcp_env(str(tmp_path / "mcp.db")) as env:
+        env.seed_user()
+        _authorize_and_redeem(env, state="s" * 1500)
 
 
 def test_an_agent_can_list_only_its_own_users_files(tmp_path) -> None:

@@ -83,7 +83,8 @@ class ConsentApprovalRequest(BaseModel):
     code_challenge: str = Field(min_length=1, max_length=200)
     scope: str = Field(default="", max_length=500)
     resource: str | None = Field(default=None, max_length=500)
-    state: str | None = Field(default=None, max_length=500)
+    # Opaque client value echoed back; some clients (e.g. Gemini) send long ones.
+    state: str | None = Field(default=None, max_length=4096)
     approved_scopes: list[str] = Field(default_factory=list)
     folder_access: FolderAccess = FolderAccess.ALL
     folder_id: str | None = Field(default=None, max_length=64)
