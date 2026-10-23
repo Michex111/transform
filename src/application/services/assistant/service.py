@@ -46,6 +46,7 @@ from src.application.services.assistant.prompts import (
 )
 from src.application.services.assistant.tools import (
     AssistantToolBox,
+    AttachmentRef,
     build_attachment_context,
     format_category,
     format_label,
@@ -77,6 +78,10 @@ logger = logging.getLogger(__name__)
 
 #: Longest auto-generated conversation title (the sidebar is one line wide).
 _MAX_TITLE_CHARS = 80
+
+#: Most attachments recalled from earlier turns into one prompt. Bounds the
+#: per-turn context a long conversation can accumulate.
+_MAX_RECALLED_ATTACHMENTS = 8
 
 #: How many candidates the deterministic recommender ranks.
 _MAX_RECOMMENDATIONS = 4
@@ -260,6 +265,50 @@ def _recall_workspace_id(messages: Sequence[Message]) -> str | None:
         if isinstance(value, str) and value:
             return value
     return None
+
+
+def _recalled_attachments(
+    messages: Sequence[Message], *, exclude: set[str]
+) -> list[AttachmentRef]:
+    """Files attached on earlier user messages, newest first.
+
+    The attachment chip in the transcript is rendered from ``meta.attachments``;
+    without replaying that data into the prompt it would be invisible to the
+    model, so a follow-up like "convert it to PDF" could not say which file "it"
+    is. ``exclude`` holds the current turn's ids, which are described separately
+    (with their sizes) by :func:`build_attachment_context`.
+
+    Stored metadata carries no size, so recalled entries use ``0``; the recalled
+    lines deliberately omit a size rather than display "0 B".
+    """
+    seen = set(exclude)
+    recalled: list[AttachmentRef] = []
+    for message in reversed(messages):
+        if message.role is not MessageRole.USER:
+            continue
+        raw = (message.meta or {}).get("attachments")
+        if not isinstance(raw, list):
+            continue
+        for entry in raw:
+            if not isinstance(entry, dict):
+                continue
+            file_id = entry.get("id")
+            if not isinstance(file_id, str) or not file_id or file_id in seen:
+                continue
+            seen.add(file_id)
+            name = entry.get("name")
+            extension = entry.get("extension")
+            recalled.append(
+                AttachmentRef(
+                    file_id=file_id,
+                    file_name=name if isinstance(name, str) and name else "Attachment",
+                    extension=extension if isinstance(extension, str) else "",
+                    size_bytes=0,
+                )
+            )
+            if len(recalled) >= _MAX_RECALLED_ATTACHMENTS:
+                return recalled
+    return recalled
 
 
 def _to_llm_message(message: Message) -> LlmMessage:
@@ -470,23 +519,30 @@ class AssistantService:
         history = await self._conversations.list_messages(
             conversation.id, limit=self._max_history_messages
         )
-        llm_messages = [LlmMessage(role="system", content=SYSTEM_PROMPT)]
-        prompt_context = build_attachment_context(attachments, context)
-        if prompt_context:
-            # Inserted AFTER the system prompt and BEFORE the history: it is
-            # server-authored guidance for this turn, not part of what the user
-            # said, and it must not push the system prompt out of the prompt.
-            llm_messages.append(LlmMessage(role="system", content=prompt_context))
-        # The workspace line is server-authored for the same reason, and it is
-        # what stops the model inferring the target workspace from conversational
-        # text: the id, its name and its runtime state are stated, or the absence
-        # of a workspace is stated.
-        llm_messages.append(
+        # Files attached on earlier turns are recalled from the stored message
+        # meta: the transcript keeps them for the chip, and a follow-up ("convert
+        # it to PDF") is unanswerable without them. The current turn's files are
+        # excluded because they are described separately, with their sizes.
+        earlier = _recalled_attachments(
+            history, exclude={item.file_id for item in attachments}
+        )
+        # ONE server-authored system message carries the rules, the turn's
+        # attachments/page and the workspace line. They used to be three
+        # separate system messages, and the attachment block was quietly
+        # ignored by the provider — the model then searched the drive for a file
+        # the user had just attached. Product-critical context cannot depend on
+        # a provider honouring every system message.
+        system_parts = (
+            SYSTEM_PROMPT,
+            build_attachment_context(attachments, context, earlier),
+            build_workspace_context(workspace_context, workspace_summary),
+        )
+        llm_messages = [
             LlmMessage(
                 role="system",
-                content=build_workspace_context(workspace_context, workspace_summary),
+                content="\n\n".join(part for part in system_parts if part),
             )
-        )
+        ]
         llm_messages.extend(build_bounded_history(history, self._max_history_messages))
         tools = self._toolbox.specs()
 

@@ -139,28 +139,73 @@ class AttachmentRef:
 #: from somewhere other than that route.
 _MAX_CONTEXT_CHARS = 200
 
+#: How many files attached in *earlier* turns are described in the prompt. The
+#: current turn's files are always listed; this bound only stops a long
+#: conversation from replaying an ever-growing file list on every turn.
+_MAX_RECALLED_ATTACHMENTS = 8
+
 
 def build_attachment_context(
-    attachments: Sequence[AttachmentRef], context: str | None
+    attachments: Sequence[AttachmentRef],
+    context: str | None,
+    earlier: Sequence[AttachmentRef] = (),
 ) -> str:
     """Build the extra system line(s) describing this turn's attachments/page.
 
-    Two deliberate properties: the surrounding sentence is *ours* (the model is
-    told what the ids are for, rather than handed a bare blob), and ``context``
-    is truncated and only ever embedded as text — never used to build a path or
-    a query — so a hostile page value cannot escape the prompt.
+    The wording is deliberate in three ways:
+
+    * it states that the attachment **is what the message is about**, because a
+      bare list of "files the user attached" is easy for a model to treat as
+      background while it searches the drive for "this file" instead;
+    * the surrounding sentence is *ours* (the model is told what the ids are
+      for, rather than handed a bare blob);
+    * ``context`` is truncated and only ever embedded as text — never used to
+      build a path or a query — so a hostile page value cannot escape the
+      prompt.
+
+    ``earlier`` carries attachments recorded on previous user messages, so a
+    follow-up such as "convert it to PDF" still knows which file "it" is. Sizes
+    are omitted there: the stored attachment metadata does not include one.
     """
     lines: list[str] = []
     if attachments:
+        noun = "file" if len(attachments) == 1 else "files"
+        subject = "The attachment is" if len(attachments) == 1 else "The attachments are"
+        id_phrase = "its file id" if len(attachments) == 1 else "their file ids"
         lines.append(
-            "The user attached these files to this message. Use these file ids "
-            "with your tools:"
+            f"The user attached {len(attachments)} {noun} to this message. "
+            f'{subject} what the message is about: when the user says '
+            f'"this file", "it" or "the attached {noun}", use {id_phrase} '
+            'directly with your tools. Do not search for the attachment with '
+            'list_files and do not ask which file they mean.'
         )
         lines.extend(
             f"- {item.file_name} (file_id: {item.file_id}, "
             f"format: {item.extension or 'unknown'}, {_human_size(item.size_bytes)})"
             for item in attachments
         )
+
+    current = {item.file_id for item in attachments}
+    seen = set(current)
+    recalled: list[AttachmentRef] = []
+    for item in earlier:
+        if item.file_id in seen:
+            continue
+        seen.add(item.file_id)
+        recalled.append(item)
+        if len(recalled) >= _MAX_RECALLED_ATTACHMENTS:
+            break
+    if recalled:
+        lines.append(
+            "Files attached earlier in this conversation (use these file ids "
+            "when the user refers back to them):"
+        )
+        lines.extend(
+            f"- {item.file_name} (file_id: {item.file_id}, "
+            f"format: {item.extension or 'unknown'})"
+            for item in recalled
+        )
+
     cleaned = (context or "").strip()
     if cleaned:
         lines.append(
@@ -572,7 +617,9 @@ class AssistantToolBox:
                     "`extension` and `query` combine. Passing `folder` narrows "
                     "anything to that one folder. Without a `folder`, a `query` "
                     "or an `extension`, this lists the ROOT only. Use this to "
-                    "resolve a file the user referred to by name."
+                    "resolve a file the user referred to by name. Do NOT use "
+                    "this to look for a file attached to the current message: "
+                    "its file id is already in the attachment context."
                 ),
                 parameters=_tool_schema(
                     {

@@ -18,6 +18,8 @@ from src.application.services.assistant.tools import (
     _MAX_EXTENSION_FILTERS,
     _MAX_LIST_LIMIT,
     AssistantToolBox,
+    AttachmentRef,
+    build_attachment_context,
     format_category,
     format_label,
 )
@@ -1470,3 +1472,51 @@ def test_account_overview_describe_mentions_credits_when_there_are_no_jobs() -> 
     summary = box.describe("get_account_overview", result)
     assert "7" in summary
     assert "credit" in summary
+
+
+# ---------------------------------------------------------------------------
+# Attachment context
+# ---------------------------------------------------------------------------
+
+
+def test_attachment_context_names_the_attachment_as_the_subject() -> None:
+    """A single attachment must not read as something for the model to search for."""
+    text = build_attachment_context(
+        [AttachmentRef("f1", "Lecture9.pptx", "pptx", 2 * 1024 * 1024)], None
+    )
+    assert "The attachment is what the message is about" in text
+    assert '"this file", "it" or "the attached file"' in text
+    assert "file_id: f1" in text
+    assert "format: pptx" in text
+    assert "2.0 MB" in text
+    assert "do not ask which file they mean" in text
+
+
+def test_attachment_context_pluralises_without_losing_the_file_ids() -> None:
+    text = build_attachment_context(
+        [
+            AttachmentRef("f1", "a.pdf", "pdf", 10),
+            AttachmentRef("f2", "b.docx", "docx", 20),
+        ],
+        None,
+    )
+    assert "The user attached 2 files" in text
+    assert "The attachments are what the message is about" in text
+    assert "use their file ids" in text
+    assert text.count("file_id:") == 2
+
+
+def test_attachment_context_recalls_earlier_files_once() -> None:
+    earlier = [
+        AttachmentRef("f1", "a.pdf", "pdf", 0),
+        AttachmentRef("f2", "b.pdf", "pdf", 0),
+        AttachmentRef("f1", "a.pdf", "pdf", 0),
+    ]
+    text = build_attachment_context(
+        [AttachmentRef("f2", "b.pdf", "pdf", 10)], None, earlier
+    )
+    assert "Files attached earlier in this conversation" in text
+    # The current attachment is described once (with its size); the earlier list
+    # carries only the file that is not already in the current turn.
+    assert text.count("file_id: f2") == 1
+    assert text.count("file_id: f1") == 1

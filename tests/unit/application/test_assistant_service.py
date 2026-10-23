@@ -871,12 +871,11 @@ def test_history_is_bounded_on_the_wire() -> None:
           message="newest", conversation_id="conv-9")
 
     sent = llm.calls[0][0]
-    # system + the workspace line + the bounded window, which already contains
-    # the new user message.
-    assert len(sent) == 2 + 4
+    # ONE server-authored system message (rules, workspace line) + the bounded
+    # window, which already contains the new user message.
+    assert len(sent) == 1 + 4
     assert sent[-1].content == "newest"
-    # The history window starts after the two server-authored system messages.
-    assert sent[2].content == "message 17"
+    assert sent[1].content == "message 17"
 
 
 # ---------------------------------------------------------------------------
@@ -1254,19 +1253,24 @@ def test_attachments_are_resolved_injected_and_persisted() -> None:
     )
 
     sent = llm.calls[0][0]
-    # system prompt, then the injected turn context, then the workspace line,
-    # then the history.
+    # ONE server-authored system message carries the rules, the attachment and
+    # the workspace line; the history follows.
     assert sent[0].role == "system"
-    assert sent[1].role == "system"
-    assert "resume.pdf" in sent[1].content
-    assert "file_id: file-1" in sent[1].content
-    assert "27 KB" in sent[1].content
+    assert "resume.pdf" in sent[0].content
+    assert "file_id: file-1" in sent[0].content
+    assert "27 KB" in sent[0].content
+    # The format is what lets the model call `list_supported_targets` without
+    # inspecting the drive.
+    assert "format: pdf" in sent[0].content
+    # The attachment must be stated as the SUBJECT of the message, or the model
+    # falls back to searching the drive for "this file".
+    assert "what the message is about" in sent[0].content
+    assert "do not ask which file they mean" in sent[0].content
     # The workspace line is always present, and says explicitly that no
     # workspace is selected rather than staying silent — silence is what lets a
     # model assume one.
-    assert sent[2].role == "system"
-    assert "No cloud workspace is selected" in sent[2].content
-    assert sent[3].role == "user"
+    assert "No cloud workspace is selected" in sent[0].content
+    assert sent[1].role == "user"
 
     stored = conversations.messages["conv-1"][0]
     assert stored.meta == {
@@ -1294,15 +1298,15 @@ def test_context_adds_a_currently_viewing_system_line() -> None:
     llm = FakeLlmPort([text_response("ok")])
     _chat(_service(llm=llm), message="where am I", context="/drive/invoices")
     sent = llm.calls[0][0]
-    assert sent[1].role == "system"
-    assert "currently viewing" in sent[1].content
-    assert "invoices" in sent[1].content
+    assert sent[0].role == "system"
+    assert "currently viewing" in sent[0].content
+    assert "invoices" in sent[0].content
 
 
 def test_page_context_is_truncated_to_two_hundred_characters() -> None:
     llm = FakeLlmPort([text_response("ok")])
     _chat(_service(llm=llm), message="hi", context="x" * 500)
-    content = llm.calls[0][0][1].content
+    content = llm.calls[0][0][0].content
     assert "x" * 200 + "." in content
     assert "x" * 201 not in content
 
@@ -1312,17 +1316,57 @@ def test_attachments_and_context_share_one_system_message() -> None:
     llm = FakeLlmPort([text_response("ok")])
     _chat(_service(llm=llm, toolbox=toolbox), message="hi", file_ids=["f1"], context="files")
     sent = llm.calls[0][0]
-    # ONE message carries both the attachments and the page context; the
-    # workspace line is a separate, later system message.
-    assert [message.role for message in sent[:4]] == [
-        "system",
-        "system",
-        "system",
-        "user",
-    ]
-    assert "attached" in sent[1].content
-    assert "currently viewing" in sent[1].content
-    assert "workspace" in sent[2].content.lower()
+    # ONE system message carries the rules, the attachments, the page context
+    # and the workspace line. A second system message is not reliably honoured
+    # by every provider.
+    assert [message.role for message in sent[:2]] == ["system", "user"]
+    assert "attached" in sent[0].content
+    assert "currently viewing" in sent[0].content
+    assert "workspace" in sent[0].content.lower()
+
+
+def test_a_file_attached_earlier_is_recalled_on_a_follow_up_turn() -> None:
+    """A later 'convert it to PDF' must still know which file 'it' is.
+
+    The attachment chip in the transcript comes from ``meta.attachments``; the
+    model only sees what the prompt carries, so those files have to be replayed
+    on later turns rather than just the turn that uploaded them.
+    """
+    conversations = FakeConversationRepository(
+        conversations=[
+            Conversation(
+                id="conv-1", user_id=USER, title="Deck", created_at=NOW, updated_at=NOW
+            )
+        ]
+    )
+    asyncio.run(
+        conversations.add_message(
+            Message(
+                id="m1",
+                conversation_id="conv-1",
+                position=0,
+                role=MessageRole.USER,
+                content="what formats should I convert this file to?",
+                meta={
+                    "attachments": [
+                        {"id": "f9", "name": "Lecture9.pptx", "extension": "pptx"}
+                    ],
+                    "workspace_id": None,
+                },
+            )
+        )
+    )
+    llm = FakeLlmPort([text_response("ok")])
+    _chat(
+        _service(llm=llm, conversations=conversations),
+        message="convert it to pdf",
+        conversation_id="conv-1",
+    )
+
+    system_text = llm.calls[0][0][0].content
+    assert "Files attached earlier in this conversation" in system_text
+    assert "Lecture9.pptx" in system_text
+    assert "file_id: f9" in system_text
 
 
 def test_bounded_history_is_unaffected_by_attachment_meta() -> None:
