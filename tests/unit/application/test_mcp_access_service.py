@@ -352,6 +352,46 @@ def test_loading_a_token_records_last_use() -> None:
     asyncio.run(_run())
 
 
+def test_a_recently_used_grant_is_not_written_again() -> None:
+    """The hot path must not UPDATE ``last_used_at`` on every single call.
+
+    The SQL adapter's UPDATE is already conditional, but issuing it still costs a
+    database round trip per tool call. Checking the loaded value in memory turns
+    the common case into no statement at all.
+    """
+
+    async def _run() -> None:
+        repo = FakeMCPRepository()
+        _grant_id, token = await _grant_and_token(repo)
+        await _service(repo).load_access_token(token)
+        repo.touched.clear()
+
+        # One minute later, inside the 5-minute window.
+        later = MCPAccessService(
+            repository=repo, resource_url=RESOURCE, clock=lambda: _NOW + timedelta(minutes=1)
+        )
+        assert await later.load_access_token(token) is not None
+        assert repo.touched == []
+
+    asyncio.run(_run())
+
+
+def test_a_grant_unused_for_longer_is_touched() -> None:
+    async def _run() -> None:
+        repo = FakeMCPRepository()
+        grant_id, token = await _grant_and_token(repo)
+        await _service(repo).load_access_token(token)
+        repo.touched.clear()
+
+        later = MCPAccessService(
+            repository=repo, resource_url=RESOURCE, clock=lambda: _NOW + timedelta(minutes=10)
+        )
+        assert await later.load_access_token(token) is not None
+        assert [entry[0] for entry in repo.touched] == [grant_id]
+
+    asyncio.run(_run())
+
+
 def test_refresh_rotates_the_refresh_token() -> None:
     async def _run() -> None:
         repo = FakeMCPRepository()

@@ -11,14 +11,21 @@ from fastapi.testclient import TestClient
 from src.presentation.api.middleware.body_limit import RequestBodyLimitMiddleware
 
 _CAP = 1024
+_MCP_CAP = 4096
 
 
-def _client(max_bytes: int = _CAP) -> TestClient:
+def _client(max_bytes: int = _CAP, mcp_max_bytes: int = _MCP_CAP) -> TestClient:
     app = FastAPI()
-    app.add_middleware(RequestBodyLimitMiddleware, max_bytes=max_bytes)
+    app.add_middleware(
+        RequestBodyLimitMiddleware, max_bytes=max_bytes, mcp_max_bytes=mcp_max_bytes
+    )
 
     @app.post("/api/echo")
     async def echo(request: Request) -> dict:  # pragma: no cover - trivial
+        return {"read": len(await request.body())}
+
+    @app.post("/mcp/")
+    async def mcp_echo(request: Request) -> dict:  # pragma: no cover - trivial
         return {"read": len(await request.body())}
 
     @app.get("/health")
@@ -58,6 +65,27 @@ def test_paths_outside_the_api_prefix_are_not_capped() -> None:
     assert client.get("/health").status_code == 200
     # The same oversized request IS refused once it targets the API surface.
     assert client.post("/api/echo", content=b"xxxxxxxxxx").status_code == 413
+
+
+def test_the_mcp_transport_has_its_own_larger_cap() -> None:
+    """An upload's base64 payload is much larger than any REST request body.
+
+    `/mcp` was previously not capped at all: the middleware only looked at
+    `/api/`. A tool argument is still a request body, and without a cap the server
+    buffers whatever it is sent before the tool can refuse it.
+    """
+    client = _client()
+    # Bigger than the API cap, within the MCP cap: accepted.
+    assert client.post("/mcp/", content=b"x" * (_CAP + 1)).status_code == 200
+    # Bigger than the MCP cap: refused before the body is read.
+    response = client.post("/mcp/", content=b"x" * (_MCP_CAP + 1))
+    assert response.status_code == 413
+
+
+def test_the_mcp_cap_covers_its_subpaths() -> None:
+    client = _client()
+    response = client.post("/mcp/token", content=b"x" * (_MCP_CAP + 1))
+    assert response.status_code == 413
 
 
 def test_a_malformed_content_length_is_not_treated_as_oversized() -> None:

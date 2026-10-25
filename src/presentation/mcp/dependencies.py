@@ -22,7 +22,8 @@ because an ASGI sub-application is not reachable from FastAPI's
 """
 
 import contextlib
-from collections.abc import AsyncGenerator
+import logging
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from dataclasses import dataclass
 from functools import lru_cache
 
@@ -64,6 +65,29 @@ from src.presentation.api.dependencies.workspace_dependencies import (
     build_workspace_service,
 )
 
+logger = logging.getLogger(__name__)
+
+
+def binding_from_grant(
+    grant: object | None, user_id: int, grant_id: str
+) -> tuple[FolderAccess, str | None, HistoryScope]:
+    """Read the binding from a grant, refusing anything unexpected.
+
+    Fail **closed**. A missing grant (or one belonging to another account) leaves
+    the defaults ``ALL``/``None``/``AGENT``, and ``ALL`` means the whole Drive.
+    A token that reached here has already passed the token verifier, which loads
+    and checks the same row, so this is a race or a wiring bug — but the safe
+    answer to either is to refuse the call, never to widen an agent's reach.
+    """
+    if grant is None or getattr(grant, "user_id", None) != user_id or getattr(grant, "id", None) != grant_id:
+        logger.error(
+            "MCP token references a grant that is missing, foreign or mismatched "
+            "(grant_id=%s); refusing the call rather than widening access.",
+            grant_id,
+        )
+        raise RuntimeError("The connection's authorization could not be loaded.")
+    return grant.folder_access, grant.folder_id, grant.history_scope  # type: ignore[attr-defined]
+
 
 @dataclass
 class MCPServiceScope:
@@ -74,7 +98,15 @@ class MCPServiceScope:
     transfer_service: TransferService
     credit_service: CreditService
     toolbox: MCPToolBox
-    tier: SubscriptionTier
+    #: Resolves the caller's plan on demand.
+    #:
+    #: Only ``convert_file`` needs it (to spend the right credits and apply the
+    #: right per-file cap). Resolving it up front made **every** tool call —
+    #: including ``get_supported_conversions``, which touches no user data — pay
+    #: for an extra database round trip. On a managed Postgres that round trip is
+    #: a measurable part of a tool's latency, and the answer is the same for the
+    #: whole call.
+    resolve_tier: Callable[[], Awaitable[SubscriptionTier]]
     #: Workspace and code-execution tools. Composed from the same application
     #: services the REST API uses, over the same request-scoped session, so an
     #: agent cannot reach a capability the web UI cannot or bypass a rule those
@@ -128,10 +160,19 @@ async def open_mcp_scope(
             credit_repository=SQLCreditRepository(session=session),
             subscription_repository=subscription_repository,
         )
+
         # The caller's plan decides the per-file cap and which credits are
         # spent, so it must be read from the database rather than defaulted:
-        # defaulting a PRO user to FREE would silently cap their uploads.
-        tier = await subscription_repository.get_tier_for_user(user_id)
+        # defaulting a PRO user to FREE would silently cap their uploads. Read
+        # lazily (once per call, memoised) so the 23 tools that never need it do
+        # not pay for the query.
+        resolved_tier: SubscriptionTier | None = None
+
+        async def resolve_tier() -> SubscriptionTier:
+            nonlocal resolved_tier
+            if resolved_tier is None:
+                resolved_tier = await subscription_repository.get_tier_for_user(user_id)
+            return resolved_tier
 
         folder_access = FolderAccess.ALL
         folder_id: str | None = None
@@ -141,10 +182,9 @@ async def open_mcp_scope(
             # ``user_id`` is re-checked here even though the token's subject was
             # already validated: a token must never inherit a binding from a
             # grant belonging to another account, however it was presented.
-            if grant is not None and grant.user_id == user_id:
-                folder_access = grant.folder_access
-                folder_id = grant.folder_id
-                history_scope = grant.history_scope
+            folder_access, folder_id, history_scope = binding_from_grant(
+                grant, user_id, grant_id
+            )
 
         # Read-side storage is wrapped so a download returns the file's real
         # bytes: anything the worker stored is at-rest ciphertext, and reading it
@@ -175,7 +215,7 @@ async def open_mcp_scope(
                 executions=build_execution_service(session),
                 default_timeout_seconds=get_settings().WORKSPACE_EXECUTION_TIMEOUT_SECONDS,
             ),
-            tier=tier,
+            resolve_tier=resolve_tier,
             folder_access=folder_access,
             folder_id=folder_id,
             history_scope=history_scope,

@@ -146,7 +146,7 @@ async def _tool_scope() -> AsyncGenerator[tuple[MCPToolBox, MCPToolContext]]:
         yield scope.toolbox, MCPToolContext(
             user_id=user_id,
             scopes=scopes,
-            tier=scope.tier,
+            tier_resolver=scope.resolve_tier,
             client_id=token.client_id,
             grant_id=grant_id,
             # The folder confinement and history scope come from the stored
@@ -185,7 +185,7 @@ async def _workspace_scope() -> AsyncGenerator[tuple["MCPWorkspaceTools", MCPToo
         yield scope.workspace_tools, MCPToolContext(
             user_id=user_id,
             scopes=scopes,
-            tier=scope.tier,
+            tier_resolver=scope.resolve_tier,
             client_id=token.client_id,
             grant_id=grant_id,
             folder_access=scope.folder_access,
@@ -622,7 +622,8 @@ def register_tools(mcp: MCPServer) -> None:
         Args:
             job_id: The job_id of a COMPLETED conversion from convert_file.
             folder_id: Optional destination folder id. Omit to save to the
-                Drive root.
+                connection's allowed folder — which is the Drive root for an
+                unrestricted connection, but the bound folder for a confined one.
             file_name: Optional name for the saved file. It must include the
                 correct extension. Omit to use the name Transform produced
                 (which is authoritative — e.g. a multi-page PDF to image job

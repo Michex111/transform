@@ -146,3 +146,66 @@ def test_writes_are_stored_as_is() -> None:
         assert store.objects["k"] == b"uploaded"
 
     asyncio.run(_run())
+
+
+def test_a_paged_read_does_not_decrypt_the_whole_object() -> None:
+    """Paging must be cheap: only the chunks covering the requested prefix.
+
+    The MCP download tool reads 128 KiB per page. Decrypting the whole object for
+    each page (the previous behaviour, forced by the fact that a truncated
+    ciphertext cannot authenticate) made one small read cost a full transfer —
+    and the storage read was bounded by the same 25 MiB.
+    """
+
+    async def _run() -> None:
+        service = _service()
+        # 2.5 chunks at the default 1 MiB chunk size.
+        blob = bytes(i % 251 for i in range(2_500_000))
+        stored = service.encrypt_bytes(blob, "7")
+        store = _Store({"k": stored})
+        reader = DecryptingObjectReader(storage=store, encryption_service=service)
+
+        out = await reader.read_object("k", 128 * 1024, user_id="7")
+
+        assert out == blob[: 128 * 1024]
+        _, limit_used = store.reads[-1]
+        assert limit_used is not None
+        assert limit_used < len(stored), "the whole object was fetched for one page"
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize(
+    "prefix_len",
+    [0, 1, 1024 * 1024 - 1, 1024 * 1024, 1024 * 1024 + 1, 2_500_000],
+)
+def test_a_prefix_at_every_chunk_boundary_matches_a_full_decrypt(prefix_len: int) -> None:
+    """Exact chunk boundaries are where a naive prefix cut breaks authentication."""
+
+    async def _run() -> None:
+        service = _service()
+        blob = bytes(i % 251 for i in range(2_500_000))
+        stored = service.encrypt_bytes(blob, "7")
+        store = _Store({"k": stored})
+        reader = DecryptingObjectReader(storage=store, encryption_service=service)
+
+        out = await reader.read_object("k", prefix_len, user_id="7")
+        assert out == blob[:prefix_len]
+
+    asyncio.run(_run())
+
+
+def test_a_tampered_needed_chunk_still_raises() -> None:
+    """Bounding the read must not weaken integrity on the bytes it returns."""
+
+    async def _run() -> None:
+        service = _service()
+        stored = bytearray(service.encrypt_bytes(b"a" * 3000, "7"))
+        # Corrupt a byte inside the first ciphertext chunk (past the header).
+        stored[100] ^= 0xFF
+        store = _Store({"k": bytes(stored)})
+        reader = DecryptingObjectReader(storage=store, encryption_service=service)
+        with pytest.raises(Exception):
+            await reader.read_object("k", 100, user_id="7")
+
+    asyncio.run(_run())

@@ -25,6 +25,8 @@ leaves the endpoint public, so they are intentionally the same object.
 """
 
 import contextlib
+import hashlib
+import logging
 from collections.abc import AsyncGenerator, Callable
 from contextlib import AbstractAsyncContextManager
 from typing import Any, cast
@@ -57,6 +59,18 @@ from src.infrastructure.adapters.repository.sql_mcp_repo import SQLMCPRepository
 #: How the adapter obtains a database session. Injected so tests can point it at
 #: SQLite without reaching into module globals.
 SessionScope = Callable[[], AbstractAsyncContextManager[AsyncSession]]
+
+logger = logging.getLogger(__name__)
+
+
+def _fingerprint(value: str) -> str:
+    """A short, non-reversible tag for correlating a token refusal.
+
+    A refresh token is a credential: it must never be logged. The first 12 hex
+    characters of its SHA-256 are enough to answer "did this client present the
+    token we think it did?" without being usable.
+    """
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:12]
 
 
 class MCPOAuthProvider(
@@ -241,6 +255,19 @@ class MCPOAuthProvider(
         async with self._service() as service:
             record = await service.peek_refresh_token(refresh_token)
         if record is None or record.kind != "REFRESH" or record.revoked_at is not None:
+            # The SDK answers invalid_grant for this without calling back into
+            # the provider, so without a line here a refused refresh leaves NO
+            # server-side trace at all: the access log shows a 400 and the
+            # reason (unknown, rotated, revoked, expired) is unknowable. That is
+            # exactly the position an operator was in when a major client
+            # silently dropped its connection.
+            logger.info(
+                "MCP refresh token refused before exchange (fingerprint=%s client_id=%s "
+                "reason=%s)",
+                _fingerprint(refresh_token),
+                client.client_id,
+                "unknown-or-revoked" if record is None or record.revoked_at is not None else "wrong-kind",
+            )
             return None
         sdk_scopes = [scope.value for scope in record.scopes] + [OFFLINE_ACCESS]
         return RefreshToken(
@@ -313,6 +340,15 @@ class MCPOAuthProvider(
 
     @staticmethod
     def _token_error(exc: MCPAccessError) -> TokenError:
+        # Safe fields only: an error code and the product's own explanation.
+        # Never the presented token, and never the exception repr (which can
+        # carry a database identifier). This is the only place a refused grant
+        # is recorded, and a 400 with no reason is not diagnosable in production.
+        logger.warning(
+            "MCP token grant refused: error=%s description=%s",
+            exc.error,
+            exc.description,
+        )
         return TokenError(error=cast(Any, exc.error), error_description=exc.description)
 
     @staticmethod

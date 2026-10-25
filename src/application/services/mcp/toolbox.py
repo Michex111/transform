@@ -30,8 +30,8 @@ What is *different* from the assistant's toolbox, and why:
 import base64
 import binascii
 import logging
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
 
@@ -123,6 +123,10 @@ class MCPToolContext:
     user_id: int
     scopes: tuple[AgentScope, ...]
     tier: SubscriptionTier = SubscriptionTier.FREE
+    #: Resolves the caller's plan on demand; see :meth:`resolve_tier`.
+    tier_resolver: Callable[[], Awaitable[SubscriptionTier]] | None = field(
+        default=None, repr=False, compare=False
+    )
     client_id: str = ""
     grant_id: str = ""
     #: Which part of the Drive this grant reaches. ``ALL`` is the pre-existing
@@ -137,6 +141,19 @@ class MCPToolContext:
 
     def allows(self, scope: AgentScope) -> bool:
         return covers(self.scopes, scope)
+
+    async def resolve_tier(self) -> SubscriptionTier:
+        """The caller's plan, read from the database only when it is needed.
+
+        ``convert_file`` is the only tool that cares. Every other tool used to
+        pay for this query anyway, which is a round trip on a remote database for
+        an answer nothing read. A resolver keeps the value honest (the plan can
+        change between calls) while making it free for the tools that do not use
+        it. ``tier`` remains as the explicit fallback the unit tests pin.
+        """
+        if self.tier_resolver is None:
+            return self.tier
+        return await self.tier_resolver()
 
 
 @runtime_checkable
@@ -815,9 +832,16 @@ class MCPToolBox:
         if requested is not None and requested > 0:
             chunk = min(requested, _DOWNLOAD_CHUNK_BYTES)
 
+        # Read only what this page needs, plus ONE extra byte to tell "there is
+        # more" from "that was the end". This used to read `_MAX_DOWNLOAD_BYTES`
+        # on every call, so a 20 MB file cost 20 MB of storage transfer for each
+        # 128 KiB page — and asking for the first four bytes of a large file cost
+        # the whole file. The at-rest reader also decrypts only the prefix now.
+        known_total = int(row.file_size_bytes or 0)
+        read_limit = min(_MAX_DOWNLOAD_BYTES, start + chunk + 1)
         try:
             data = await self._store.read_object(
-                row.file_key, max_bytes=_MAX_DOWNLOAD_BYTES + 1, user_id=str(ctx.user_id)
+                row.file_key, max_bytes=read_limit, user_id=str(ctx.user_id)
             )
         except FileSystemError as exc:
             logger.warning("MCP download_file failed for file %s: %s", file_id, exc)
@@ -829,20 +853,33 @@ class MCPToolBox:
             # The row's recorded size was stale; the measured read is the truth.
             return oversized
 
-        total = len(data)
-        if start >= total and total > 0:
+        measured = len(data)
+        if start >= measured and measured > 0:
             # Past the end. Say so rather than returning an empty success the
             # caller could mistake for "the file is empty".
             return {
                 "ok": False,
                 "error": (
-                    f"offset {start} is past the end of this file, which is {total} bytes."
+                    f"offset {start} is past the end of this file, which is {measured} bytes."
                 ),
-                "size_bytes": total,
+                "size_bytes": measured,
             }
         window = data[start : start + chunk]
         end = start + len(window)
-        has_more = end < total
+        if measured < read_limit:
+            # The read ended before the bound: this IS the end of the object, so
+            # the measured length is exact and a stale (oversized) row cannot
+            # keep the caller paging past it.
+            has_more = False
+            total = measured
+        else:
+            # Stopped at the bound. The extra byte proves more follows; the
+            # recorded size covers the case where this page ends exactly at it.
+            has_more = measured > end or known_total > end
+            # While more follows, the row's recorded size is the only total
+            # available without reading the rest, and it is written from the
+            # stored object at upload time.
+            total = max(known_total, measured)
 
         self._audit(ctx, "download_file", f"file:{row.id}")
         payload: dict[str, Any] = {
@@ -956,7 +993,7 @@ class MCPToolBox:
             # objects out of the bucket.
             object_key=row.file_key,
             user_id=ctx.user_id,
-            tier=ctx.tier,
+            tier=await ctx.resolve_tier(),
             # Recorded as MCP, not API: an agent acting under an OAuth grant is
             # a different actor from an API-key caller, and the agent-facing
             # history tool has to answer "what did *this agent* convert?". The
@@ -1115,6 +1152,22 @@ class MCPToolBox:
         else:
             destination = None
 
+        # Reject an oversized payload BEFORE decoding it. ``content_base64`` is
+        # model-supplied, and a decoded-length check can only run after
+        # ``b64decode`` has allocated the whole thing — so a 200 MB argument
+        # would cost ~150 MB of memory for a request that is refused anyway.
+        # Base64 length is a tight upper bound on decoded length, so this check
+        # costs nothing and closes that allocation.
+        max_encoded = 4 * ((_MAX_UPLOAD_BYTES + 2) // 3)
+        if len(content_base64) > max_encoded:
+            return {
+                "ok": False,
+                "error": (
+                    f"Content larger than {_MAX_UPLOAD_BYTES // (1024 * 1024)} MB cannot be "
+                    "uploaded through this tool. Ask the user to upload it in the Transform "
+                    "web app instead."
+                ),
+            }
         try:
             data = base64.b64decode(content_base64, validate=True)
         except (binascii.Error, ValueError):

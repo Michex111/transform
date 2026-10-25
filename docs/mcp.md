@@ -176,6 +176,12 @@ that event twice. `download_file` therefore returns at most 128 KiB of file
 content per call and reports `has_more` / `next_offset` so the caller can
 continue; the caller concatenates the decoded parts in order.
 
+Each call reads only the page it needs (plus one byte to distinguish "more
+follows" from "that was the end"), not the whole object. For encrypted files the
+at-rest format's chunking means the read reaches the end of the chunk containing
+the page; it never reassembles the file. `size_bytes` is the whole file's size
+while more pages follow, taken from the file row.
+
 This replaced a tool that advertised a 25 MiB limit and in practice failed at
 roughly 340 KiB with `SSE stream failed: Server-sent event exceeded the 1048576
 byte limit` — an ordinary 1 MB PDF was unreadable, and the error named no file
@@ -198,6 +204,7 @@ blocks on a Worker.
 | `MCP_REFRESH_TOKEN_TTL_DAYS` | `30` | Refresh-token lifetime. |
 | `MCP_AUTHORIZATION_CODE_TTL_MINUTES` | `5` | PKCE code lifetime. |
 | `MCP_CONSENT_PATH` | `/app/authorize` | SPA route for the consent screen. |
+| `MCP_MAX_REQUEST_BODY_BYTES` | `41943040` (40 MiB) | Largest request body the transport accepts. Larger than the REST cap because `upload_file` carries a 25 MiB file as ~33.4 MiB of base64 inside one JSON-RPC request; refused on `Content-Length` before the body is read. |
 
 Browser-based MCP clients also need their origin in `ALLOWED_ORIGINS`.
 

@@ -500,6 +500,67 @@ class FileEncryptionService:
         self.decrypt_stream(src, dst, user_id)
         return dst.getvalue()
 
+    def decrypt_prefix(
+        self,
+        ciphertext: bytes,
+        user_id: str,
+        max_plaintext_bytes: int,
+        *,
+        complete_object: bool = False,
+    ) -> bytes:
+        """Decrypt only the prefix needed to yield ``max_plaintext_bytes``.
+
+        WHY this exists: a caller that needs the first N bytes of a large object
+        (the MCP ``download_file`` tool paginates at 128 KiB) previously had to
+        decrypt the **entire** object and slice it, because the last partial
+        chunk of a truncated ciphertext fails authentication. That turned one
+        small read into a full-file read — repeatedly, once per page.
+
+        The streaming format is chunked, so a prefix ending on a chunk boundary
+        is independently decryptable. This method:
+
+        * reads the chunk size from the header,
+        * keeps only the complete chunks needed to cover N plaintext bytes,
+        * drops a trailing fragment *only when* ``complete_object`` is false — the
+          caller read a prefix of a larger object, so a short last chunk is a
+          cut and cannot authenticate. When the object IS complete, a short last
+          chunk is the genuine final chunk and decrypts normally, and
+        * decrypts that prefix with the ordinary, authenticated iterator.
+
+        Integrity is unchanged: every returned byte came from a chunk whose GCM
+        tag verified under the caller's key. A truncated or tampered *needed*
+        chunk still raises.
+        """
+        if max_plaintext_bytes <= 0:
+            return b""
+        if len(ciphertext) < _STREAM_HEADER_LEN or not ciphertext.startswith(_STREAM_MAGIC):
+            raise ValueError("Not a Transform-encrypted file (bad header)")
+        chunk_size = int.from_bytes(
+            ciphertext[len(_STREAM_MAGIC) + 1: len(_STREAM_MAGIC) + 5], "big"
+        )
+        if chunk_size <= 0:
+            raise ValueError("Invalid encryption chunk size")
+
+        # Ciphertext per chunk is the plaintext chunk plus the GCM tag.
+        chunk_overhead = 16
+        if complete_object:
+            usable = len(ciphertext)
+        else:
+            # Only whole chunks can authenticate; a trailing fragment is the cut
+            # made by the caller's read bound.
+            complete = (len(ciphertext) - _STREAM_HEADER_LEN) // (
+                chunk_size + chunk_overhead
+            )
+            usable = _STREAM_HEADER_LEN + complete * (chunk_size + chunk_overhead)
+
+        # Decrypt no more than the chunks that cover the requested prefix, even
+        # when the caller handed us the whole object.
+        chunks_needed = (max_plaintext_bytes + chunk_size - 1) // chunk_size
+        needed = _STREAM_HEADER_LEN + chunks_needed * (chunk_size + chunk_overhead)
+        prefix = ciphertext[: min(usable, needed)]
+        plaintext = b"".join(self.iter_decrypt(io.BytesIO(prefix).read, user_id))
+        return plaintext[:max_plaintext_bytes]
+
     # ------------------------------------------------------------------
     # Key management
     # ------------------------------------------------------------------

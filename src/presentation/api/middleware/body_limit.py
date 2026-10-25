@@ -31,21 +31,24 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from src.infrastructure.config.settings import get_settings
 
-#: Only `/api/…` is capped. The non-API paths are the health probes and
-#: `/metrics`, which take no body at all, and being permissive there keeps this
-#: middleware from being able to break a platform health check.
-_CAPPED_PREFIX = "/api/"
+#: `/api/…` uses ``MAX_REQUEST_BODY_BYTES``. The health probes and `/metrics`
+#: take no body at all, and being permissive there keeps this middleware from
+#: being able to break a platform health check.
+_API_PREFIX = "/api/"
 
 
 class RequestBodyLimitMiddleware(BaseHTTPMiddleware):
     """Answer 413 when a request declares a body larger than the configured cap."""
 
-    def __init__(self, app, max_bytes: int | None = None) -> None:
+    def __init__(
+        self, app, max_bytes: int | None = None, mcp_max_bytes: int | None = None
+    ) -> None:
         super().__init__(app)
         # Injected (rather than read lazily) so a test can pin a small cap
         # without touching the environment, and so the value cannot change
         # between the check and the response.
         self._max_bytes = max_bytes
+        self._mcp_max_bytes = mcp_max_bytes
 
     @property
     def max_bytes(self) -> int:
@@ -54,8 +57,29 @@ class RequestBodyLimitMiddleware(BaseHTTPMiddleware):
             self._max_bytes = get_settings().MAX_REQUEST_BODY_BYTES
         return self._max_bytes
 
+    @property
+    def mcp_max_bytes(self) -> int:
+        """The MCP transport's cap.
+
+        Separate and larger because ``upload_file`` carries file content as
+        base64 inside the JSON-RPC request: 25 MiB of file is ~33.4 MiB on the
+        wire. Before this existed, ``/mcp`` had **no** transport cap at all — the
+        ``/api/``-scoped check above simply did not apply to it.
+        """
+        if self._mcp_max_bytes is None:
+            self._mcp_max_bytes = get_settings().MCP_MAX_REQUEST_BODY_BYTES
+        return self._mcp_max_bytes
+
+    def _cap_for(self, path: str) -> int | None:
+        if path.startswith(_API_PREFIX):
+            return self.max_bytes
+        if path == "/mcp" or path.startswith("/mcp/"):
+            return self.mcp_max_bytes
+        return None
+
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
-        if request.url.path.startswith(_CAPPED_PREFIX):
+        cap = self._cap_for(request.url.path)
+        if cap is not None:
             declared = request.headers.get("content-length")
             if declared is not None:
                 try:
@@ -65,7 +89,7 @@ class RequestBodyLimitMiddleware(BaseHTTPMiddleware):
                     # client sends; treat it as unparseable and let the server's
                     # own parser reject it rather than inventing a policy here.
                     length = -1
-                if length > self.max_bytes:
+                if length > cap:
                     # The same structured detail shape the rest of the API uses
                     # for a rejection the client can act on.
                     return Response(

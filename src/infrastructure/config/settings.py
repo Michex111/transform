@@ -427,6 +427,14 @@ class Settings(BaseSettings):
     MCP_AUTHORIZATION_CODE_TTL_MINUTES: int = 5
     #: SPA route that renders the consent screen. Relative to ``APP_BASE_URL``.
     MCP_CONSENT_PATH: str = "/app/authorize"
+    #: Largest request body the MCP transport accepts, in bytes.
+    #:
+    #: Deliberately bigger than ``MAX_REQUEST_BODY_BYTES`` (the REST API's cap):
+    #: ``upload_file`` carries its content as base64 inside one JSON-RPC request,
+    #: so a 25 MiB file is ~33.4 MiB on the wire. Without this cap the transport
+    #: was unbounded — an anonymous-looking client could make the server buffer
+    #: an arbitrarily large body before the tool ever saw it.
+    MCP_MAX_REQUEST_BODY_BYTES: int = 40 * 1024 * 1024
 
     # ------------------------------------------------------------------
     # Upload size limits (bytes)
@@ -1158,6 +1166,9 @@ class Settings(BaseSettings):
             # A cap below 1 KiB would reject legitimate requests; a typo that
             # made it 0 would reject everything. Fail loudly at boot.
             raise RuntimeError("MAX_REQUEST_BODY_BYTES must be at least 1024 bytes.")
+
+        if self.MCP_MAX_REQUEST_BODY_BYTES < 1024:
+            raise RuntimeError("MCP_MAX_REQUEST_BODY_BYTES must be at least 1024 bytes.")
 
         if environment not in _SUPPORTED_ENVIRONMENTS:
             # Fail closed: an unrecognised value (e.g. "prod") must not silently

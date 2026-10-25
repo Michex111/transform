@@ -32,7 +32,13 @@ from typing import Any, Protocol, runtime_checkable
 
 from src.application.exceptions.workspace_exceptions import (
     PackageInstallNotPermittedError,
+    RuntimeBusyError,
+    RuntimeNotFoundError,
+    RuntimeNotRunningError,
+    SnapshotFailedError,
+    WorkspaceLimitReachedError,
     WorkspaceNotFoundError,
+    WorkspaceNotUsableError,
     WorkspaceQuotaExceededError,
 )
 from src.application.services.workspaces.execution_service import ExecutionNotFoundError
@@ -102,6 +108,16 @@ class MCPExecutionPort(Protocol):
         self, *, workspace_id: str, user_id: int, limit: int, offset: int
     ) -> tuple[list[Any], int]: ...
 
+    async def list_artifacts(self, *, workspace_id: str, user_id: int) -> list[Any]:
+        """Recent artifacts, already bounded by the service.
+
+        Exposed rather than re-flattened here so the MCP surface inherits the
+        service's own ceilings (scan depth and total count). Re-implementing the
+        loop in the tool is how an unbounded listing reaches an agent's context
+        window, and how the two surfaces drift.
+        """
+        ...
+
     async def cancel(self, execution_id: str, user_id: int) -> Any: ...
 
 
@@ -132,10 +148,14 @@ def failures_as_values(fn: Any) -> Any:
     tripping an ``AttributeError`` on the error payload. One wrapper over the
     whole body removes that class of mistake.
 
-    Only the conditions an agent can actually cause are caught — an
-    unknown/foreign id and a policy refusal. An unexpected failure (a database
-    outage) is deliberately NOT caught: that is a genuine fault and should
-    surface as one rather than as a plausible-looking ``ok: false``.
+    Every condition an agent can cause or meet is caught, including the ones
+    that describe *state* rather than a bad argument: a workspace with no runtime
+    yet, a runtime that is stopped, busy, or archived. Those used to escape as
+    raw exceptions, which the MCP transport renders as a bare "Error executing
+    tool <name>" — true, unactionable, and indistinguishable from a server fault.
+    An unexpected failure (a database outage) is deliberately NOT caught: that is
+    a genuine fault and should surface as one rather than as a plausible-looking
+    ``ok: false``.
     """
     import functools
 
@@ -153,6 +173,51 @@ def failures_as_values(fn: Any) -> Any:
             return {"ok": False, "error": str(exc), "quota_exceeded": True}
         except PackageInstallNotPermittedError as exc:
             return {"ok": False, "error": str(exc), "egress_restricted": True}
+        except WorkspaceLimitReachedError:
+            return {
+                "ok": False,
+                "error": (
+                    "The workspace limit for this account has been reached. "
+                    "Delete a workspace in the app before creating another."
+                ),
+            }
+        except WorkspaceNotUsableError:
+            return {
+                "ok": False,
+                "error": "That workspace is archived or being deleted, so it cannot be used.",
+            }
+        except RuntimeNotFoundError:
+            return {
+                "ok": False,
+                "error": (
+                    "That workspace has no runtime yet. Run code in it once to start "
+                    "one, then try this again."
+                ),
+            }
+        except RuntimeNotRunningError:
+            return {
+                "ok": False,
+                "error": (
+                    "The workspace's runtime is not running. Start it by running code, "
+                    "then try this again."
+                ),
+            }
+        except RuntimeBusyError:
+            return {
+                "ok": False,
+                "error": (
+                    "The workspace's runtime is busy with another operation. "
+                    "Wait for it to finish and try again."
+                ),
+            }
+        except SnapshotFailedError:
+            return {
+                "ok": False,
+                "error": (
+                    "The environment snapshot could not be created. The workspace is "
+                    "unchanged; try again."
+                ),
+            }
         return result
 
     return wrapper
@@ -494,17 +559,24 @@ class MCPWorkspaceTools:
         """
         if not ctx.allows(AgentScope.WORKSPACES_READ):
             return _denied(AgentScope.WORKSPACES_READ, "list_artifacts")
-        executions, _total = await self._executions.list_for_workspace(
-            workspace_id=workspace_id, user_id=ctx.user_id, limit=20, offset=0
+        # The service bounds both the scan (recent executions) and the total
+        # count, so one pathological run cannot turn this into a token bomb.
+        artifacts = await self._executions.list_artifacts(
+            workspace_id=workspace_id, user_id=ctx.user_id
         )
-        artifacts = [
-            {
-                "execution_id": execution.execution_id,
-                "path": artifact.path,
-                "size_bytes": artifact.size_bytes,
-                "stored": artifact.object_key is not None,
-            }
-            for execution in executions
-            for artifact in execution.artifacts
-        ]
-        return {"ok": True, "artifacts": artifacts}
+        return {
+            "ok": True,
+            "artifacts": [
+                {
+                    "execution_id": ref.execution_id,
+                    "path": ref.artifact.path,
+                    "size_bytes": ref.artifact.size_bytes,
+                    "stored": ref.artifact.object_key is not None,
+                }
+                for ref in artifacts
+            ],
+            "note": (
+                "Only artifacts from the most recent runs are listed, and the list "
+                "is capped; it is not necessarily exhaustive."
+            ),
+        }

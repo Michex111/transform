@@ -82,6 +82,11 @@ class FakeMCPRepository:
 
     async def touch_grant(self, grant_id: str, used_at: datetime) -> None:
         self.touched.append((grant_id, used_at))
+        # Mirror the SQL adapter, which actually stores the timestamp. A fake
+        # that only records the call would make a second load look stale again.
+        grant = self.grants.get(grant_id)
+        if grant is not None:
+            grant.last_used_at = used_at
 
     async def set_grant_status(
         self,

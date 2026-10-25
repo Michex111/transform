@@ -25,10 +25,19 @@ import pytest
 
 from src.application.exceptions.workspace_exceptions import (
     PackageInstallNotPermittedError,
+    RuntimeBusyError,
+    RuntimeNotFoundError,
+    RuntimeNotRunningError,
+    SnapshotFailedError,
+    WorkspaceLimitReachedError,
     WorkspaceNotFoundError,
+    WorkspaceNotUsableError,
     WorkspaceQuotaExceededError,
 )
-from src.application.services.workspaces.execution_service import ExecutionNotFoundError
+from src.application.services.workspaces.execution_service import (
+    ExecutionArtifactRef,
+    ExecutionNotFoundError,
+)
 from src.application.services.mcp.toolbox import MCPToolContext
 from src.application.services.mcp.workspace_tools import MCPWorkspaceTools
 from src.domain.security.value_object.agent_scope import (
@@ -67,6 +76,7 @@ class FakeWorkspaces:
         self.written: dict[str, bytes] = {}
         self.saved: list[str] = []
         self.raise_on_detail: Exception | None = None
+        self.raise_on_files: Exception | None = None
 
     async def list_workspaces(self, user_id: int, *, limit: int, offset: int):
         return [_workspace()], 1
@@ -81,6 +91,9 @@ class FakeWorkspaces:
         return Workspace(workspace_id="ws-new", user_id=user_id, name=name)
 
     async def list_workspace_files(self, workspace_id: str, user_id: int, *, path: str = "."):
+        if self.raise_on_files is not None:
+            raise self.raise_on_files
+
         class Entry:
             name = "main.py"
             path = "main.py"
@@ -170,6 +183,13 @@ class FakeExecutions:
 
     async def list_for_workspace(self, *, workspace_id, user_id, limit, offset):
         return [await self.get("ex-1", user_id)], 1
+
+    async def list_artifacts(self, *, workspace_id, user_id):
+        execution = await self.get("ex-1", user_id)
+        return [
+            ExecutionArtifactRef(execution_id=execution.execution_id, artifact=artifact)
+            for artifact in execution.artifacts
+        ]
 
 
 def _tools(
@@ -322,6 +342,40 @@ class TestUnknownIds:
             )
             assert result["ok"] is False
             assert result["error"] == "That execution was not found."
+
+        import asyncio
+
+        asyncio.run(scenario())
+
+    @pytest.mark.parametrize(
+        "failure,expected",
+        [
+            (RuntimeNotFoundError(), "no runtime yet"),
+            (RuntimeNotRunningError(), "runtime is not running"),
+            (RuntimeBusyError(), "busy with another operation"),
+            (WorkspaceNotUsableError(), "archived or being deleted"),
+            (WorkspaceLimitReachedError(), "workspace limit"),
+            (SnapshotFailedError(), "snapshot could not be created"),
+        ],
+    )
+    def test_expected_runtime_states_are_values_not_faults(
+        self, failure: Exception, expected: str
+    ) -> None:
+        """A stopped/missing runtime is a state an agent can meet, not a crash.
+
+        Before this, these escaped the tool wrapper and the transport answered
+        with a bare "Error executing tool <name>" — no reason, no next step, and
+        indistinguishable from a server fault. Each must now be a sentence.
+        """
+
+        async def scenario() -> None:
+            workspaces = FakeWorkspaces()
+            workspaces.raise_on_files = failure
+            result = await _tools(workspaces).list_workspace_files(
+                _ctx(AgentScope.WORKSPACES_READ), "ws-1"
+            )
+            assert result["ok"] is False
+            assert expected in result["error"]
 
         import asyncio
 

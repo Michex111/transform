@@ -64,6 +64,15 @@ from src.infrastructure.logging.audit import log_connection_control
 ACCESS_TOKEN_KIND = "ACCESS"
 REFRESH_TOKEN_KIND = "REFRESH"
 
+#: How stale ``last_used_at`` must be before an authenticated MCP call writes it.
+#:
+#: Mirrors ``_LAST_USED_REFRESH_INTERVAL`` in the SQL repository, which applies the
+#: same window in its conditional UPDATE. Checking it here as well turns the
+#: common case into **no write at all** (and therefore one fewer round trip on
+#: every tool call); the SQL condition remains the authority, so a clock skew
+#: between the two can only cause a write that the UPDATE would have made safe.
+_GRANT_TOUCH_INTERVAL = timedelta(minutes=5)
+
 #: Scope strings this server recognises in a REQUEST. Broader than
 #: ``ALL_SCOPES`` by the request markers (``offline_access``), which are accepted
 #: and then dropped by ``normalize_scopes`` — so they can never be persisted as a
@@ -389,7 +398,14 @@ class MCPAccessService:
             # this token was minted: the token is now more powerful than the
             # consent behind it, so it is refused rather than downgraded.
             return None
-        await self._repository.touch_grant(record.grant_id, now)
+        last_used = grant.last_used_at
+        if last_used is not None and last_used.tzinfo is None:
+            last_used = last_used.replace(tzinfo=UTC)
+        if last_used is None or now - last_used >= _GRANT_TOUCH_INTERVAL:
+            # Only write when the signal is actually stale. The repository's
+            # UPDATE would be a no-op otherwise, but it would still cost a round
+            # trip on the hot path of every tool call.
+            await self._repository.touch_grant(record.grant_id, now)
         return record
 
     async def revoke_token(self, token: str) -> None:

@@ -524,6 +524,18 @@ def test_a_degenerate_request_body_ceiling_is_a_startup_error() -> None:
         _settings(ENVIRONMENT="development", MAX_REQUEST_BODY_BYTES=512).validate_settings()
 
 
+def test_a_degenerate_mcp_body_ceiling_is_a_startup_error() -> None:
+    """The MCP transport carries base64 uploads, but still needs a sane floor."""
+    with pytest.raises(RuntimeError, match="MCP_MAX_REQUEST_BODY_BYTES"):
+        _settings(
+            ENVIRONMENT="development", MCP_MAX_REQUEST_BODY_BYTES=0
+        ).validate_settings()
+    with pytest.raises(RuntimeError, match="MCP_MAX_REQUEST_BODY_BYTES"):
+        _settings(
+            ENVIRONMENT="development", MCP_MAX_REQUEST_BODY_BYTES=512
+        ).validate_settings()
+
+
 def test_level_model_resolution_leaves_validation_unchanged() -> None:
     """Per-level models add no new startup constraints."""
     settings = _settings(

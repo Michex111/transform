@@ -25,6 +25,7 @@ from src.domain.conversions.value_object.job_origin import JobOrigin
 from src.domain.conversions.value_object.job_status import JobStatus
 from src.domain.security.value_object.agent_access_scope import FolderAccess, HistoryScope
 from src.domain.security.value_object.agent_scope import AgentScope
+from src.domain.subscriptions.value_object.tier import SubscriptionTier
 from src.infrastructure.database.models import UserFileModel
 
 CONVERSION_MAP = {"docx": ["pdf", "txt"], "pdf": ["png"]}
@@ -282,6 +283,7 @@ class FakeObjectStore:
     def __init__(self, objects: dict[str, bytes] | None = None) -> None:
         self.objects: dict[str, bytes] = dict(objects or {})
         self.puts: list[tuple[str, bytes]] = []
+        self.read_limits: list[int | None] = []
 
     async def put_object(self, object_key: str, data: bytes) -> None:
         self.puts.append((object_key, data))
@@ -294,6 +296,7 @@ class FakeObjectStore:
         # so a reader that ignores the owner would hand back ciphertext. This
         # fake holds plaintext, which is what a decrypting reader returns.
         assert user_id
+        self.read_limits.append(max_bytes)
         if object_key not in self.objects:
             raise FileNotFoundError(object_key)
         data = self.objects[object_key]
@@ -980,6 +983,80 @@ def test_upload_file_rejects_invalid_base64() -> None:
     asyncio.run(_run())
 
 
+def test_upload_file_refuses_an_oversized_payload_before_decoding_it(monkeypatch) -> None:
+    """The size check must come *before* ``b64decode`` allocates the bytes.
+
+    The argument is model-supplied. Decoding first and checking afterwards means
+    a 200 MB argument costs ~150 MB of server memory for a request that is
+    refused anyway — and the transport cap alone does not bound a single
+    argument's decoded size.
+    """
+    from src.application.services.mcp import toolbox as toolbox_module
+
+    async def _run() -> None:
+        monkeypatch.setattr(toolbox_module, "_MAX_UPLOAD_BYTES", 1024 * 1024)
+        toolbox, _files, _conversions, transfers, _copier, _credits, store = (
+            _build_toolbox(files=FakeFileService(dict(FOLDER_FILES), dict(FOLDER_PARENTS)))
+        )
+        # 1 MiB + 1 byte encodes to more than the maximum encoded length for the
+        # cap, so it is refused without ever being decoded.
+        payload = base64.b64encode(b"x" * (1024 * 1024 + 1)).decode()
+        result = await toolbox.upload_file(
+            _folder_ctx(AgentScope.DOCUMENTS_WRITE), "notes.txt", payload
+        )
+        assert result["ok"] is False
+        assert "larger than" in result["error"]
+        # Nothing was reserved and nothing was written.
+        assert transfers.created == []
+        assert store.puts == []
+
+    asyncio.run(_run())
+
+
+def test_the_tier_is_resolved_only_when_a_tool_needs_it() -> None:
+    """Read-only tools must not pay a database round trip for the plan."""
+
+    async def _run() -> None:
+        calls = 0
+
+        async def resolver():
+            nonlocal calls
+            calls += 1
+            return SubscriptionTier.PRO
+
+        ctx = MCPToolContext(
+            user_id=7, scopes=(AgentScope.DOCUMENTS_READ,), tier_resolver=resolver
+        )
+        toolbox, *_ = _toolbox()
+        # A read-only tool never asks.
+        await toolbox.get_supported_conversions(ctx)
+        assert calls == 0
+        # convert_file does, and gets the real plan rather than the FREE default.
+        conversions = FakeConversionService()
+        toolbox, *_ = _build_toolbox(conversions=conversions)
+        await toolbox.convert_file(
+            MCPToolContext(
+                user_id=7,
+                scopes=(AgentScope.DOCUMENTS_CONVERT,),
+                tier_resolver=resolver,
+            ),
+            "file-1",
+            "pdf",
+        )
+        assert calls == 1
+        assert conversions.started[0]["tier"] is SubscriptionTier.PRO
+
+    asyncio.run(_run())
+
+
+def test_without_a_resolver_the_context_tier_is_the_answer() -> None:
+    async def _run() -> None:
+        ctx = _ctx(AgentScope.DOCUMENTS_CONVERT)
+        assert await ctx.resolve_tier() is SubscriptionTier.FREE
+
+    asyncio.run(_run())
+
+
 
 # --------------------------------------------------------------------------
 # download_file paging
@@ -1010,7 +1087,9 @@ def test_download_file_pages_content_larger_than_the_chunk() -> None:
     async def _run() -> None:
         payload = bytes(i % 251 for i in range(300_000))
         store = FakeObjectStore({"upload/file-1/secret-key.docx": payload})
-        toolbox, *_ = _build_toolbox(store=store)
+        # An accurate row: production writes this size from the stored object.
+        files = FakeFileService({"file-1": _file(file_size_bytes=len(payload))})
+        toolbox, *_ = _build_toolbox(store=store, files=files)
         ctx = _ctx(AgentScope.DOCUMENTS_READ)
 
         first = await toolbox.download_file(ctx, "file-1")
@@ -1035,6 +1114,51 @@ def test_download_file_pages_content_larger_than_the_chunk() -> None:
             offset = part.get("next_offset") if part["has_more"] else None
 
         assert bytes(collected) == payload
+
+    asyncio.run(_run())
+
+
+def test_download_file_reads_only_the_page_it_needs() -> None:
+    """A page must not pull the whole object out of storage.
+
+    The first implementation asked the store for 25 MiB on *every* call, so one
+    128 KiB page of a 20 MB document transferred 20 MB — and asking for the first
+    few bytes of a large file cost the whole file. The bound must stay a page, not
+    the file.
+    """
+
+    async def _run() -> None:
+        payload = b"z" * 10_000_000
+        store = FakeObjectStore({"upload/file-1/secret-key.docx": payload})
+        files = FakeFileService({"file-1": _file(file_size_bytes=len(payload))})
+        toolbox, *_ = _build_toolbox(store=store, files=files)
+
+        result = await toolbox.download_file(
+            _ctx(AgentScope.DOCUMENTS_READ), "file-1"
+        )
+        assert result["ok"] is True
+        # One byte more than the page, purely to distinguish "more follows" from
+        # "that was the end"; never the file.
+        assert store.read_limits == [128 * 1024 + 1]
+
+    asyncio.run(_run())
+
+
+def test_a_stale_oversized_row_does_not_keep_the_caller_paging() -> None:
+    """When the object is shorter than its recorded size, EOF wins.
+
+    A row size can go stale. Paging until the *measured* end means such a file
+    still terminates, instead of looping over empty pages.
+    """
+
+    async def _run() -> None:
+        store = FakeObjectStore({"upload/file-1/secret-key.docx": b"short"})
+        files = FakeFileService({"file-1": _file(file_size_bytes=999_999)})
+        toolbox, *_ = _build_toolbox(store=store, files=files)
+        result = await toolbox.download_file(_ctx(AgentScope.DOCUMENTS_READ), "file-1")
+        assert result["ok"] is True
+        assert result["has_more"] is False
+        assert result["size_bytes"] == 5
 
     asyncio.run(_run())
 

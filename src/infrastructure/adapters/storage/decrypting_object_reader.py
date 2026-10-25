@@ -37,9 +37,18 @@ _STREAM_MAGIC = b"TRENC"
 #: How much larger than the plaintext limit the ciphertext may be. The format is
 #: a small fixed header plus a per-chunk authentication tag, so the overhead is a
 #: fraction of a percent; this is a generous bound that still keeps the read
-#: bounded. Reading the ciphertext under the PLAINTEXT limit would truncate it and
-#: make decryption fail — the reason the limit is applied after decrypting.
+#: bounded.
 _CIPHERTEXT_SLACK = 64 * 1024
+#: Extra bytes to read so a plaintext prefix is backed by the WHOLE ciphertext
+#: chunk that contains it.
+#:
+#: The at-rest format encrypts in chunks (1 MiB by default), and a chunk only
+#: authenticates when it is complete. Asking storage for exactly
+#: ``plaintext_prefix + tag`` therefore cuts the last chunk in half and the prefix
+#: cannot be decrypted at all. One chunk of headroom guarantees the chunk that
+#: holds the requested last byte arrives whole, while still bounding a paged read
+#: to a page plus 1 MiB rather than the whole object.
+_CIPHERTEXT_CHUNK_SLACK = 1024 * 1024
 
 
 class _ObjectWriter(Protocol):
@@ -50,6 +59,15 @@ class _ObjectWriter(Protocol):
 
 class _Decryptor(Protocol):
     def decrypt_bytes(self, ciphertext: bytes, user_id: str) -> bytes: ...
+
+    def decrypt_prefix(
+        self,
+        ciphertext: bytes,
+        user_id: str,
+        max_plaintext_bytes: int,
+        *,
+        complete_object: bool = False,
+    ) -> bytes: ...
 
 
 class DecryptingObjectReader:
@@ -94,10 +112,19 @@ class DecryptingObjectReader:
         content of a file cannot be read without knowing whose file it is. That
         is also why the caller must have established ownership before getting
         here.
+
+        Only the ciphertext needed for ``max_bytes`` is read and decrypted. The
+        MCP download tool pages at 128 KiB, and decrypting the whole object per
+        page made one small read cost a full transfer from storage every time.
         """
         # The stored object may be larger than the plaintext we are willing to
-        # return, so read against a ciphertext-sized bound.
-        read_limit = None if max_bytes is None else max_bytes + _CIPHERTEXT_SLACK
+        # return, so read against a ciphertext-sized bound. The extra chunk of
+        # headroom keeps the last needed chunk whole (see the constant).
+        read_limit = (
+            None
+            if max_bytes is None
+            else max_bytes + _CIPHERTEXT_SLACK + _CIPHERTEXT_CHUNK_SLACK
+        )
         raw = await self._storage.read_object(object_key, max_bytes=read_limit)
 
         if self._encryption is None or not raw.startswith(_STREAM_MAGIC):
@@ -107,7 +134,25 @@ class DecryptingObjectReader:
             return raw if max_bytes is None else raw[:max_bytes]
 
         try:
-            plaintext = self._encryption.decrypt_bytes(raw, user_id)
+            if max_bytes is None:
+                return self._encryption.decrypt_bytes(raw, user_id)
+            # Decrypt only the chunks that cover the requested prefix; the
+            # returned bytes are authenticated exactly as a full decrypt would
+            # produce them. ``complete_object`` tells the service whether a short
+            # final chunk is the real end of the file or was cut by the read
+            # bound above (a fragment cannot authenticate).
+            complete_object = read_limit is not None and len(raw) < read_limit
+            plaintext = self._encryption.decrypt_prefix(
+                raw, user_id, max_bytes, complete_object=complete_object
+            )
+            if len(plaintext) < max_bytes and not complete_object:
+                # The storage read stopped before the chunk we needed (a chunk
+                # size larger than the slack above). Failing is safer than
+                # silently returning a short prefix the caller would read as EOF.
+                raise ValueError(
+                    "The encrypted object's prefix could not be read completely."
+                )
+            return plaintext
         except Exception:  # noqa: BLE001 - a corrupt or foreign-key object
             # Never surface ciphertext as if it were the file: an agent that
             # received it would describe binary noise to the user as their
@@ -116,4 +161,3 @@ class DecryptingObjectReader:
                 "Could not decrypt object for download (key=%s)", object_key
             )
             raise
-        return plaintext if max_bytes is None else plaintext[:max_bytes]
