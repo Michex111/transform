@@ -364,10 +364,13 @@ from `03da842`, owner-authorized) on 2026-10-25 at 09:11Z.
 | API build | Render `dep-dbesila9lscs7380bfng`, trigger `deploy_hook`, commit `ca983498`, **live** 09:20:37Z (2m23s) |
 | SPA build | Render `dep-dbesili9lscs7380bglg`, commit `ca983498`, **live** 09:18:47Z (33s) |
 | Boot | 09:20:19 server start; `MCP transport: enabled at https://transform-api-7b3g.onrender.com/mcp`; no migration or traceback lines |
+| Docs follow-up | `e27f55c` (this report only): `Deploy` run **40180604692**, 4/4 success; Render `dep-dbespc7b9u1s73ar54d0` **live** 09:34:57Z. Production was re-checked on it — health 200, `/ready` ok, anonymous `/mcp/` 401, 42 MB `/mcp/` 413 |
 
 The deploy hook is not proof of a live build (§9 of the project's own traps), so
 every check below was made against the running service **after** Render reported
-`live`.
+`live`. Render always shows the *newest* commit as live, and a documentation-only
+commit re-deploys the identical image; the code commit named above is the one that
+carries the fixes.
 
 ### Post-deployment checks (production)
 
