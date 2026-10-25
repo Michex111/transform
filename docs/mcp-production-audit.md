@@ -6,8 +6,10 @@ surface), its 24 tools, and the production deployment at
 
 Method: repository review, a live local end-to-end client run against the real
 application stack, and production evidence from the Render control plane and
-access logs. Production was **read-only** for this audit; nothing was deployed,
-no production row was modified, and no credential or secret is reproduced here.
+access logs. Production was **read-only while the audit ran**; the fixed commit
+was deployed afterwards, with the owner's authorization, and verified against the
+running service (§10). No production row was modified, and no credential or
+secret is reproduced here.
 
 ---
 
@@ -39,12 +41,14 @@ agent-facing or security-relevant:
 * `save_file`'s description promised Drive-root semantics that are wrong for a
   folder-confined grant.
 
-**Production readiness: conditional.** The server is safe to expose and behaves
-correctly under a real client, but the production Gemini connector is currently
-**disconnected** after a refused refresh, and that failure is not yet explained
-by evidence (see §4 and §10). The diagnostic gap that hid it is fixed; the
-connector must be reconnected by the account owner before Gemini-side
-verification can be completed.
+**Production readiness: deployed and verified, with one open client issue.**
+The hardened commit `ca98349` is live on both Render services and the deployed
+artifact was verified against the running service (§10), including the decisive
+check that `/mcp` now refuses an oversized body. The one remaining gap is the
+**disconnected Gemini connector** (§4): the server side of the refresh flow is
+proven correct, the refusal is now logged with its cause, and reconnecting the
+app is an owner action in the browser. Gemini-driven tool invocation is therefore
+the only part of the matrix that is still unverified against production.
 
 ---
 
@@ -350,39 +354,66 @@ were deleted from the development database and bucket.
 
 ## 10. Deployment and post-deployment verification
 
-**Not deployed.** The changes are committed **locally**
-(`fix(mcp): audit and harden the production MCP surface`, the HEAD commit) and
-were **not pushed**. Production still runs `03da842`. No production data,
-permission, environment variable or deployment was changed during the audit.
+**Deployed and verified.** Commit `ca98349` was pushed to `main` (fast-forward
+from `03da842`, owner-authorized) on 2026-10-25 at 09:11Z.
 
-The deployment decision was left to the owner deliberately: the release process
-is CI-gated and `main` deploys production, auto-deploy is off, and no approval
-was available during the session. Shipping an unreviewed commit to `main` would
-have bypassed that gate.
+| Stage | Evidence |
+|---|---|
+| Push | `03da842..ca98349  HEAD -> main` (GitHub logged "Bypassed rule violations", the documented owner path) |
+| Workflow | `Deploy` run **40179583814** — 4/4 jobs success on `ca98349`: `verify / Backend (pytest)`, `verify / Frontend (lint, test, build)`, `Deploy API`, `Deploy SPA` |
+| API build | Render `dep-dbesila9lscs7380bfng`, trigger `deploy_hook`, commit `ca983498`, **live** 09:20:37Z (2m23s) |
+| SPA build | Render `dep-dbesili9lscs7380bglg`, commit `ca983498`, **live** 09:18:47Z (33s) |
+| Boot | 09:20:19 server start; `MCP transport: enabled at https://transform-api-7b3g.onrender.com/mcp`; no migration or traceback lines |
 
-To ship: run `ci.yml` (the deploy workflow re-runs it), trigger
-`.github/workflows/deploy.yml`, then:
+The deploy hook is not proof of a live build (§9 of the project's own traps), so
+every check below was made against the running service **after** Render reported
+`live`.
 
-1. confirm `/health` 200 and `/mcp` 401-with-challenge;
-2. connect Gemini and confirm `tools/list` shows 24 tools;
-3. exercise a read-only tool, a conversion + `save_file`, and a workspace
-   `create` + no-runtime error (expect a sentence);
-4. watch for `MCP token grant refused: error=… description=…` on the next
-   token failure — that line is the post-deploy diagnostic;
-5. re-check that a 42 MB `/mcp` request is 413.
+### Post-deployment checks (production)
+
+| Check | Result |
+|---|---|
+| `GET /health`, `/ready` | 200 / 200, `{"status":"ready","database":"ok"}` |
+| `POST /mcp/` anonymous | **401** + `WWW-Authenticate: Bearer … resource_metadata=…` |
+| **`POST /mcp/` with 42 MB body** | **413** `REQUEST_TOO_LARGE` — the decisive artifact proof: `/mcp` had *no* cap before this commit |
+| `POST /mcp/` with 39 MB body | **401**, not 413 — the cap is 40 MiB, not lower |
+| `POST /api/users/token` with 5 MB | 413 (the pre-existing API cap, unchanged) |
+| `/api/v1/mcp/{authorize,folder-access,connected-apps}` | 401 each (present and auth-gated) |
+| Protected-resource metadata | resource `…/mcp`, all 7 scopes |
+| OpenAPI | 119 paths (unchanged by this commit — the workspace routes came with `03da842`; the diff adds no route) |
+| SPA (`transform-to.com`, `/app/authorize`, `/mcp`) | 200 / 200 / 200 |
+| API access log | `POST /mcp/ 413 Content Too Large` recorded; no errors after the 401s |
+
+Because the 413 is produced by code added in this commit, its presence proves the
+running container is `ca98349`; every other fix in that image (workspace error
+contract, bounded download/decrypt, lazy tier, fail-closed binding) ships with it.
+
+### What this deployment does *not* prove
+
+* **No authenticated MCP tool call was made against production.** Minting an
+  OAuth grant requires the account owner's browser session, and after the
+  connector disconnect (§4) there was no live client to drive one. The 24-tool
+  matrix in §3 was executed against a live server running this same commit on the
+  development stack.
+* **Gemini remains disconnected** (§11). The new logging is live now, so the next
+  refresh refusal will be explained in the API log.
+
 
 ---
 
 ## 11. Unresolved, blocked, and next steps
 
-1. **D11 — Gemini connector.** Owner action: open the custom app, click
-   **Connect**, sign in to Transform and approve. After reconnecting, the next
-   refresh failure (if any) will name its cause in the API log (D1). Until then,
-   Gemini tool invocation is unverified.
-2. **Production tool invocation** was not performed: no production OAuth token
-   was available, and minting one requires the account owner's browser session.
-   Every tool was exercised against a live server running the same commit on the
-   development stack.
+1. **D11 — Gemini connector (the only blocking item).** Owner action: open the
+   custom app, click **Connect**, sign in to Transform and approve. The refusal
+   diagnostic is now live, so if the reconnect fails the API log will name the
+   cause (`MCP token grant refused: error=… description=…`, or
+   `MCP refresh token refused … reason=…`). Until then Gemini tool invocation is
+   the one part of the matrix unverified against production.
+2. **Production tool invocation** was not performed: no production OAuth grant
+   could be minted without the account owner's browser session (the same session
+   the disconnected connector needs). Every tool was exercised against a live
+   server running this exact commit on the development stack, and the deployed
+   container is proven to be this commit by the `/mcp` body-cap behaviour (§10).
 3. **Workspace execution** is unverified end to end because Docker is not
    available in this environment. The tool contract, scope enforcement and
    graceful no-runtime behaviour are verified; real file I/O and code execution
