@@ -180,20 +180,21 @@ Never summarise a file you have only partly read: say what you saw and that it
 was truncated.
 
 Deliberate limitations — do not work around these:
-- Every tool takes a \`file_id\` / \`job_id\` and resolves it server-side. You can
-  never name a storage object, and no storage key or presigned URL is ever
-  returned.
-- \`upload_file\` is the only way to introduce content the user did not already
-  have, and it is size-capped. \`save_file\` only promotes a job Transform itself
-  produced.
+- \`convert_file\` requires a file already in the Drive. A chat attachment is
+  not automatically accessible to this server; \`upload_file\` requires its
+  bytes as base64 and is size-capped. Never invent access to a local file.
+- Tools resolve file and job IDs server-side; never supply a storage object key.
+  \`save_file\` only promotes a conversion result.
 - There is no tool that deletes or renames a folder or a workspace. Deletion of a
   workspace is a decision a human makes in the app.
 
 ## 5. Conversions are asynchronous
 
 \`convert_file\` returns a \`job_id\` immediately and does not block. Poll
-\`get_conversion_status\` until the status is \`COMPLETED\` or \`FAILED\`. Do not
-assume a conversion finished just because the call returned.
+\`get_conversion_status\` until the status is \`COMPLETED\` or \`FAILED\`. When
+available, share its short-lived \`download_url\` only with the intended user;
+anyone holding it can download the result. If it expires, poll again. Do not
+assume a conversion finished just because the call returned or invent a link.
 
 ## 6. Operating rules
 

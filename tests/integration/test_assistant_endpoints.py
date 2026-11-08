@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -83,6 +84,7 @@ class FakeStorage:
 
     def __init__(self, objects: dict[str, bytes] | None = None) -> None:
         self.objects = objects or {}
+        self.read_calls: list[str] = []
 
     async def stat_object(self, object_key: str) -> dict | None:
         payload = self.objects.get(object_key)
@@ -91,6 +93,7 @@ class FakeStorage:
         return {"size": len(payload), "content_type": "application/octet-stream"}
 
     async def read_object_head(self, object_key: str, max_bytes: int = 4096) -> bytes:
+        self.read_calls.append(object_key)
         return self.objects.get(object_key, b"")[:max_bytes]
 
     async def remove_object(self, object_key: str) -> bool:
@@ -714,6 +717,8 @@ def test_chat_rejects_an_unowned_attachment(tmp_path) -> None:
         seed_files=[("secret.pdf", "objects/secret.pdf", b"%PDF-1.4", OTHER_USER_ID)],
     ) as harness:
         response = _chat(harness, "read it", file_ids=["objects/secret.pdf"])
+        assert harness.conversions.converted == []
+        assert harness.llm.calls == []
     assert response.status_code == 404
     assert response.json()["detail"]["code"] == "ATTACHMENT_NOT_FOUND"
 
@@ -721,6 +726,8 @@ def test_chat_rejects_an_unowned_attachment(tmp_path) -> None:
 def test_chat_rejects_an_unknown_attachment(tmp_path) -> None:
     with assistant_app(str(tmp_path / "attach-missing.db")) as harness:
         response = _chat(harness, "read it", file_ids=["objects/does-not-exist"])
+        assert harness.conversions.converted == []
+        assert harness.llm.calls == []
     assert response.status_code == 404
     assert response.json()["detail"]["code"] == "ATTACHMENT_NOT_FOUND"
 
@@ -1009,6 +1016,46 @@ def test_start_conversion_tool_enqueues_a_real_job(tmp_path) -> None:
     done = frames[-1][1]
     assert [artifact["type"] for artifact in done["artifacts"]] == ["file", "job"]
     assert done["content"] == "Started it."
+
+
+@pytest.mark.parametrize(
+    ("name", "target"),
+    [("bundle.zip", "tar"), ("book.epub", "pdf"), ("slides.pptx", "pdf")],
+)
+def test_attached_binary_file_is_converted_directly_and_emits_job_card(
+    tmp_path, name: str, target: str
+) -> None:
+    key = f"objects/{name}"
+    payload = b"PK\x03\x04\x00\xffbinary-content"
+    llm = FakeLlmPort(
+        [
+            tool_response("start_conversion", {"file_id": key, "target_format": target}),
+            text_response("The conversion has started."),
+        ]
+    )
+    with assistant_app(
+        str(tmp_path / "binary-attachment.db"),
+        seed_files=[(name, key, payload, USER_ID)],
+        llm=llm,
+    ) as harness:
+        response = _chat(harness, "Convert this file", file_ids=[key])
+        assert response.status_code == 200
+        frames = _frames(response)
+        assert harness.storage.objects[key] == payload
+        assert len(harness.storage.objects) == 1
+        assert harness.storage.read_calls == []
+        assert len(harness.conversions.converted) == 1
+        assert harness.conversions.converted[0]["object_key"] == key
+        assert harness.conversions.converted[0]["target_format"] == target
+
+    assert key in llm.calls[0][0][0].content
+    result = json.loads(llm.calls[1][0][-1].content)
+    assert result["status"] == "PENDING"
+    assert "Download" in result["note"]
+    artifacts = frames[-1][1]["artifacts"]
+    assert len(artifacts) == 1
+    assert artifacts[0]["type"] == "job"
+    assert artifacts[0]["id"] == result["job_id"]
 
 
 def test_api_key_chat_labels_the_conversion_as_api(tmp_path) -> None:

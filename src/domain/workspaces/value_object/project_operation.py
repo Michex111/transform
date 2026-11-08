@@ -43,7 +43,7 @@ MAX_ARG_LENGTH = 128
 #: an "add a dependency" field and reject everything else. Anything more exotic
 #: is a direct-URL requirement, which is exactly the supply-chain case this
 #: allow-list exists to refuse.
-_PACKAGE_SPEC = re.compile(
+_PACKAGE_SPEC: re.Pattern[str] = re.compile(
     r"^[A-Za-z0-9][A-Za-z0-9._+-]*"          # distribution name
     r"(?:\[[A-Za-z0-9._+-]+(?:,[A-Za-z0-9._+-]+)*\])?"  # [extras]
     r"(?:[<>=!~]=?[A-Za-z0-9.*+!_-]+)?"      # one version clause

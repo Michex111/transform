@@ -36,9 +36,11 @@ from mcp.server import MCPServer
 from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.types import ToolAnnotations
 
+from src.application.services.mcp.download_capability import DownloadUnavailable
 from src.application.services.mcp.toolbox import MCPToolBox, MCPToolContext
 from src.application.services.mcp.workspace_tools import MCPWorkspaceTools
 from src.domain.security.value_object.agent_scope import normalize_scopes
+from src.presentation.api.dependencies.mcp_download import create_mcp_download_link
 from src.presentation.mcp.activity import instrument_tool
 from src.presentation.mcp.dependencies import open_mcp_scope
 
@@ -57,7 +59,8 @@ Workflow for "convert my X and save the result":
   2. convert_file(file_id, target_format) — starts a background conversion and
      returns a job_id. The original file is never modified.
   3. get_conversion_status(job_id) — poll until status is COMPLETED or FAILED.
-  4. save_file(job_id) — save the converted result into the Drive.
+     When available, share its short-lived download_url with the user.
+  4. save_file(job_id) — save the result into the Drive if the user requests it.
 
 Other things you can do:
   - list_folders  — find a folder's id, then pass it as folder_id to list_files
@@ -111,6 +114,15 @@ Notes:
     Workspaces are not in the Drive, so that confinement does not apply to them.
   - Conversions are asynchronous: convert_file returns immediately. So is
     run_code — NEVER say code ran or succeeded until get_execution says so.
+  - This server cannot access a chat attachment just because it is visible to
+    the model. upload_file requires the actual bytes as base64 and creates a
+    Drive file; for other files, ask the user to upload them in Transform.
+    Never invent an attachment URL or claim a file was uploaded.
+  - A download_url is a short-lived bearer capability: anyone holding it can
+    download the result while it remains authorized. Share it only with the
+    intended user; if it expires, poll status again for a new one. The browser
+    needs JavaScript. If no link is returned, do not invent one or send an
+    OAuth bearer token in a URL.
   - A workspace's runtime may be created with no outbound network. When that is
     the case, PROJECT operations (`uv add`) are refused with an explanation.
     Plain scripts still work. Report the refusal rather than retrying.
@@ -479,7 +491,13 @@ def register_tools(mcp: MCPServer) -> None:
         Returns:
             {"ok": true, "job": {"job_id", "status", "progress",
             "source_format", "target_format", "input_file", "output_file",
-            "download_available", "error_message", "created_at"}}.
+            "download_available", "error_message", "created_at"}}. A completed
+            and authorized job may also return "download_url" and
+            "expires_in_seconds" at the top level. This link is a short-lived
+            bearer capability: share it only with the intended user. It opens
+            in a JavaScript-enabled browser without an OAuth token. Poll again
+            for a new link if it expires. A link can be unavailable even when
+            the job is completed, including when folder access cannot be proven.
             "status" is one of AWAITING_UPLOAD, PENDING, PROCESSING, COMPLETED,
             FAILED. When FAILED, "error_message" explains why.
 
@@ -487,7 +505,20 @@ def register_tools(mcp: MCPServer) -> None:
         user can be inspected.
         """
         async with _tool_scope() as (toolbox, ctx):
-            return await toolbox.get_conversion_status(ctx, job_id)
+            result = await toolbox.get_conversion_status(ctx, job_id)
+        if result.get("ok") and result.get("job", {}).get("status") == "COMPLETED":
+            token = get_access_token()
+            if token is None:
+                raise RuntimeError("MCP tool invoked without an authenticated access token.")
+            try:
+                link = await create_mcp_download_link(token.token, job_id)
+            except DownloadUnavailable:
+                # Preserve status visibility without turning a denied link into
+                # a folder or job-existence oracle.
+                result["download_note"] = "A download link is not available for this connection."
+            else:
+                result.update(link)
+        return result
 
     @mcp.tool(
         name="get_conversion_history",
@@ -575,8 +606,8 @@ def register_tools(mcp: MCPServer) -> None:
         """Start converting one of the user's files into another format.
 
         This does NOT modify or replace the original file, and it does not add
-        anything to the Drive by itself: it produces a conversion result that
-        can be downloaded or promoted into the Drive with save_file. The
+        anything to the Drive by itself. The result can be promoted into the
+        Drive with save_file; this tool does not return a download link. The
         conversion runs in the background.
 
         Args:
@@ -663,7 +694,9 @@ def register_tools(mcp: MCPServer) -> None:
         Generate the file's bytes, base64-encode them, and pass them here. This
         is how you save a document you authored (for example a report you
         generated as text) into the user's Drive, unlike save_file which only
-        promotes a conversion result.
+        promotes a conversion result. A chat attachment is not automatically
+        accessible to this server: this tool requires its actual bytes, not an
+        attachment reference or URL.
 
         Args:
             file_name: The name for the new file, including its extension

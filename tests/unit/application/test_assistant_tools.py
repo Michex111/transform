@@ -846,6 +846,19 @@ def test_start_conversion_enqueues_the_job_and_returns_an_artifact() -> None:
     assert conversions.converted[0]["object_key"] == "objects/report.pdf"
     assert conversions.converted[0]["tier"] == SubscriptionTier.FREE
     assert [artifact.type for artifact in artifacts] == ["job"]
+    assert artifacts[0].id == result["job_id"]
+    assert "Download" in result["note"]
+    assert "not saved to Drive automatically" in result["note"]
+
+
+def test_start_conversion_normalizes_the_owned_files_extension() -> None:
+    conversions = FakeConversionService()
+    box = _toolbox(
+        files=[_file("file-1", extension=".PDF")], conversion_service=conversions
+    )
+    result, _ = _run(box, "start_conversion", {"file_id": "file-1", "target_format": "docx"})
+    assert result["source_format"] == "pdf"
+    assert conversions.converted[0]["source_format"] == "pdf"
 
 
 def test_start_conversion_threads_the_request_origin_to_the_job() -> None:

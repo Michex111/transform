@@ -1,0 +1,51 @@
+# Workers-only stack for the cloud host (no local postgres/redis/minio/api).
+#
+#   docker compose -f deployment/docker/compose.cloud.yaml up -d --build
+#
+# Requires ../../.env and .env.production-workers (both gitignored). The converter and
+# workspace workers use the PRODUCTION database and unprefixed streams.
+#
+# The workspace worker is the only process allowed to reach the Docker daemon,
+# so it mounts the host socket and joins the host's `docker` group. Build the
+# runtime image it launches first: scripts/docker/build_runtime_image.sh
+# (or `docker build -f deployment/docker/runtime.Dockerfile -t transform-python-runtime:1.0.0-py3.14 .`).
+
+x-worker-build: &worker-build
+  context: ../../
+  dockerfile: deployment/docker/worker.Dockerfile
+
+x-prod-env: &prod-env
+  - ../../.env
+  - .env.production-workers
+
+services:
+  worker:
+    build: *worker-build
+    image: transform-worker
+    command: uv run python -m workers.converter_workers.main
+    env_file: *prod-env
+    restart: unless-stopped
+    stop_grace_period: 15m
+    deploy:
+      replicas: 3
+
+  worker-cleanup:
+    image: transform-worker
+    command: uv run python -m workers.cleanup_worker.main
+    # Mirrors compose.yaml: cleanup uses the base .env only, not the production override.
+    env_file:
+      - ../../.env
+    restart: unless-stopped
+    stop_grace_period: 5m
+
+  worker-workspace:
+    image: transform-worker
+    command: uv run python -m workers.workspace_worker.main
+    env_file: *prod-env
+    # Host docker GID, e.g. `DOCKER_GID=$(getent group docker | cut -d: -f3)`.
+    group_add:
+      - "${DOCKER_GID:?set DOCKER_GID to the host docker group id}"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+    stop_grace_period: 5m

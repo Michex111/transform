@@ -730,12 +730,14 @@ class AssistantToolBox:
             LlmToolSpec(
                 name="start_conversion",
                 description=(
-                    "Start converting one of the user's files to another format. "
+                    "Start converting an owned file, including an attached file "
+                    "whose file id is in the attachment context, to another format. "
+                    "No separate Drive upload is needed for an available file. "
                     "Only call this after list_supported_targets confirmed the "
                     "target, and only once per file the user asked for. The "
-                    "converted file is produced as a downloadable output; it is "
-                    "NOT filed into a drive folder automatically, so never "
-                    "promise to put the result in a folder."
+                    "conversion runs asynchronously; the conversion card offers "
+                    "Download after it completes. The output is NOT filed into a "
+                    "drive folder automatically, so never promise to put it there."
                 ),
                 parameters=_tool_schema(
                     {
@@ -1536,7 +1538,7 @@ class AssistantToolBox:
         target = target.lstrip(".").lower()
 
         row = await self._files.get_file(user_id, file_id)
-        source = row.file_extension or extension_from_filename(row.file_name)
+        source = normalize_extension(row.file_extension) or extension_from_filename(row.file_name)
         if not source:
             return {
                 "error": (
@@ -1592,6 +1594,10 @@ class AssistantToolBox:
             "source_format": source,
             "target_format": target,
             "status": str(job.status),
+            "note": (
+                "The conversion card tracks the job and offers Download when it "
+                "completes. The output is not saved to Drive automatically."
+            ),
         }
 
     async def _get_conversion_status(

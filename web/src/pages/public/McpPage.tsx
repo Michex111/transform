@@ -27,7 +27,7 @@ import { breadcrumbJsonLd, faqJsonLd } from "@/lib/seo";
  * The public MCP landing page.
  *
  * Grounded in the shipped implementation: a stateless Streamable-HTTP MCP
- * server at `<api>/mcp`, seven tools, four document scopes, and an OAuth 2.1
+ * server at `<api>/mcp`, document tools and scopes, and an OAuth 2.1
  * consent screen the user approves in the app. Scope names, tool names, and the
  * revocation behaviour are copied from the server, not invented.
  */
@@ -74,7 +74,8 @@ const WORKFLOW = [
   { actor: "Agent", text: "Calls list_files in your Transform Drive." },
   { actor: "MCP", text: "Transform finds resume_v3.docx and reports it back." },
   { actor: "Agent", text: "Calls convert_file with target_format: pdf." },
-  { actor: "MCP", text: "Transform converts it and saves the PDF." },
+  { actor: "MCP", text: "Transform converts it in the background." },
+  { actor: "Agent", text: "Checks the result, then calls save_file." },
   { actor: "Agent", text: "\"Done — resume_v3.pdf is in your Drive.\"" },
 ];
 

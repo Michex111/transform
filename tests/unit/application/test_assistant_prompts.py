@@ -71,3 +71,11 @@ def test_the_prompt_treats_an_attached_file_as_the_subject() -> None:
     assert "summarize_file" in flat
     # Follow-ups are covered: "that deck" must resolve to the earlier attachment.
     assert "earlier message attached" in flat
+
+
+def test_conversion_guidance_does_not_invent_external_attachment_access() -> None:
+    flat = " ".join(SYSTEM_PROMPT.lower().split())
+    assert "do not ask the user to upload it to drive again" in flat
+    assert "conversion card tracks progress and offers download" in flat
+    assert "never assume access to files local to another chat client" in flat
+    assert "never claim access to a file" in flat

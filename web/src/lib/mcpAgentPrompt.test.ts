@@ -82,6 +82,12 @@ describe("agent prompt completeness", () => {
     expect(MCP_AGENT_PROMPT).toContain("job_id");
   });
 
+  it("explains attachment access and safe download links", () => {
+    expect(MCP_AGENT_PROMPT).toMatch(/chat attachment is\s+not automatically accessible/);
+    expect(MCP_AGENT_PROMPT).toContain("download_url");
+    expect(MCP_AGENT_PROMPT).toContain("only with the intended user");
+  });
+
   it("warns about the POST redirect, which breaks clients that ignore 307s", () => {
     expect(MCP_AGENT_PROMPT).toContain("307");
     expect(MCP_AGENT_PROMPT).toMatch(/follow redirects on POST/i);

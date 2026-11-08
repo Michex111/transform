@@ -1377,3 +1377,99 @@ def test_every_capability_is_offered_by_the_settings_editor(tmp_path) -> None:
         "offline_access is a request marker, not a permission, and must not be "
         "offered as one in the settings editor"
     )
+
+
+def test_status_returns_redeemable_download_with_real_oauth(tmp_path, monkeypatch) -> None:
+    """Exercise tool, SDK auth context, capability service and browser endpoint."""
+    import io
+    from urllib.parse import urlsplit
+
+    import src.presentation.api.dependencies.mcp_download as download_deps
+    from src.domain.conversions.value_object.job_status import JobStatus
+    from sqlalchemy import select
+    from src.infrastructure.database.models import ConversionJobModel, MCPAgentGrantModel
+    from src.presentation.api.dependencies.service_dependencies import (
+        get_encryption_service, get_minio_download_adapter,
+    )
+
+    class Storage:
+        def get_object_stream(self, key):
+            assert key == "output/report.pdf"
+            return io.BytesIO(b"converted document")
+
+    with mcp_env(str(tmp_path / "mcp.db")) as env:
+        monkeypatch.setattr(download_deps, "get_session_factory", mcp_deps.get_session_factory)
+        api_main.app.dependency_overrides[get_minio_download_adapter] = lambda: Storage()
+        api_main.app.dependency_overrides[get_encryption_service] = lambda: None
+        user_id = env.seed_user()
+        client, token = _authorize_and_redeem(env)
+        _run(_insert(
+            env.db_path,
+            ConversionJobModel(
+                job_id="finished", user_id=user_id, status=JobStatus.COMPLETED,
+                source_format="docx", target_format="pdf", input_file="report.docx",
+                object_key="upload/report", output_file="output/report.pdf",
+            ),
+            ConversionJobModel(
+                job_id="pending", user_id=user_id, status=JobStatus.PENDING,
+                source_format="docx", target_format="pdf", input_file="report.docx",
+                object_key="upload/report",
+            ),
+            ConversionJobModel(
+                job_id="foreign", user_id=user_id + 1, status=JobStatus.COMPLETED,
+                source_format="docx", target_format="pdf", input_file="other.docx",
+                object_key="upload/other", output_file="output/other.pdf",
+            ),
+        ))
+        pending = env.call_tool(token, "get_conversion_status", {"job_id": "pending"})
+        assert pending["job"]["status"] == "PENDING"
+        assert "download_url" not in pending
+
+        foreign = env.call_tool(token, "get_conversion_status", {"job_id": "foreign"})
+        missing = env.call_tool(token, "get_conversion_status", {"job_id": "missing"})
+        assert foreign == missing
+        assert foreign["ok"] is False
+        assert "download_url" not in foreign
+
+        _, convert_only_token = _authorize_and_redeem(env, approved=["documents.convert"])
+        denied = env.call_tool(convert_only_token, "get_conversion_status", {"job_id": "finished"})
+        assert denied["ok"] is False
+        assert denied["required_scope"] == "documents.read"
+        assert "download_url" not in denied
+
+        result = env.call_tool(token, "get_conversion_status", {"job_id": "finished"})
+        assert result["job"]["status"] == "COMPLETED"
+        assert result["expires_in_seconds"] == 300
+        url = urlsplit(result["download_url"])
+        assert token not in result["download_url"]
+        response = env.client.post(
+            "/api/v1/mcp/download/redeem", data={"capability": url.fragment}
+        )
+        assert response.status_code == 200
+        assert response.content == b"converted document"
+        assert "attachment" in response.headers["content-disposition"]
+
+        # A restricted grant cannot issue or redeem a capability for a job
+        # whose source has no attributable file in its current subtree.
+        env.add_folder(user_id, "bound", "Allowed")
+
+        async def restrict_grant():
+            async with mcp_deps.get_session_factory()() as session:
+                grant = (await session.execute(
+                    select(MCPAgentGrantModel).where(
+                        MCPAgentGrantModel.client_id == client["client_id"]
+                    )
+                )).scalar_one()
+                grant.folder_access = "FOLDER"
+                grant.folder_id = "bound"
+                await session.commit()
+
+        _run(restrict_grant())
+        restricted = env.call_tool(token, "get_conversion_status", {"job_id": "finished"})
+        assert restricted["job"]["status"] == "COMPLETED"
+        assert "download_url" not in restricted
+        assert "not available" in restricted["download_note"]
+        response = env.client.post(
+            "/api/v1/mcp/download/redeem", data={"capability": url.fragment}
+        )
+        assert response.status_code == 404

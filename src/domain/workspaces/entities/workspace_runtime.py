@@ -94,12 +94,12 @@ class WorkspaceRuntime:
         """The provider confirmed the runtime is no longer running.
 
         ``provider_ref`` is deliberately **kept**. A stopped container still
-exists, and that is the whole reason an ordinary stop/start preserves the
-uv-managed environment: the next start restarts the same container rather
-than allocating a new one and reinstalling everything. A handle that has
-genuinely gone away is detected by the provider (``inspect_runtime`` returns
-``None``), which is a better test than guessing here — and the alternative,
-clearing it on every stop, silently turned every restart into a recreate.
+        exists, and that is the whole reason an ordinary stop/start preserves the
+        uv-managed environment: the next start restarts the same container rather
+        than allocating a new one and reinstalling everything. A handle that has
+        genuinely gone away is detected by the provider (``inspect_runtime`` returns
+        ``None``), which is a better test than guessing here — and the alternative,
+        clearing it on every stop, silently turned every restart into a recreate.
 
         Also reachable from ``FAILED``: a runtime whose provider resources have
         been cleaned up is stopped, and saying so is more truthful than leaving a

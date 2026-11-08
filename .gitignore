@@ -16,6 +16,7 @@ wheels/
 
 Agents.MD
 .vscode
+.idea/
 
 #user-specific folders
 scripts/docker/

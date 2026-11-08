@@ -160,7 +160,8 @@ Deliberate omissions:
 
 * **No way to name a storage object.** Every tool takes a `file_id` / `job_id`
   and resolves it server-side, so an agent can never name an object it was not
-  authorized to read. No storage key, bucket or presigned URL is ever returned.
+  authorized to read. No storage key or bucket is accepted. A completed job may
+  return a short-lived download capability, not a presigned storage GET.
 * **No folder or workspace mutation beyond creation.** An agent may create a
   folder or a workspace; renaming, moving and deleting either are not exposed.
   Deleting a workspace is a decision a human makes in the app.
@@ -193,6 +194,28 @@ The SDK has no tasks API, so conversions follow the product's existing model:
 `convert_file` returns a `job_id` immediately, and the agent polls
 `get_conversion_status` until the status is `COMPLETED` or `FAILED`. Nothing
 blocks on a Worker.
+
+Currently `convert_file` requires an existing Drive file. `upload_file` creates
+a Drive file and requires its actual bytes in a base64 tool argument; a chat
+attachment being visible to the model does not make its bytes available to this
+remote MCP server. If the client cannot provide the bytes, ask the user to
+upload the file in Transform. The server does not fetch arbitrary URLs.
+
+When an owned completed job is authorized for download, `get_conversion_status`
+also returns top-level `download_url` and `expires_in_seconds` (300). The link
+opens in a JavaScript-enabled browser and streams plaintext, including outputs
+encrypted at rest; the browser needs no OAuth token. It is a **bearer
+capability**: share it only with the intended user. Poll again for a fresh link
+if it expires. Token expiry, revocation, pausing, scope changes, and folder
+access are rechecked on redemption; an already-started stream is not cancelled.
+
+No link is returned for a pending or failed job or when authorization cannot
+be established. For a folder-restricted connection the source must resolve to
+an owned Drive file currently in the allowed subtree; staging jobs without
+durable folder attribution are denied. `download_available` on the existing
+job payload does not guarantee a link was issued. A user can also ask to
+`save_file` and download the result in Transform. Never construct a link from
+a storage key or put an OAuth token in a URL.
 
 ## Configuration
 

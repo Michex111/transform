@@ -54,6 +54,7 @@ from src.presentation.api.routers.v1 import (
     workspaces,
 )
 from src.presentation.api.routers.v1 import mcp as mcp_routes
+from src.presentation.api.routers.v1 import mcp_download
 from src.presentation.mcp.server import (
     MCP_MOUNT_PATH,
     LazyMCPMount,
@@ -391,6 +392,7 @@ app.include_router(developer.router)
 # and the user-facing consent + management endpoints under the versioned prefix.
 app.include_router(mcp_routes.well_known_router)
 app.include_router(mcp_routes.router)
+app.include_router(mcp_download.router)
 
 # ---------------------------------------------------------------------------
 # MCP transport

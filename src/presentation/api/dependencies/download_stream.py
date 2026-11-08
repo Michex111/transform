@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 async def iter_decrypted_object(
     storage: MinioFileStorageAdapter,
     key: str,
-    encryption_service: FileEncryptionService,
+    encryption_service: FileEncryptionService | None,
     user_id: str,
 ) -> AsyncGenerator[bytes]:
     """
@@ -49,7 +49,7 @@ async def iter_decrypted_object(
         # browser uploads are plaintext and must stream through untouched;
         # previously we always tried to decrypt them, which raised a bad-header
         # error and returned an empty body (0-byte downloads).
-        head = _read(_STREAM_HEADER_LEN)
+        head = await asyncio.to_thread(_read, _STREAM_HEADER_LEN)
         if head[:len(_STREAM_MAGIC)] != _STREAM_MAGIC:
             # Plaintext object: yield the bytes we already read, then stream the rest.
             if head:
@@ -60,6 +60,9 @@ async def iter_decrypted_object(
                     break
                 yield chunk
             return
+
+        if encryption_service is None:
+            raise RuntimeError("Encrypted output cannot be downloaded without an encryption key.")
 
         # Ciphertext: serve the already-read header bytes to the first
         # read_chunk call so the decrypt iterator gets the full header, then
