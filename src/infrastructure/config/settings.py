@@ -137,6 +137,32 @@ class Settings(BaseSettings):
     # server-side, so a localhost value could never resolve.
     STRIPE_CHECKOUT_LOGO_URL: str | None = None
 
+    # ------------------------------------------------------------------
+    # Payment grace period
+    # ------------------------------------------------------------------
+    # How long paid entitlement survives a failed recurring payment, measured in
+    # **business days** (Monday–Friday, excluding PAYMENT_GRACE_HOLIDAYS).
+    #
+    # The rule is a product requirement, not a Stripe setting: Stripe's own
+    # retry schedule is mutable in the dashboard and retries the *same* invoice,
+    # so it cannot express "at most three business days". The deadline is
+    # therefore computed once from the failing invoice's creation instant,
+    # persisted on ``user_subscriptions.grace_deadline_at``, and enforced at
+    # every entitlement read — never recomputed per delivery, which is what keeps
+    # it from being extended by retries or replays.
+    PAYMENT_GRACE_BUSINESS_DAYS: int = 3
+    #: IANA zone that defines what a "day" is. UTC by default: bills worldwide,
+    #: and Stripe timestamps are UTC.
+    PAYMENT_GRACE_TIMEZONE: str = "UTC"
+    #: Comma-separated ISO dates (``2026-12-25,2026-12-26``) that do not count as
+    #: business days. Empty by default — the requirement is weekends-only, and a
+    #: holiday calendar is opt-in rather than assumed.
+    PAYMENT_GRACE_HOLIDAYS: str = ""
+    #: How often the billing worker sweeps expired windows. This is a *ceiling*
+    #: on how quickly the stored state converges; entitlement itself is enforced
+    #: on read, so a stopped worker cannot extend the window.
+    PAYMENT_GRACE_SWEEP_INTERVAL_SECONDS: int = 300
+
     # Rate Limiting (requests per minute)
     RATE_LIMIT_GUEST: int = 10
     RATE_LIMIT_FREE: int = 30
@@ -1115,6 +1141,42 @@ class Settings(BaseSettings):
             raise ValueError(
                 f"Unsupported STRIPE_CHECKOUT_UI_MODE {self.STRIPE_CHECKOUT_UI_MODE!r}; "
                 f"expected one of {sorted(_SUPPORTED_CHECKOUT_UI_MODES)}."
+            )
+
+        # Payment grace period. Every one of these is load-bearing for the
+        # "at most three business days" guarantee, and a bad value here fails
+        # open (longer paid access), so each is rejected at boot rather than
+        # defaulted.
+        if self.PAYMENT_GRACE_BUSINESS_DAYS < 0:
+            raise RuntimeError("PAYMENT_GRACE_BUSINESS_DAYS cannot be negative.")
+        if self.PAYMENT_GRACE_SWEEP_INTERVAL_SECONDS <= 0:
+            raise RuntimeError("PAYMENT_GRACE_SWEEP_INTERVAL_SECONDS must be positive.")
+        try:
+            from zoneinfo import ZoneInfo
+
+            ZoneInfo(self.PAYMENT_GRACE_TIMEZONE)
+        except Exception as exc:  # ZoneInfoNotFoundError / ValueError
+            raise RuntimeError(
+                f"Unsupported PAYMENT_GRACE_TIMEZONE {self.PAYMENT_GRACE_TIMEZONE!r}: "
+                f"{exc}"
+            ) from exc
+        try:
+            from src.domain.subscriptions.policies.payment_grace import parse_holidays
+
+            parse_holidays(self.PAYMENT_GRACE_HOLIDAYS)
+        except ValueError as exc:
+            raise RuntimeError(
+                "PAYMENT_GRACE_HOLIDAYS must be a comma-separated list of ISO dates "
+                f"(e.g. 2026-12-25); got {self.PAYMENT_GRACE_HOLIDAYS!r}: {exc}"
+            ) from exc
+        # A configured Stripe key with no webhook secret is a silent-money-loss
+        # configuration: checkout succeeds and the customer is charged, but
+        # every event answers 501, so the tier is never granted. Fail at boot.
+        if self.STRIPE_SECRET_KEY and not self.STRIPE_WEBHOOK_SECRET:
+            raise RuntimeError(
+                "STRIPE_SECRET_KEY is configured but STRIPE_WEBHOOK_SECRET is not. "
+                "Checkout would charge customers while every webhook is rejected, "
+                "so no subscription would ever activate."
             )
 
         # AI assistant. Same contract as email/SMS: an explicit choice is

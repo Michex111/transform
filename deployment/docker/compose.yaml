@@ -127,6 +127,26 @@ services:
     # an interrupted one is not lost work.
     stop_grace_period: 5m
 
+  worker-billing:
+    build:
+      context: ../../
+      dockerfile: deployment/docker/worker.Dockerfile
+    container_name: transform-billing
+    command: uv run python -m workers.billing_worker.main
+    # Unlike cleanup, this worker changes ENTITLEMENT, so it must run against
+    # the same database the production API reads. Same override as `worker`
+    # above: `.env` first, then the production file, later entries winning.
+    # Pointing it at `.env` alone would revoke subscriptions in the dev database
+    # and never touch production.
+    env_file:
+      - ../../.env
+      - .env.production-workers
+    networks:
+      - converter-net
+    restart: unless-stopped
+    # A sweep is one short transaction; 30s is ample and keeps restarts prompt.
+    stop_grace_period: 30s
+
   postgres:
     image: postgres:15-alpine
     container_name: transform-postgres

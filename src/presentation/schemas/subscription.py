@@ -20,6 +20,14 @@ class SubscriptionStatus(StrEnum):
     EXPIRED = "EXPIRED"
     CANCELLED = "CANCELLED"
     TRIAL = "TRIAL"
+    #: A renewal payment failed and the customer is inside the grace window.
+    #: Paid features still work, but the window is bounded and the client should
+    #: prompt for a new payment method.
+    PAST_DUE = "PAST_DUE"
+    #: The grace window closed without payment. Paid entitlement is removed
+    #: locally; the Stripe subscription is deliberately NOT cancelled, so paying
+    #: can restore the plan.
+    GRACE_EXPIRED = "GRACE_EXPIRED"
 
 
 class CheckoutUiMode(StrEnum):
@@ -212,6 +220,10 @@ class SubscriptionStatusResponse(BaseModel):
     # where no cancellation is scheduled — see the pre-existing meaning: the
     # subscription renews.
     cancel_at_period_end: bool = False
+    #: Deadline of a payment-recovery window, when one is open. Exposed so the
+    #: SPA can show "update your card by <date>" without guessing, and so the
+    #: enforcement is auditable from the client side as well as the server.
+    grace_deadline_at: datetime | None = None
 
 
 class CancelSubscriptionResponse(BaseModel):

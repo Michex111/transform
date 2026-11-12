@@ -27,6 +27,7 @@ from src.infrastructure.database.models.telemetry import (
     McpToolInvocationModel,
 )
 from src.infrastructure.database.models.user import UserModel
+from src.infrastructure.database.models.webhook_event import StripeWebhookEventModel
 from src.infrastructure.database.models.workflow import SavedWorkflowModel
 from src.infrastructure.database.models.workspace import (
     ExecutionModel,
@@ -50,6 +51,7 @@ __all__ = [
     "McpToolInvocationModel",
     "RuntimeImageRevisionModel",
     "SavedWorkflowModel",
+    "StripeWebhookEventModel",
     "MonthlyCreditModel",
     "UserFileModel",
     "UserFolderModel",

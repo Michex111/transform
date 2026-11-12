@@ -38,6 +38,19 @@ services:
     restart: unless-stopped
     stop_grace_period: 5m
 
+  worker-billing:
+    image: transform-worker
+    command: uv run python -m workers.billing_worker.main
+    # Entitlement enforcement runs against the PRODUCTION database, so this
+    # service takes the production override (unlike cleanup).
+    env_file: *prod-env
+    restart: unless-stopped
+    stop_grace_period: 30s
+    deploy:
+      # One sweeper is enough: the advisory lock makes extra replicas harmless
+      # but wasteful.
+      replicas: 1
+
   worker-workspace:
     image: transform-worker
     command: uv run python -m workers.workspace_worker.main

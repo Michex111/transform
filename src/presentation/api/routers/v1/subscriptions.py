@@ -16,7 +16,11 @@ from src.domain.assistant.policies.assistant_policy import (
 )
 from src.domain.subscriptions.entities.credit import Credit
 from src.domain.subscriptions.policies.tier_policy import TierPolicy
-from src.domain.subscriptions.value_object.credit_period import current_period_key
+from src.domain.subscriptions.value_object.credit_period import (
+    current_period_key,
+    ensure_utc,
+)
+from src.domain.subscriptions.value_object.payment_state import PaymentState
 from src.domain.subscriptions.value_object.tier import SubscriptionTier as DomainTier
 from src.infrastructure.adapters.payment.stripe_service import SavedPaymentMethod, StripeService
 from src.infrastructure.adapters.repository.sql_credit_repo import SQLCreditRepository
@@ -170,6 +174,28 @@ async def create_checkout_session(
     row = await subscription_repo.get_subscription_row(current_user.id)
     customer_id = row.stripe_customer_id if row else None
 
+    # Refuse to start a SECOND subscription for an account that already has a
+    # paid one. Checkout always creates a new subscription, so a customer who
+    # used it to "switch" plan would be billed twice — and because the local
+    # schema models one subscription per user, cancelling either one would drop
+    # the account to FREE while the other kept charging. Plan switches belong on
+    # /change-plan, which modifies the existing subscription in place.
+    #
+    # The check uses the ENFORCED tier, not the stored one: an account whose
+    # grace window has closed has already lost paid access and must be allowed
+    # to start paying again. The query is skipped entirely for the common case
+    # (no subscription id), so a first-time buyer pays no extra cost.
+    if row is not None and row.stripe_subscription_id:
+        effective_tier = await subscription_repo.get_tier_for_user(current_user.id)
+        if effective_tier != DomainTier.FREE:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "You already have an active subscription. Use the change-plan "
+                    "endpoint to switch plans instead of starting a second one."
+                ),
+            )
+
     # Resolve an optional promotion code BEFORE creating anything. A blank or
     # whitespace-only value is treated as absent (no lookup at all); a
     # non-blank code that resolves to nothing is rejected, because silently
@@ -253,7 +279,11 @@ async def change_plan(
         )
 
     row = await subscription_repo.get_subscription_row(current_user.id)
-    if row is None or not row.stripe_subscription_id:
+    # Both conditions matter: ``stripe_subscription_id`` alone survives a
+    # cancellation (it is needed for recovery and reconciliation), so using it
+    # as the "has a subscription" test sent a FREE ex-customer into a Stripe
+    # update against a cancelled subscription, which raised and returned 500.
+    if row is None or row.tier == DomainTier.FREE or not row.stripe_subscription_id:
         # A FREE user has no subscription to modify; they must start one via
         # checkout. This is the exact case where using checkout is correct.
         raise HTTPException(
@@ -649,19 +679,36 @@ async def get_subscription_status(
     subscription_repo: Annotated[SQLSubscriptionRepository, Depends(get_subscription_repository)],
     stripe_service: Annotated[StripeService, Depends(get_stripe_service)],
 ) -> SubscriptionStatusResponse:
-    """Get the current user's subscription status."""
+    """Get the current user's subscription and payment-recovery status.
+
+    The status is derived from **persisted lifecycle state**, not reported as
+    ``ACTIVE`` unconditionally. Previously every Stripe state except
+    ``canceled`` — including ``past_due`` and ``unpaid`` — was reported as
+    ``ACTIVE``, so a delinquent subscription looked healthy in the UI and the
+    response was also ``ACTIVE`` whenever the Stripe fetch merely failed.
+    """
     row = await subscription_repo.get_subscription_row(current_user.id)
-    if row is None or row.tier == DomainTier.FREE:
+    if row is None:
         return SubscriptionStatusResponse(
             tier=SubscriptionTier.FREE,
             status=SubscriptionStatus.ACTIVE,
             cancel_at_period_end=False,
         )
 
+    now = datetime.now(UTC)
+    grace_deadline = ensure_utc(row.grace_deadline_at)
+    payment_state = row.payment_state or PaymentState.OK.value
+    stripe_status = (row.stripe_status or "").lower()
+
     current_period_start: datetime | None = None
-    current_period_end: datetime | None = None
-    cancel_at_period_end = False
-    if row.stripe_subscription_id:
+    current_period_end = ensure_utc(row.current_period_end)
+    cancel_at_period_end = row.cancel_at_period_end
+
+    # Persisted period data is the primary source so this endpoint works without
+    # a Stripe round-trip. Refresh from Stripe only when nothing is stored (a row
+    # created before the period columns existed), which keeps a network
+    # dependency off the hot path.
+    if row.stripe_subscription_id and current_period_end is None:
         remote = await stripe_service.get_subscription(row.stripe_subscription_id)
         if remote:
             # Use .get() with a fallback so older Stripe mocks / partial payloads
@@ -672,25 +719,58 @@ async def get_subscription_status(
                 current_period_start = datetime.fromtimestamp(period_start_ts, tz=UTC)
             if period_end_ts is not None:
                 current_period_end = datetime.fromtimestamp(period_end_ts, tz=UTC)
-            # A scheduled (not yet effective) cancellation: the subscription is
-            # still active but will lapse at the period end. Reading it from the
-            # remote subscription keeps Stripe the source of truth.
             cancel_at_period_end = bool(remote.get("cancel_at_period_end", False))
-            if remote.get("status") == "canceled":
-                return SubscriptionStatusResponse(
-                    tier=domain_tier_to_api(row.tier),
-                    status=SubscriptionStatus.CANCELLED,
-                    stripe_subscription_id=row.stripe_subscription_id,
-                    cancel_at_period_end=cancel_at_period_end,
-                )
+            if remote.get("status"):
+                stripe_status = str(remote["status"]).lower()
+
+    common = {
+        "current_period_start": current_period_start,
+        "current_period_end": current_period_end,
+        "stripe_subscription_id": row.stripe_subscription_id,
+        "cancel_at_period_end": cancel_at_period_end,
+    }
+
+    grace_expired = payment_state == PaymentState.REVOKED.value or (
+        payment_state == PaymentState.GRACE.value
+        and grace_deadline is not None
+        and now >= grace_deadline
+    )
+    if grace_expired:
+        return SubscriptionStatusResponse(
+            tier=SubscriptionTier.FREE,
+            status=SubscriptionStatus.GRACE_EXPIRED,
+            grace_deadline_at=grace_deadline,
+            **common,
+        )
+
+    if payment_state == PaymentState.GRACE.value:
+        # Inside the window: the paid plan still works, but the customer must be
+        # told to fix payment before the deadline.
+        return SubscriptionStatusResponse(
+            tier=domain_tier_to_api(row.tier),
+            status=SubscriptionStatus.PAST_DUE,
+            grace_deadline_at=grace_deadline,
+            **common,
+        )
+
+    if stripe_status == "canceled":
+        return SubscriptionStatusResponse(
+            tier=domain_tier_to_api(row.tier),
+            status=SubscriptionStatus.CANCELLED,
+            **common,
+        )
+
+    if row.tier == DomainTier.FREE:
+        return SubscriptionStatusResponse(
+            tier=SubscriptionTier.FREE,
+            status=SubscriptionStatus.ACTIVE,
+            **common,
+        )
 
     return SubscriptionStatusResponse(
         tier=domain_tier_to_api(row.tier),
         status=SubscriptionStatus.ACTIVE,
-        current_period_start=current_period_start,
-        current_period_end=current_period_end,
-        stripe_subscription_id=row.stripe_subscription_id,
-        cancel_at_period_end=cancel_at_period_end,
+        **common,
     )
 
 

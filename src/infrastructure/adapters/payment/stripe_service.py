@@ -83,6 +83,28 @@ def _stripe_list(obj: Any) -> list[Any]:
     return list(data) if isinstance(data, list) else []
 
 
+def _subscription_period(subscription: Any, key: str) -> Any:
+    """Read ``current_period_start``/``current_period_end`` from a subscription.
+
+    Stripe moved both fields **off** the Subscription object and onto its
+    ``SubscriptionItem`` in the 2025+ API versions (verified against the
+    installed SDK: ``stripe/_subscription_item.py`` declares
+    ``current_period_end``; ``stripe/_subscription.py`` does not). Reading the
+    subscription-level attribute therefore yields ``None`` on every real
+    payload — which silently disabled carry-over expiry (``previous_period_end``
+    was always ``None``) and blanked the period dates on the status endpoint.
+
+    The subscription-level value is still checked last so an older API version,
+    or a test double that only models the flat shape, keeps working.
+    """
+    items = _stripe_list(_stripe_get(subscription, "items"))
+    if items:
+        value = _stripe_get(items[0], key)
+        if value is not None:
+            return value
+    return _stripe_get(subscription, key)
+
+
 def _price_id(price: Any) -> str | None:
     """The **id** of a price, whether Stripe sent the id or the expanded object.
 
@@ -888,7 +910,7 @@ class StripeService:
                 client.v1.subscriptions.retrieve, subscription_id
             )
             previous_period_end = _unix_to_datetime(
-                _stripe_get(subscription, "current_period_end")
+                _subscription_period(subscription, "current_period_end")
             )
 
             if is_upgrade:
@@ -899,6 +921,12 @@ class StripeService:
                     # than folding it into the next renewal, so the customer
                     # sees exactly what the mid-cycle upgrade costs.
                     "proration_behavior": "always_invoice",
+                    # Without this, Stripe's default (``allow_incomplete``)
+                    # applies the upgrade even when the proration charge fails.
+                    # The caller would then grant the higher tier and its full
+                    # credit grant for a payment that was never collected.
+                    # Failing the request instead means no local write happens.
+                    "payment_behavior": "error_if_incomplete",
                     "metadata": metadata,
                 }
                 await asyncio.to_thread(
@@ -1057,8 +1085,15 @@ class StripeService:
             )
             return {
                 "status": subscription.status,
-                "current_period_start": getattr(subscription, "current_period_start", None),
-                "current_period_end": getattr(subscription, "current_period_end", None),
+                # Read from the subscription ITEM: the subscription-level
+                # fields are ``None`` in this API version, which made every
+                # period date on the status endpoint silently blank.
+                "current_period_start": _subscription_period(
+                    subscription, "current_period_start"
+                ),
+                "current_period_end": _subscription_period(
+                    subscription, "current_period_end"
+                ),
                 "cancel_at_period_end": subscription.cancel_at_period_end,
             }
         except Exception as e:

@@ -92,6 +92,14 @@ class _FakeSubscriptionRepo:
             tier=self._tier,
             stripe_subscription_id=self._subscription_id,
             stripe_customer_id=self._customer_id,
+            # Lifecycle columns added with the payment-grace work. Defaults
+            # describe a paid, current subscription; tests that exercise grace
+            # override them.
+            payment_state="OK",
+            grace_deadline_at=None,
+            stripe_status="active",
+            current_period_end=None,
+            cancel_at_period_end=False,
         )
 
 
