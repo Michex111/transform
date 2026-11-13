@@ -37,6 +37,7 @@ from src.infrastructure.telemetry.ingestion import get_telemetry_ingestion
 from src.presentation.api.middleware.api_telemetry import api_telemetry_middleware
 from src.presentation.api.middleware.rate_limit import build_rate_limit_middleware
 from src.presentation.api.middleware.security_headers import SecurityHeadersMiddleware
+from src.presentation.api.middleware.mcp_upload_cors import MCPUploadCORSMiddleware
 from src.presentation.api.middleware.body_limit import RequestBodyLimitMiddleware
 from src.presentation.api.validation_errors import validation_error_detail
 from src.presentation.api.routers.v1 import (
@@ -57,7 +58,7 @@ from src.presentation.api.routers.v1 import (
     workspaces,
 )
 from src.presentation.api.routers.v1 import mcp as mcp_routes
-from src.presentation.api.routers.v1 import mcp_download
+from src.presentation.api.routers.v1 import mcp_download, mcp_upload
 from src.presentation.mcp.server import (
     MCP_MOUNT_PATH,
     LazyMCPMount,
@@ -116,13 +117,22 @@ TELEMETRY_WRITTEN = Gauge(
 
 
 async def _mcp_housekeeping_loop() -> None:
-    """Periodically purge expired MCP codes and tokens.
+    """Periodically purge expired MCP codes, tokens and upload intents.
 
     Jittered so a fleet of instances does not sweep on the same second. Every
     failure is logged and retried on the next tick: housekeeping is never
     allowed to take the API down.
+
+    Upload intents are purged here for the same reason as the OAuth tables: an
+    unused or abandoned link would otherwise keep a row (and a capability that
+    is still inside its freshness window) forever. Completed intents are kept —
+    see ``SQLMCPUploadIntentRepository.delete_expired`` — because they are the
+    record connecting an upload to its Drive file and conversion job.
     """
     from src.infrastructure.adapters.repository.sql_mcp_repo import SQLMCPRepository
+    from src.infrastructure.adapters.repository.sql_mcp_upload_intent_repo import (
+        SQLMCPUploadIntentRepository,
+    )
     from src.infrastructure.database.session import get_session_factory
 
     interval = max(60, settings.MCP_HOUSEKEEPING_INTERVAL_SECONDS)
@@ -130,7 +140,9 @@ async def _mcp_housekeeping_loop() -> None:
         await asyncio.sleep(interval * (0.9 + random.random() * 0.2))
         try:
             async with get_session_factory()() as session:
-                await SQLMCPRepository(session).delete_expired(datetime.now(UTC))
+                now = datetime.now(UTC)
+                await SQLMCPRepository(session).delete_expired(now)
+                await SQLMCPUploadIntentRepository(session).delete_expired(now)
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001 — housekeeping must never crash the app
@@ -255,6 +267,12 @@ app.add_middleware(RequestBodyLimitMiddleware)
 
 # Security hardening headers
 app.add_middleware(SecurityHeadersMiddleware)
+
+# Open exactly one path (the MCP attachment upload) to any origin, with no
+# credentials. Added LAST so it runs OUTERMOST: it must be able to replace the
+# app-wide CORS middleware's origin header (a second Allow-Origin value is
+# rejected by browsers) and to answer its own preflights.
+app.add_middleware(MCPUploadCORSMiddleware)
 
 
 @app.exception_handler(RequestValidationError)
@@ -432,6 +450,7 @@ app.include_router(developer.router)
 app.include_router(mcp_routes.well_known_router)
 app.include_router(mcp_routes.router)
 app.include_router(mcp_download.router)
+app.include_router(mcp_upload.router)
 
 # ---------------------------------------------------------------------------
 # MCP transport

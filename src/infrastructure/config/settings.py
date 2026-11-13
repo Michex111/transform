@@ -485,6 +485,37 @@ class Settings(BaseSettings):
     #: was unbounded — an anonymous-looking client could make the server buffer
     #: an arbitrarily large body before the tool ever saw it.
     MCP_MAX_REQUEST_BODY_BYTES: int = 40 * 1024 * 1024
+    #: Largest file an MCP client may deliver through an upload link, in bytes.
+    #:
+    #: A SEPARATE channel from ``upload_file``: a chat attachment's real bytes
+    #: arrive on ``/api/v1/mcp/upload`` as a raw stream, not base64 inside
+    #: JSON-RPC. The effective ceiling is ``min(this, the caller's tier cap)``, so
+    #: raising this never widens a FREE account's per-file limit — it only lets a
+    #: paid tier reach its own cap through this path.
+    MCP_ATTACHMENT_MAX_BYTES: int = 100 * 1024 * 1024  # 100 MiB
+    #: How long an upload link — and the intent behind it — stays usable.
+    #:
+    #: Short by design: the capability is a bearer credential for one upload, and
+    #: a pending link that outlives the task is only a liability. The intent is
+    #: not bound to the access token, so an hourly token refresh does not kill a
+    #: pending upload.
+    MCP_UPLOAD_LINK_TTL_SECONDS: int = 900  # 15 minutes
+    #: Requests per minute for the upload endpoint, keyed by capability
+    #: fingerprint (falling back to the client IP when no capability is present).
+    #:
+    #: NOT the anonymous per-IP bucket: hosted code sandboxes (Claude, ChatGPT
+    #: and similar) share a small pool of egress addresses, so an IP-keyed bucket
+    #: would throttle unrelated users together. The capability is the right unit
+    #: — one link, one uploader.
+    MCP_UPLOAD_RATE_LIMIT: int = 60
+    #: Whether ``import_file_from_url`` is available.
+    #:
+    #: OFF by default, deliberately. The tool makes the SERVER fetch a URL the
+    #: model chose, which is a server-side request forgery surface. The fetcher
+    #: validates the scheme, resolves DNS and refuses private, loopback,
+    #: link-local, multicast, reserved and cloud-metadata ranges on every hop, but
+    #: an operator should still opt in explicitly.
+    MCP_URL_IMPORT_ENABLED: bool = False
 
     # ------------------------------------------------------------------
     # Upload size limits (bytes)
@@ -896,9 +927,16 @@ class Settings(BaseSettings):
             ("MCP_ACCESS_TOKEN_TTL_MINUTES", self.MCP_ACCESS_TOKEN_TTL_MINUTES),
             ("MCP_REFRESH_TOKEN_TTL_DAYS", self.MCP_REFRESH_TOKEN_TTL_DAYS),
             ("MCP_AUTHORIZATION_CODE_TTL_MINUTES", self.MCP_AUTHORIZATION_CODE_TTL_MINUTES),
+            ("MCP_ATTACHMENT_MAX_BYTES", self.MCP_ATTACHMENT_MAX_BYTES),
+            ("MCP_UPLOAD_LINK_TTL_SECONDS", self.MCP_UPLOAD_LINK_TTL_SECONDS),
+            ("MCP_UPLOAD_RATE_LIMIT", self.MCP_UPLOAD_RATE_LIMIT),
         ):
             if value <= 0:
                 raise RuntimeError(f"{label} must be positive.")
+        if self.MCP_ATTACHMENT_MAX_BYTES < 1024:
+            # A cap below 1 KiB would refuse every real file; a typo that made it
+            # 0 is already caught above, but this makes the intent explicit.
+            raise RuntimeError("MCP_ATTACHMENT_MAX_BYTES must be at least 1024 bytes.")
         if not self.MCP_CONSENT_PATH.startswith("/"):
             raise RuntimeError("MCP_CONSENT_PATH must be an absolute SPA path (e.g. /app/authorize).")
         resource = self.mcp_resource_url()

@@ -33,6 +33,8 @@ authorization rule.
 | `/.well-known/oauth-authorization-server/mcp` | RFC 8414 metadata at the *inserted* path, so either client derivation resolves. |
 | `/api/v1/mcp/authorize` | Consent data (GET) and decision (POST). Authenticated. |
 | `/api/v1/mcp/connected-apps` | List / revoke connected applications. Authenticated. |
+| `/api/v1/mcp/upload` | Single-use attachment upload (`PUT` raw bytes or `POST` multipart) and the browser page. The capability is the authority. |
+| `/api/v1/mcp/upload/info` | Allowed size and type for a link, without consuming it. |
 
 ## Authorization model
 
@@ -120,7 +122,7 @@ cold hard load (see `vite-plugins/spa-route-stubs.ts`).
 
 ## Tools
 
-32 tools in two groups. `tools/list` is authoritative for schemas.
+35 tools in two groups. `tools/list` is authoritative for schemas.
 
 **Documents** — gated by `documents.*`:
 
@@ -140,6 +142,9 @@ cold hard load (see `vite-plugins/spa-route-stubs.ts`).
 | `convert_file` | convert | creates a job | the original is never modified |
 | `save_file` | write | creates a file | only promotes a job Transform itself produced |
 | `upload_file` | write | creates a file | `content_text` (UTF-8) or `content_base64`; size-capped |
+| `create_upload_link` | write | authorizes an upload | single-use link for an attachment's real bytes; not an upload itself |
+| `get_upload_status` | read | no | whether that upload landed, and the job it started |
+| `import_file_from_url` | write | creates a file | https-only server-side fetch; disabled unless `MCP_URL_IMPORT_ENABLED` |
 | `create_folder` | write | creates a folder | the only structural change an agent may make |
 | `delete_file` | delete | deletes | irreversible; needs an explicit grant |
 
@@ -205,6 +210,74 @@ are decoded directly; container formats are extracted through the same converter
 functions the workers use, in-process, creating no job and charging no credits.
 Results are cached per `(extension, sha256(content))`, and pages are sized by
 characters (`MCP_TEXT_PAGE_CHARS`).
+
+## Attachments: getting the real bytes to the server
+
+An MCP client's chat attachment never reaches this server. The model is shown
+extracted text and image previews, not the original bytes, so it cannot rebuild
+a PDF, DOCX, XLSX or image for `upload_file(content_base64)`. Text attachments
+already work through `upload_file(content_text)`.
+
+The byte path is a **short-lived, single-use capability**:
+
+1. The agent calls `create_upload_link(file_name, size_bytes?, folder_id?,
+   target_format?)`. This authorizes one upload and returns `upload_url`,
+   `upload_header_name` (`X-Transform-Upload`), `upload_capability`,
+   `curl_command` and `upload_page_url`. It does not upload anything.
+2. The client's code sandbox runs `curl_command` with the real file, or the user
+   opens `upload_page_url` and drops the same file into it.
+3. The agent polls `get_upload_status(upload_id)` until `status` is `COMPLETED`.
+   When `target_format` was requested, the same response carries the conversion
+   `job_id`, and a completed job yields the usual short-lived `download_url`.
+
+The capability is bound to the **grant**, not to the access token, so an hourly
+token refresh does not kill a pending upload. Every redemption re-reads the
+grant: a revoked, paused or narrowed connection, or one re-bound to a folder
+that does not contain the destination, refuses with one generic sentence
+(`This upload link is unavailable or has expired.`) so the link is not an oracle.
+Replay is refused because redemption is a single conditional
+`UPDATE … WHERE used_at IS NULL`.
+
+Nothing about the normal pipeline is weakened. The bytes go through
+`create_upload` → storage write → `verify_upload_completion` →
+`FileService.complete_upload`, so the tier per-file cap, the account quota, the
+extension and magic-byte checks, and folder ownership all apply. The effective
+ceiling is `min(tier cap, MCP_ATTACHMENT_MAX_BYTES)`.
+
+The capability is never in a query string: `curl` sends it in the
+`X-Transform-Upload` header, and the browser page reads it from the URL
+**fragment** (which browsers do not send to servers) and clears it from history
+before uploading. Only a 12-character SHA-256 fingerprint is ever logged.
+
+### Settings
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `MCP_ATTACHMENT_MAX_BYTES` | 100 MiB | Largest file the MCP path accepts, before the tier cap |
+| `MCP_UPLOAD_LINK_TTL_SECONDS` | 900 | How long a link (and its intent) stays usable |
+| `MCP_UPLOAD_RATE_LIMIT` | 60 | Requests/minute per capability fingerprint (fallback IP) |
+| `MCP_URL_IMPORT_ENABLED` | false | Whether `import_file_from_url` is available |
+
+`/api/v1/mcp/upload` is exempt from `MAX_REQUEST_BODY_BYTES` because the body is
+the file; it enforces its own streamed ceiling and keeps a `Content-Length` fast
+path against `MCP_ATTACHMENT_MAX_BYTES`. CORS is open on that one path only
+(any origin, no credentials — the capability is the whole authority), and the
+rate limit is keyed by capability rather than the anonymous IP bucket, because
+hosted code sandboxes share egress addresses.
+
+### Client setup note
+
+A sandbox that cannot reach the API's domain will report a network/proxy error
+from `curl`. That is a client-side network policy, not a broken link: allow the
+API domain in the client's code-execution network settings, or use
+`upload_page_url` instead. The agent must not claim an upload happened until
+`get_upload_status` says `COMPLETED`.
+
+`import_file_from_url` is off by default. When enabled it fetches `https:` only,
+resolves DNS and refuses private, loopback, link-local, multicast, reserved and
+cloud-metadata ranges on every redirect (at most three), pins the resolved
+address, uses a 15 s connect/read timeout, streams with the same size cap, and
+forwards no cookies or authorization headers.
 
 ## Authorization: the grant is the authority
 

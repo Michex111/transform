@@ -26,15 +26,18 @@ import logging
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from dataclasses import dataclass
 from functools import lru_cache
+from typing import Any
 
 from src.application.services.conversions.service import ConversionService
 from src.application.services.billing.credit_service import CreditService
 from src.application.services.files.service import FileService
 from src.application.services.files.transfer_service import TransferService
-from src.application.services.mcp.toolbox import MCPToolBox
+from src.application.services.mcp.toolbox import MCPToolBox, MCPToolContext
+from src.application.services.mcp.upload_capability import MCPUploadCapabilities
 from src.application.services.mcp.workspace_tools import MCPWorkspaceTools
 from src.application.services.conversions.priority_queue_dispatcher import PriorityQueueDispatcher
 from src.application.services.conversions.queue_priority_router import QueuePriorityRouter
+from src.domain.security.enitities.mcp_upload_intent import MCPUploadIntent
 from src.domain.security.value_object.agent_access_scope import FolderAccess, HistoryScope
 from src.domain.security.value_object.agent_scope import AgentScope
 from src.domain.subscriptions.value_object.tier import SubscriptionTier
@@ -43,6 +46,9 @@ from src.infrastructure.adapters.repository.sql_conversion_job_repo import (
 )
 from src.infrastructure.adapters.repository.sql_credit_repo import SQLCreditRepository
 from src.infrastructure.adapters.repository.sql_mcp_repo import SQLMCPRepository
+from src.infrastructure.adapters.repository.sql_mcp_upload_intent_repo import (
+    SQLMCPUploadIntentRepository,
+)
 from src.infrastructure.adapters.repository.sql_subscription_repo import SQLSubscriptionRepository
 from src.infrastructure.adapters.repository.sql_user_file_repo import SQLUserFileRepository
 from src.infrastructure.adapters.repository.sql_user_folder_repo import SQLUserFolderRepository
@@ -157,6 +163,10 @@ class MCPServiceScope:
     #: Set when the grant could not be loaded or is no longer active. Every tool
     #: must refuse with this sentence instead of running with defaults.
     authorization_error: str | None = None
+    #: The single-use upload capabilities (``create_upload_link`` /
+    #: ``get_upload_status``). Composed here so the tool path and the browser
+    #: endpoint share one implementation of redemption and completion.
+    uploads: MCPUploadCapabilities | None = None
 
 
 @contextlib.asynccontextmanager
@@ -247,6 +257,42 @@ async def open_mcp_scope(
             object_store=object_store,
             text_page_chars=get_settings().MCP_TEXT_PAGE_CHARS,
             text_extraction_max_bytes=get_settings().MCP_TEXT_EXTRACTION_MAX_BYTES,
+            attachment_max_bytes=get_settings().MCP_ATTACHMENT_MAX_BYTES,
+        )
+
+        async def start_upload_conversion(intent: MCPUploadIntent) -> dict[str, Any]:
+            """Start the conversion a completed upload asked for.
+
+            Uses ``toolbox.convert_file`` — the exact code path the
+            ``convert_file`` tool uses — so the origin, ``grant_id``, tier and
+            credit spend are identical to an explicit conversion call.
+            """
+            context = MCPToolContext(
+                user_id=intent.user_id,
+                scopes=scopes,
+                tier_resolver=resolve_tier,
+                client_id=intent.client_id,
+                grant_id=intent.grant_id,
+                folder_access=folder_access,
+                folder_id=folder_id,
+                history_scope=history_scope,
+                authorization_error=authorization_error,
+            )
+            return await toolbox.convert_file(
+                context, intent.file_id or "", intent.target_format or ""
+            )
+
+        uploads = MCPUploadCapabilities(
+            intents=SQLMCPUploadIntentRepository(session=session),
+            grants=SQLMCPRepository(session=session),
+            files=file_service,
+            conversions=conversion_service,
+            documents=toolbox,
+            secret=get_settings().SECRET_KEY.get_secret_value(),
+            resource_url=get_settings().mcp_resource_url(),
+            max_attachment_bytes=get_settings().MCP_ATTACHMENT_MAX_BYTES,
+            ttl_seconds=get_settings().MCP_UPLOAD_LINK_TTL_SECONDS,
+            start_conversion=start_upload_conversion,
         )
         yield MCPServiceScope(
             file_service=file_service,
@@ -270,6 +316,7 @@ async def open_mcp_scope(
             history_scope=history_scope,
             scopes=scopes,
             authorization_error=authorization_error,
+            uploads=uploads,
         )
 
 

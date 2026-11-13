@@ -460,6 +460,7 @@ class MCPToolBox:
         text_extractor: MCPTextExtractor | None = None,
         text_page_chars: int = 24_000,
         text_extraction_max_bytes: int = _MAX_DOWNLOAD_BYTES,
+        attachment_max_bytes: int = 100 * 1024 * 1024,
     ) -> None:
         self._files = file_service
         self._conversions = conversion_service
@@ -476,6 +477,11 @@ class MCPToolBox:
         self._extractor = text_extractor or MCPTextExtractor(self._map)
         self._text_page_chars = max(1, text_page_chars)
         self._text_extraction_max_bytes = max(1, text_extraction_max_bytes)
+        #: The MCP attachment channel's own ceiling. Deliberately larger than
+        #: ``_MAX_UPLOAD_BYTES`` (the base64-in-a-tool-result cap) because a URL
+        #: import never travels through the model, and still bounded because it
+        #: is a server-side download.
+        self._attachment_max_bytes = max(1, attachment_max_bytes)
 
     # ------------------------------------------------------------------
     # Read-only tools
@@ -1155,6 +1161,88 @@ class MCPToolBox:
             folder_id=folder_id,
         )
 
+    async def store_attachment_bytes(
+        self,
+        ctx: MCPToolContext,
+        file_name: str,
+        data: bytes,
+        folder_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Create a Drive file from bytes the SERVER fetched (URL import).
+
+        Same pipeline as ``upload_file`` — ``create_upload`` → storage write →
+        ``verify_upload_completion`` → ``FileService.complete_upload`` — but with
+        the attachment ceiling (``MCP_ATTACHMENT_MAX_BYTES``) rather than the
+        25 MiB JSON-RPC cap, because the bytes never travelled through the model
+        or a tool result.
+
+        The tier per-file cap and the account quota are still enforced, first as
+        an advisory pre-check and then authoritatively on the measured object.
+        """
+        denied = self._require(ctx, AgentScope.DOCUMENTS_WRITE, "import_file_from_url")
+        if denied:
+            return denied
+        destination, refused = await self.resolve_upload_destination(
+            ctx, folder_id, "import_file_from_url"
+        )
+        if refused:
+            return refused
+        extension = extension_from_filename(file_name)
+        if not extension:
+            return {
+                "ok": False,
+                "error": "file_name must include a file extension such as 'pdf'.",
+            }
+        if not data:
+            return {"ok": False, "error": "The downloaded file was empty."}
+        if len(data) > self._attachment_max_bytes:
+            return {
+                "ok": False,
+                "error": (
+                    f"That file is larger than the {self._attachment_max_bytes // (1024 * 1024)} "
+                    "MB limit for this server."
+                ),
+            }
+        try:
+            await self._files.authorize_upload_size(ctx.user_id, len(data))
+        except FileSystemError as exc:
+            return {"ok": False, "error": str(exc)}
+
+        try:
+            session = await self._transfers.create_upload(
+                extension,
+                str(ctx.user_id),
+                file_name=file_name,
+                folder_id=destination,
+                # A single PUT: the bytes are already in memory here.
+                file_size=None,
+            )
+        except (FileSystemError, ValueError, OSError) as exc:
+            logger.warning("MCP URL import rejected the upload session: %s", exc)
+            return {"ok": False, "error": f"The file could not be uploaded: {exc}"}
+
+        try:
+            await self._store.put_object(session.object_key, data)
+            upload = await self._transfers.verify_upload_completion(session.upload_id)
+            file_id = await self._files.complete_upload(ctx.user_id, upload)
+        except (FileSystemError, OSError) as exc:
+            await self._transfers.delete_upload_session(session.upload_id)
+            logger.warning("MCP URL import failed: %s", exc)
+            return {"ok": False, "error": f"The file could not be uploaded: {exc}"}
+        except Exception as exc:  # noqa: BLE001 - storage/transfer failures
+            await self._transfers.delete_upload_session(session.upload_id)
+            logger.warning("MCP URL import failed: %s", exc)
+            return {
+                "ok": False,
+                "error": "The file could not be uploaded because storage was unavailable.",
+            }
+
+        row = await self._owned_file(ctx, file_id)
+        if isinstance(row, dict):
+            return row
+        self._audit(ctx, "import_file_from_url", f"file:{file_id}")
+        return {"ok": True, "file": _file_payload(row), "file_id": file_id}
+
     async def read_object_bytes(
         self, ctx: MCPToolContext, object_key: str
     ) -> bytes | dict[str, Any]:
@@ -1427,17 +1515,15 @@ class MCPToolBox:
         denied = self._require(ctx, AgentScope.DOCUMENTS_WRITE, "upload_file")
         if denied:
             return denied
-        folder = await self._resolve_folder(ctx, "upload_file")
-        if folder.denial:
-            return folder.denial
-        if folder_id is not None:
-            if not folder.allows(folder_id):
-                return self._folder_unavailable(ctx, "upload_file")
-            destination = folder_id
-        elif folder.subtree is not None:
-            destination = ctx.folder_id
-        else:
-            destination = None
+        # One implementation of the destination rule, shared with
+        # ``create_upload_link``: a named folder must be inside the grant's
+        # subtree, and an omitted one defaults to the bound folder (never the
+        # root) for a confined grant.
+        destination, refused = await self.resolve_upload_destination(
+            ctx, folder_id, "upload_file"
+        )
+        if refused:
+            return refused
 
         if (content_text is None) == (content_base64 is None):
             return {
@@ -1549,6 +1635,47 @@ class MCPToolBox:
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    def require(
+        self, ctx: MCPToolContext, scope: AgentScope, tool: str
+    ) -> dict[str, Any] | None:
+        """Public form of the scope gate, for services that reuse this toolbox.
+
+        ``MCPUploadCapabilities`` lives in the application layer and must apply
+        the *same* scope refusal (message, audit event and ordering) as a tool
+        call; exposing the gate is what keeps one implementation of it.
+        """
+        return self._require(ctx, scope, tool)
+
+    async def resolve_upload_destination(
+        self, ctx: MCPToolContext, folder_id: str | None, tool: str
+    ) -> tuple[str | None, dict[str, Any] | None]:
+        """Resolve a new file's destination folder and the grant's confinement.
+
+        Returns ``(destination, refusal)``. ``destination`` is ``None`` for the
+        Drive root and is only meaningful when ``refusal`` is ``None``.
+
+        The rules are the ones every created file follows:
+
+        * a named folder must sit inside the grant's subtree (a confined grant
+          never reaches out of it);
+        * an omitted folder defaults to the bound folder for a confined grant,
+          and to the Drive root only for an unrestricted (``ALL``) one.
+
+        Shared by ``upload_file``, ``save_file``'s callers and
+        ``create_upload_link``, so the three cannot disagree about where an
+        agent may write.
+        """
+        folder = await self._resolve_folder(ctx, tool)
+        if folder.denial:
+            return None, folder.denial
+        if folder_id is not None:
+            if not folder.allows(folder_id):
+                return None, self._folder_unavailable(ctx, tool)
+            return folder_id, None
+        if folder.subtree is not None:
+            return ctx.folder_id, None
+        return None, None
 
     async def _resolve_folder(self, ctx: MCPToolContext, tool: str) -> _FolderResolution:
         """Evaluate the grant's folder binding for one tool call.

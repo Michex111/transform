@@ -20,6 +20,7 @@ from src.infrastructure.database.models.mcp import (
     MCPAuthorizationCodeModel,
     MCPOAuthClientModel,
     MCPTokenModel,
+    MCPUploadIntentModel,
 )
 from src.infrastructure.database.models.subscription import UserSubscriptionModel
 from src.infrastructure.database.models.telemetry import (
@@ -48,6 +49,7 @@ __all__ = [
     "MCPAuthorizationCodeModel",
     "MCPOAuthClientModel",
     "MCPTokenModel",
+    "MCPUploadIntentModel",
     "McpToolInvocationModel",
     "RuntimeImageRevisionModel",
     "SavedWorkflowModel",

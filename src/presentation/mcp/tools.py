@@ -38,14 +38,24 @@ from mcp.types import ToolAnnotations
 
 from src.application.services.mcp.download_capability import DownloadUnavailable
 from src.application.services.mcp.toolbox import MCPToolBox, MCPToolContext
+from src.application.services.mcp.upload_capability import MCPUploadCapabilities
+from src.application.services.mcp.url_import import PinnedHTTPSFetcher, UrlImportRejected
 from src.application.services.mcp.workspace_tools import MCPWorkspaceTools
-from src.domain.security.value_object.agent_scope import normalize_scopes
+from src.domain.security.value_object.agent_scope import AgentScope, normalize_scopes
 from src.presentation.api.dependencies.mcp_download import (
     create_mcp_download_link,
     create_mcp_file_download_link,
 )
+from src.infrastructure.config.settings import get_settings
 from src.presentation.mcp.activity import instrument_tool
-from src.presentation.mcp.dependencies import open_mcp_scope
+from src.presentation.mcp.dependencies import MCPServiceScope, open_mcp_scope
+from src.presentation.mcp.upload_results import (
+    ImportFileResult,
+    UploadFilePayload,
+    UploadJobPayload,
+    UploadLinkResult,
+    UploadStatusResult,
+)
 
 #: Shown to the agent on initialize. Kept short and factual: it states the
 #: workflow and the two things an agent most often gets wrong (conversions are
@@ -64,6 +74,27 @@ Workflow for "convert my X and save the result":
   3. get_conversion_status(job_id) — poll until status is COMPLETED or FAILED.
      When available, share its short-lived download_url with the user.
   4. save_file(job_id) — save the result into the Drive if the user requests it.
+
+Attached files (a file the user put in the chat):
+  An attachment is NOT automatically available to this server. You may see its
+  extracted text or an image preview, but not the original bytes, so you cannot
+  rebuild a PDF, DOCX, XLSX or image for upload_file. Choose in this order:
+
+  1. TEXT attachment whose exact content you can see
+     -> upload_file(content_text=...) then convert_file. Never retype extracted
+        PDF/DOCX text and present it as the original file.
+  2. You have a code sandbox or shell where the attachment exists as a file
+     (for example /mnt/user-data/uploads/<name> in Claude, or any local path)
+     -> create_upload_link, run its curl_command there with that path, then
+        poll get_upload_status until it says COMPLETED.
+  3. Otherwise
+     -> create_upload_link, give the user its upload_page_url to open and drop
+        the same file into, then poll get_upload_status.
+
+  Never claim an upload happened until get_upload_status says COMPLETED. If
+  curl fails with a network or proxy error, the sandbox probably blocks this
+  API's domain: ask the user to allow it in the client's code-execution network
+  settings, or use upload_page_url instead.
 
 Other things you can do:
   - read_file_text(file_id)  — READ a document's text. Use this for "summarise,
@@ -84,7 +115,13 @@ Other things you can do:
   - create_folder(name, parent_id) — make a folder to organise into.
   - upload_file(file_name, content_text | content_base64) — create a new file in
      the Drive. Pass content_text for UTF-8 text; content_base64 only for
-     binary.
+     binary. A chat attachment's real bytes cannot be rebuilt this way — use
+     create_upload_link instead.
+  - create_upload_link(file_name, size_bytes, folder_id, target_format) — a
+     short-lived, single-use link that accepts the real bytes of one attachment
+     (see "Attached files").
+  - get_upload_status(upload_id) — whether that upload landed, and the
+     conversion job it started.
   - get_conversion_history — list recent conversions.
   - get_credits — check the user's remaining credits.
 
@@ -139,14 +176,14 @@ Notes:
   - Conversions are asynchronous: convert_file returns immediately. So is
     run_code — NEVER say code ran or succeeded until get_execution says so.
   - This server cannot access a chat attachment just because it is visible to
-    the model. upload_file requires the actual bytes as base64 and creates a
-    Drive file; for other files, ask the user to upload them in Transform.
+    the model. For a text attachment whose exact content you can see, use
+    upload_file(content_text). For a binary attachment (PDF, DOCX, XLSX, image),
+    use create_upload_link and follow the "Attached files" decision tree.
     Never invent an attachment URL or claim a file was uploaded.
-  - A download_url is a short-lived bearer capability: anyone holding it can
-    download the result while it remains authorized. Share it only with the
-    intended user; if it expires, poll status again for a new one. The browser
-    needs JavaScript. If no link is returned, do not invent one or send an
-    OAuth bearer token in a URL.
+  - Download and upload links are short-lived bearer capabilities: anyone holding
+    one can use it while it remains authorized. Share it only with the intended
+    user; if it expires, ask for a new one. The browser needs JavaScript. If no
+    link is returned, do not invent one or send an OAuth bearer token in a URL.
   - A workspace's runtime may be created with no outbound network. When that is
     the case, PROJECT operations (`uv add`) are refused with an explanation.
     Plain scripts still work. Report the refusal rather than retrying.
@@ -160,7 +197,7 @@ Notes:
 
 
 @contextlib.asynccontextmanager
-async def _tool_scope() -> AsyncGenerator[tuple[MCPToolBox, MCPToolContext]]:
+async def _resolved_scope() -> AsyncGenerator[tuple[MCPServiceScope, MCPToolContext]]:
     """Resolve the verified caller and the services for this tool call.
 
     The identity is taken from the OAuth access token the SDK validated and
@@ -168,6 +205,10 @@ async def _tool_scope() -> AsyncGenerator[tuple[MCPToolBox, MCPToolContext]]:
     guessing: an MCP tool must never be able to run unauthenticated, and
     ``None`` here means the auth middleware was bypassed (a wiring bug), not
     that the caller is anonymous.
+
+    Yields the whole scope (not just the toolbox) so a tool that needs a
+    different service — ``create_upload_link`` needs the upload capabilities —
+    shares this identity resolution instead of repeating it.
     """
     token = get_access_token()
     if token is None or not token.subject:
@@ -177,28 +218,54 @@ async def _tool_scope() -> AsyncGenerator[tuple[MCPToolBox, MCPToolContext]]:
     except (TypeError, ValueError) as exc:  # pragma: no cover - provider always writes an int
         raise RuntimeError("MCP access token has a malformed subject.") from exc
 
-    scopes = normalize_scopes(token.scopes or ())
     claims = token.claims or {}
     grant_id = str(claims.get("grant_id", ""))
     async with open_mcp_scope(user_id, grant_id) as scope:
-        yield scope.toolbox, MCPToolContext(
+        yield scope, tool_context_from_scope(
+            scope,
             user_id=user_id,
-            # The GRANT's current scopes, not the token's frozen copy. This is
-            # what makes an edit on the Connected-apps screen take effect on the
-            # next call in either direction. ``token.scopes`` is kept only for a
-            # token that carries no grant (which cannot reach a tool anyway).
-            scopes=scope.scopes if scope.scopes else scopes,
-            tier_resolver=scope.resolve_tier,
-            client_id=token.client_id,
+            client_id=token.client_id or "",
             grant_id=grant_id,
-            # The folder confinement and history scope come from the stored
-            # grant, loaded by ``open_mcp_scope``. They are part of the token's
-            # authority, never a tool argument.
-            folder_access=scope.folder_access,
-            folder_id=scope.folder_id,
-            history_scope=scope.history_scope,
-            authorization_error=scope.authorization_error,
         )
+
+
+def tool_context_from_scope(
+    scope: MCPServiceScope, *, user_id: int, client_id: str, grant_id: str
+) -> MCPToolContext:
+    """Build the per-call authority from a resolved service scope.
+
+    The GRANT's current scopes are used, not the token's frozen copy. This is
+    what makes an edit on the Connected-apps screen take effect on the next call
+    in either direction. Folder confinement and history scope likewise come from
+    the stored grant, loaded by ``open_mcp_scope`` — never from a tool argument.
+    """
+    return MCPToolContext(
+        user_id=user_id,
+        scopes=scope.scopes,
+        tier_resolver=scope.resolve_tier,
+        client_id=client_id,
+        grant_id=grant_id,
+        folder_access=scope.folder_access,
+        folder_id=scope.folder_id,
+        history_scope=scope.history_scope,
+        authorization_error=scope.authorization_error,
+    )
+
+
+@contextlib.asynccontextmanager
+async def _tool_scope() -> AsyncGenerator[tuple[MCPToolBox, MCPToolContext]]:
+    """The document toolbox plus the verified caller."""
+    async with _resolved_scope() as (scope, ctx):
+        yield scope.toolbox, ctx
+
+
+@contextlib.asynccontextmanager
+async def _upload_scope() -> AsyncGenerator[tuple[MCPUploadCapabilities, MCPToolContext]]:
+    """The upload-capability service plus the verified caller."""
+    async with _resolved_scope() as (scope, ctx):
+        if scope.uploads is None:  # pragma: no cover - always wired
+            raise RuntimeError("Upload capabilities are not configured.")
+        yield scope.uploads, ctx
 
 
 @contextlib.asynccontextmanager
@@ -837,6 +904,259 @@ def register_tools(mcp: MCPServer) -> None:
             )
 
     @mcp.tool(
+        name="create_upload_link",
+        title="Create a link to upload an attached file",
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=False,
+            # Not idempotent: each call mints a new single-use intent. Calling it
+            # twice and uploading once leaves an unused link, which expires.
+            idempotent_hint=False,
+            open_world_hint=False,
+        ),
+        structured_output=True,
+    )
+    @instrument_tool("create_upload_link")
+    async def create_upload_link(
+        file_name: str,
+        size_bytes: int | None = None,
+        folder_id: str | None = None,
+        target_format: str | None = None,
+    ) -> UploadLinkResult:
+        """Create a short-lived, single-use link that accepts ONE file's bytes.
+
+        Use this for an attachment you cannot rebuild — a PDF, DOCX, XLSX, ZIP or
+        image the user put in the chat. A model sees extracted text and images,
+        not the original bytes, so ``upload_file`` is the wrong tool for those.
+        This tool does NOT upload anything: it authorizes an upload and returns
+        the capability that performs it.
+
+        Pass the returned link to the client's code sandbox and run its
+        ``curl_command`` there, or give the user ``upload_page_url`` to drop the
+        same file into. Then poll ``get_upload_status`` until it says COMPLETED.
+        Never claim an upload happened before that.
+
+        Args:
+            file_name: The attachment's real name, including its extension
+                (for example "report.pdf"). The extension decides how the file
+                is validated and stored.
+            size_bytes: Optional size in bytes, if you know it. Supplying it
+                lets the server refuse an impossible upload immediately. The
+                path still enforces the limit on the bytes that actually arrive.
+            folder_id: Optional destination folder id. Omit to place the file in
+                the connection's folder (or the Drive root for an unrestricted
+                connection). A folder outside this connection's allowed folder
+                is refused.
+            target_format: Optional extension to convert the file to as soon as
+                it lands (for example "docx" for a PDF). The conversion is
+                started through the ordinary ``convert_file`` path: it spends
+                credits, and its result is a normal conversion job. Requires the
+                documents.convert permission in addition to documents.write.
+
+        Returns:
+            {"ok": true, "upload_id", "expires_in_seconds", "max_bytes",
+            "upload_url", "upload_header_name", "upload_capability",
+            "curl_command", "upload_page_url", "note"} or
+            {"ok": false, "error", ...}.
+
+            The capability is a bearer credential for one upload. Put it in the
+            X-Transform-Upload header (or the upload_page_url fragment); never
+            in a query string, and never show it to anyone but the intended
+            user.
+
+        Creates an authorization, not a file. Requires documents.write (and
+        documents.convert when target_format is set). The file itself is stored
+        through the ordinary upload pipeline, so the tier per-file cap, the
+        account quota, the extension and content checks, and folder ownership
+        all still apply.
+        """
+        async with _upload_scope() as (uploads, ctx):
+            result = await uploads.create_intent(
+                ctx,
+                file_name=file_name,
+                size_bytes=size_bytes,
+                folder_id=folder_id,
+                target_format=target_format,
+            )
+        if isinstance(result, dict):
+            return UploadLinkResult(**result)
+        return UploadLinkResult(
+            ok=True,
+            upload_id=result.intent.id,
+            expires_in_seconds=result.expires_in_seconds,
+            max_bytes=result.intent.max_bytes,
+            upload_url=result.upload_url,
+            upload_header_name=result.header_name,
+            upload_capability=result.capability,
+            curl_command=result.curl_command,
+            upload_page_url=result.upload_page_url,
+            note=(
+                "Run curl_command in the sandbox where the attachment exists, or open "
+                "upload_page_url and drop the same file in. Then call "
+                "get_upload_status(upload_id) until status is COMPLETED. The link "
+                "accepts ONE file and expires; nothing has been uploaded yet."
+            ),
+        )
+
+    @mcp.tool(
+        name="get_upload_status",
+        title="Check an attachment upload",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=False,
+        ),
+        structured_output=True,
+    )
+    @instrument_tool("get_upload_status")
+    async def get_upload_status(upload_id: str) -> UploadStatusResult:
+        """Check whether the file behind an upload link has landed.
+
+        Poll this after calling ``create_upload_link`` and running its
+        ``curl_command`` (or after the user uses ``upload_page_url``). Only a
+        ``COMPLETED`` status means the bytes are now a file in the user's Drive;
+        never tell the user an upload succeeded before then.
+
+        Args:
+            upload_id: The id returned by create_upload_link.
+
+        Returns:
+            {"ok": true, "upload_id", "status", "file_name", "extension",
+            "expires_at", "file", "job", "error"}. "status" is one of PENDING,
+            RECEIVING, COMPLETED, FAILED, EXPIRED. "file" is the created Drive
+            file when the upload landed; "job" is the conversion started on
+            completion, when target_format was requested. A COMPLETED conversion
+            also returns a short-lived "download_url" (share it only with the
+            intended user). On a refusal: {"ok": false, "error"}.
+
+        Read-only. Requires documents.read. Only uploads belonging to the
+        signed-in user and to this connection can be inspected; anything else is
+        reported exactly like a nonexistent upload.
+        """
+        async with _upload_scope() as (uploads, ctx):
+            result = await uploads.get_status(ctx, upload_id)
+        job = result.get("job")
+        if result.get("ok") and isinstance(job, dict) and job.get("status") == "COMPLETED":
+            token = get_access_token()
+            if token is None:
+                raise RuntimeError("MCP tool invoked without an authenticated access token.")
+            try:
+                link = await create_mcp_download_link(token.token, str(job["job_id"]))
+            except DownloadUnavailable:
+                # Keep the status visible without turning a denied link into an
+                # existence oracle for the job or its folder.
+                result["download_note"] = (
+                    "A download link is not available for this connection."
+                )
+            else:
+                result.update(link)
+        return UploadStatusResult(**result)
+
+    @mcp.tool(
+        name="import_file_from_url",
+        title="Import a file from a URL",
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=False,
+            idempotent_hint=False,
+            # It fetches the open internet on the user's behalf, so a client
+            # should treat it as an outward-facing action.
+            open_world_hint=True,
+        ),
+        structured_output=True,
+    )
+    @instrument_tool("import_file_from_url")
+    async def import_file_from_url(
+        url: str,
+        file_name: str | None = None,
+        folder_id: str | None = None,
+        target_format: str | None = None,
+    ) -> ImportFileResult:
+        """Download a file from an https URL into the user's Drive.
+
+        Use this only when the user gave you a direct https URL to a file they
+        want stored. It is NOT for a chat attachment (the model never receives
+        the attachment's original bytes; use create_upload_link for that), and
+        not for a page that merely links to a file — the URL must return the
+        file itself.
+
+        The server fetches the URL itself, so several protections apply: https
+        only; private, loopback, link-local, multicast, reserved and
+        cloud-metadata addresses are refused (IPv4 and IPv6) on the original
+        request and on every redirect (at most three); the resolved address is
+        pinned; the transfer is capped and timed out; and no cookies or
+        authorization headers are forwarded. This tool may be disabled by the
+        operator; if so it returns a plain refusal.
+
+        Args:
+            url: An https URL that returns the file directly.
+            file_name: Optional name to store it under, including the extension
+                (for example "invoice.pdf"). Omit to use the server's
+                Content-Disposition name, then the URL's last path segment. A
+                name with an extension is required.
+            folder_id: Optional destination folder id, inside this
+                connection's allowed folder.
+            target_format: Optional extension to convert the imported file to
+                as soon as it lands. Spends credits like any conversion and
+                requires documents.convert.
+
+        Returns:
+            {"ok": true, "file": {...}, "job": {...}|null, "url"} or
+            {"ok": false, "error"}. A file that imported successfully but whose
+            conversion failed returns ok=true with the file and an "error"
+            explaining the conversion.
+
+        Creates a file (and optionally a conversion job). Requires
+        documents.write, plus documents.convert when target_format is set.
+        """
+        settings = get_settings()
+        if not settings.MCP_URL_IMPORT_ENABLED:
+            return ImportFileResult(
+                ok=False, error="URL import is not enabled on this server."
+            )
+
+        fetcher = PinnedHTTPSFetcher(max_bytes=settings.MCP_ATTACHMENT_MAX_BYTES)
+        try:
+            fetched = await fetcher.fetch(url)
+        except UrlImportRejected as exc:
+            return ImportFileResult(ok=False, error=str(exc))
+
+        name = file_name or fetched.file_name or "import"
+        async with _tool_scope() as (toolbox, ctx):
+            if target_format is not None:
+                denied = toolbox.require(
+                    ctx, AgentScope.DOCUMENTS_CONVERT, "import_file_from_url"
+                )
+                if denied:
+                    return ImportFileResult(**denied)
+            stored = await toolbox.store_attachment_bytes(ctx, name, fetched.data, folder_id)
+            if not stored.get("ok"):
+                return ImportFileResult(**stored)
+            file_payload = UploadFilePayload(**stored["file"])
+            if target_format is None:
+                return ImportFileResult(ok=True, url=url, file=file_payload)
+            conversion = await toolbox.convert_file(
+                ctx, file_payload.file_id, target_format
+            )
+        if not conversion.get("ok"):
+            return ImportFileResult(
+                ok=True,
+                url=url,
+                file=file_payload,
+                error=str(
+                    conversion.get("error")
+                    or "The file was imported, but the conversion could not be started."
+                ),
+            )
+        return ImportFileResult(
+            ok=True,
+            url=url,
+            file=file_payload,
+            job=UploadJobPayload(**conversion["job"]),
+        )
+
+    @mcp.tool(
         name="upload_file",
         title="Upload a new file into the Drive",
         annotations=ToolAnnotations(
@@ -858,9 +1178,10 @@ def register_tools(mcp: MCPServer) -> None:
 
         This is how you save a document you authored (for example a report you
         generated as text). Unlike save_file, which only promotes a conversion
-        result, this accepts content from you. A chat attachment is not
-        automatically accessible to this server: this tool requires the actual
-        content, not an attachment reference or URL.
+        result, this accepts content from you. A chat attachment's ORIGINAL
+        bytes are not something you can rebuild: for a binary attachment (PDF,
+        DOCX, XLSX, image) use create_upload_link, which receives the real file.
+        Use this tool for text you can see and reproduce exactly.
 
         Args:
             file_name: The name for the new file, including its extension

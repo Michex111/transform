@@ -24,6 +24,25 @@ To change the prompt, edit the TypeScript module.
 Not shown to users. These are the things worth knowing when someone reports
 "the agent can't connect".
 
+### Attachment uploads need the API domain reachable from the sandbox
+
+`create_upload_link` returns a `curl_command` that the client's **code
+execution** environment runs. A sandbox with an egress policy that does not
+allow the API's domain reports a network/proxy error from `curl`, which looks
+like a broken link. Two remedies, in order: allow the API domain in the client's
+code-execution network settings, or give the user `upload_page_url` instead.
+
+The capability is in the `X-Transform-Upload` header (never a query string);
+the browser page reads it from the URL fragment and clears it from history. Only
+a 12-character SHA-256 fingerprint is logged.
+
+Settings, all with safe defaults: `MCP_ATTACHMENT_MAX_BYTES` (100 MiB),
+`MCP_UPLOAD_LINK_TTL_SECONDS` (900), `MCP_UPLOAD_RATE_LIMIT` (60/min per
+capability) and `MCP_URL_IMPORT_ENABLED` (false). The last one makes the server
+fetch a model-chosen URL, so it is opt-in; when enabled the fetcher refuses
+private and metadata ranges on every hop. The full flow is in
+[`docs/mcp.md`](mcp.md#attachments-getting-the-real-bytes-to-the-server).
+
 ### `MCP_RESOURCE_URL` must be set on the API service
 
 It is the token audience **and** the OAuth issuer. Unset, the server advertises

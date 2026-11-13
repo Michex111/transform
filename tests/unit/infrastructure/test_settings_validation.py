@@ -586,3 +586,57 @@ def test_the_default_document_ceiling_does_not_cap_any_plan() -> None:
         max_document_bytes_for_tier(tier) for tier in SubscriptionTier
     )
     assert default_ceiling >= largest_allowance
+
+
+# ---------------------------------------------------------------------------
+# MCP attachments (upload links and URL import)
+# ---------------------------------------------------------------------------
+
+def test_the_mcp_attachment_defaults_are_safe() -> None:
+    settings = _settings()
+
+    assert settings.MCP_ATTACHMENT_MAX_BYTES == 100 * 1024 * 1024
+    assert settings.MCP_UPLOAD_LINK_TTL_SECONDS == 900
+    assert settings.MCP_UPLOAD_RATE_LIMIT == 60
+    # The SSRF surface stays off unless an operator turns it on.
+    assert settings.MCP_URL_IMPORT_ENABLED is False
+
+
+def test_env_example_documents_the_mcp_attachment_settings() -> None:
+    """A limit that only exists in code is one no deployment can discover."""
+    text = _ENV_EXAMPLE.read_text(encoding="utf-8")
+
+    for key in (
+        "MCP_ATTACHMENT_MAX_BYTES=",
+        "MCP_UPLOAD_LINK_TTL_SECONDS=",
+        "MCP_UPLOAD_RATE_LIMIT=",
+        "MCP_URL_IMPORT_ENABLED=",
+    ):
+        assert key in text, f"{key} missing from .env.example"
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "MCP_ATTACHMENT_MAX_BYTES",
+        "MCP_UPLOAD_LINK_TTL_SECONDS",
+        "MCP_UPLOAD_RATE_LIMIT",
+    ],
+)
+def test_non_positive_mcp_attachment_values_are_rejected(key: str) -> None:
+    with pytest.raises(RuntimeError, match=key):
+        _settings(**{key: 0}).validate_settings()
+
+
+def test_an_mcp_attachment_cap_below_one_kib_is_rejected() -> None:
+    with pytest.raises(RuntimeError, match="MCP_ATTACHMENT_MAX_BYTES"):
+        _settings(MCP_ATTACHMENT_MAX_BYTES=100).validate_settings()
+
+
+def test_mcp_attachment_validation_is_skipped_when_mcp_is_disabled() -> None:
+    """A deployment that does not expose MCP must not be blocked by its knobs."""
+    _settings(
+        MCP_ENABLED=False,
+        MCP_UPLOAD_LINK_TTL_SECONDS=0,
+        MCP_ATTACHMENT_MAX_BYTES=1,
+    ).validate_settings()

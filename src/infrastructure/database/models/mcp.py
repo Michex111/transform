@@ -26,6 +26,7 @@ from sqlalchemy import (
     JSON,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -168,3 +169,63 @@ class MCPTokenModel(Base):
     #: refresh replaced it", and the reuse grace window must only ever apply to
     #: the second. Only the hash is stored, so this can never be replayed.
     replaced_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
+class MCPUploadIntentModel(Base):
+    """A single-use capability to receive one file from an MCP client.
+
+    This is the byte path for a chat attachment that the model cannot rebuild:
+    the agent mints the intent, the client's sandbox (or a browser page) uploads
+    the real bytes to it, and the server stores the result through the ordinary
+    ``create_upload`` → verify → ``complete_upload`` pipeline.
+
+    The row records what was authorized at *creation* time so a redemption can
+    re-check it against the grant as it is *now*. It never stores a capability,
+    a token, a storage key or a bucket: the capability is a Fernet token held
+    only by the client, and its payload is just ``{"intent_id": ...}``.
+
+    ``status`` is a plain ``String`` for the same reason as the OAuth tables'
+    ``status``/``kind`` columns: a PostgreSQL enum type outlives its tables and
+    makes a re-run of ``upgrade head`` fail. Values are written and read through
+    :class:`MCPUploadIntentStatus`, which coerces an unknown value to a
+    fail-closed default.
+    """
+
+    __tablename__ = "mcp_upload_intents"
+    __table_args__ = (
+        # The two queries this table actually serves: "my recent uploads" (the
+        # status tool and the account view) and "everything past its window"
+        # (the housekeeping sweep).
+        Index("ix_mcp_upload_intents_user_created", "user_id", "created_at"),
+        Index("ix_mcp_upload_intents_expires_at", "expires_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    #: The grant that authorized the upload. Not a foreign key, for the same
+    #: reason as ``MCPAgentGrantModel.folder_id``: enforcement already denies
+    #: when the row cannot be loaded, and a constraint would couple the intent's
+    #: lifecycle to the grant's.
+    grant_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    client_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    #: Sanitized leaf name (see ``sanitize_filename``), never a path.
+    file_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    extension: Mapped[str] = mapped_column(String(32), nullable=False)
+    max_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    folder_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    target_format: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    file_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    job_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    #: A user-safe sentence. Never a storage location, a provider error or a
+    #: capability.
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    #: Set atomically by the single-use redemption. Its presence is what turns a
+    #: replay into a refusal rather than a second upload.
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

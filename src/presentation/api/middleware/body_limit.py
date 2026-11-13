@@ -29,6 +29,7 @@ from typing import Callable
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from src.application.services.mcp.upload_capability import UPLOAD_PATH as _MCP_UPLOAD_PATH
 from src.infrastructure.config.settings import get_settings
 
 #: `/api/…` uses ``MAX_REQUEST_BODY_BYTES``. The health probes and `/metrics`
@@ -41,7 +42,8 @@ class RequestBodyLimitMiddleware(BaseHTTPMiddleware):
     """Answer 413 when a request declares a body larger than the configured cap."""
 
     def __init__(
-        self, app, max_bytes: int | None = None, mcp_max_bytes: int | None = None
+        self, app, max_bytes: int | None = None, mcp_max_bytes: int | None = None,
+        attachment_max_bytes: int | None = None,
     ) -> None:
         super().__init__(app)
         # Injected (rather than read lazily) so a test can pin a small cap
@@ -49,6 +51,7 @@ class RequestBodyLimitMiddleware(BaseHTTPMiddleware):
         # between the check and the response.
         self._max_bytes = max_bytes
         self._mcp_max_bytes = mcp_max_bytes
+        self._attachment_max_bytes = attachment_max_bytes
 
     @property
     def max_bytes(self) -> int:
@@ -70,7 +73,26 @@ class RequestBodyLimitMiddleware(BaseHTTPMiddleware):
             self._mcp_max_bytes = get_settings().MCP_MAX_REQUEST_BODY_BYTES
         return self._mcp_max_bytes
 
+    @property
+    def attachment_max_bytes(self) -> int:
+        """The MCP attachment path's ceiling.
+
+        Larger than the API's JSON cap because the body is a file rather than a
+        request document. The endpoint's own per-intent cap is the real limit;
+        this one only stops an obviously oversized declared body before any byte
+        is read.
+        """
+        if self._attachment_max_bytes is None:
+            self._attachment_max_bytes = get_settings().MCP_ATTACHMENT_MAX_BYTES
+        return self._attachment_max_bytes
+
     def _cap_for(self, path: str) -> int | None:
+        # The attachment endpoint carries the file itself, so the API's JSON cap
+        # would refuse every real upload. It enforces its own streamed ceiling
+        # (`intent.max_bytes`, measured while reading); this is only the cheap
+        # `Content-Length` fast path against the deployment-wide maximum.
+        if path == _MCP_UPLOAD_PATH:
+            return self.attachment_max_bytes
         if path.startswith(_API_PREFIX):
             return self.max_bytes
         if path == "/mcp" or path.startswith("/mcp/"):

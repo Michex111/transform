@@ -164,7 +164,10 @@ token. It is advertised in \`scopes_supported\` and always accepted, but it is a
 | \`get_credits\` | read | the user's remaining credits |
 | \`convert_file\` | convert | starts a job; the original is never modified |
 | \`save_file\` | write | saves a result you produced into the Drive |
-| \`upload_file\` | write | creates a new file (bounded in size) |
+| \`upload_file\` | write | creates a new file from text/bytes you provide (bounded in size) |
+| \`create_upload_link\` | write | a single-use link that receives a real attachment's bytes |
+| \`get_upload_status\` | read | whether that upload landed, and the job it started |
+| \`import_file_from_url\` | write | import a direct https file URL (may be disabled by the operator) |
 | \`create_folder\` | write | the only structural change you may make |
 | \`delete_file\` | delete | irreversible |
 | \`list_workspaces\` | workspaces.read | the user's cloud workspaces |
@@ -205,13 +208,37 @@ was truncated.
 
 Deliberate limitations — do not work around these:
 - \`convert_file\` requires a file already in the Drive. A chat attachment is
-  not automatically accessible to this server; \`upload_file\` takes the content
-  (\`content_text\` for UTF-8, \`content_base64\` for bytes) and is size-capped.
-  Never invent access to a local file.
+  not automatically accessible to this server: you may see extracted text or an
+  image preview, but not the original bytes. Use \`upload_file\` only for text
+  you can see and reproduce exactly (\`content_text\`) or bytes you actually
+  hold (\`content_base64\`).
 - Tools resolve file and job IDs server-side; never supply a storage object key.
   \`save_file\` only promotes a conversion result.
 - There is no tool that deletes or renames a folder or a workspace. Deletion of a
   workspace is a decision a human makes in the app.
+
+### Attached files (a file the user put in the chat)
+
+Choose in this order:
+
+1. **Text whose exact content you can see** -> \`upload_file(content_text=...)\`
+   then \`convert_file\`. Never retype extracted PDF/DOCX text and present it as
+   the original file.
+2. **You have a code sandbox or shell where the attachment exists as a file**
+   (for example \`/mnt/user-data/uploads/<name>\` in Claude, or any local path)
+   -> \`create_upload_link\`, run its \`curl_command\` there with that path, then
+   poll \`get_upload_status\` until it says \`COMPLETED\`.
+3. **Otherwise** -> \`create_upload_link\` and give the user its
+   \`upload_page_url\` to open and drop the same file into, then poll
+   \`get_upload_status\`.
+
+Never claim an upload happened until \`get_upload_status\` says \`COMPLETED\`.
+If \`curl\` fails with a network or proxy error, the sandbox probably blocks
+this API's domain: ask the user to allow it in the client's code-execution
+network settings, or use \`upload_page_url\` instead. The capability is a
+bearer credential for one upload: keep it in the \`X-Transform-Upload\` header
+(or the page fragment), never in a query string, and share it only with the
+intended user.
 
 ## 5. Conversions are asynchronous
 

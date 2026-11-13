@@ -14,6 +14,7 @@ from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from src.infrastructure.adapters.security.rate_limiter import RedisRateLimiter
+from src.application.services.mcp.upload_capability import UPLOAD_PATH as _MCP_UPLOAD_PATH
 from src.infrastructure.config.settings import get_settings
 from src.infrastructure.logging.audit import log_rate_limited
 from src.infrastructure.redis.client import create_redis_client
@@ -219,6 +220,22 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     def _resolve_limit(self, request: Request) -> tuple[str, int]:
         """Determine the rate-limit key and window limit for a request."""
         client_ip = request.client.host if request.client else "unknown"
+
+        # The attachment upload endpoint is keyed by the CAPABILITY, not the
+        # client IP. Hosted code sandboxes (Claude, ChatGPT and similar) share a
+        # small pool of egress addresses, so an IP-keyed bucket would throttle
+        # unrelated users together — and a 429 in the middle of a legitimate
+        # upload is indistinguishable from a broken link. The capability is the
+        # right unit: one link, one uploader. Without a capability (a probe, or
+        # the page itself) the fallback still gets its OWN bucket rather than
+        # the anonymous per-IP one, so a burst of link-less requests cannot
+        # consume the budget of ordinary anonymous API traffic.
+        if request.url.path == _MCP_UPLOAD_PATH:
+            capability = request.headers.get("x-transform-upload") or ""
+            if capability:
+                digest = hashlib.sha256(capability.encode("utf-8")).hexdigest()[:32]
+                return f"mcp-upload:{digest}", self._settings.MCP_UPLOAD_RATE_LIMIT
+            return f"ip:{client_ip}:mcp-upload", self._settings.MCP_UPLOAD_RATE_LIMIT
 
         # Credential-guessing endpoints are always keyed by client IP at the
         # strict auth limit, even when the caller sends an X-API-Key or bearer
