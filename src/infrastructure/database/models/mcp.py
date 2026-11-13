@@ -162,3 +162,9 @@ class MCPTokenModel(Base):
         DateTime(timezone=True), nullable=False, default=lambda: datetime.now(UTC)
     )
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    #: Hash of the token this one was rotated into, when it was rotated.
+    #:
+    #: ``revoked_at`` alone cannot distinguish "the user revoked this" from "a
+    #: refresh replaced it", and the reuse grace window must only ever apply to
+    #: the second. Only the hash is stored, so this can never be replayed.
+    replaced_by: Mapped[str | None] = mapped_column(String(64), nullable=True)

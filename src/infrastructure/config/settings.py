@@ -451,6 +451,30 @@ class Settings(BaseSettings):
     MCP_REFRESH_TOKEN_TTL_DAYS: int = 30
     #: PKCE authorization codes are redeemed within seconds of being issued.
     MCP_AUTHORIZATION_CODE_TTL_MINUTES: int = 5
+    #: How long a *rotated* refresh token may still be presented.
+    #:
+    #: Refresh-token rotation is single-use, but a client that retries a request
+    #: whose response it never saw (a network timeout, two browser tabs, a
+    #: hosted client's own retry) will present the token it still holds. Without
+    #: a grace window that replay is `invalid_grant`, and several MCP clients
+    #: respond to that by dropping the whole connection. Inside the window the
+    #: server mints a fresh pair instead of failing; after it, replay is refused
+    #: exactly as before. 0 disables the window.
+    MCP_REFRESH_REUSE_GRACE_SECONDS: int = 60
+    #: Requests per minute, per (client_id, IP), for the OAuth endpoints.
+    #:
+    #: These endpoints carry no bearer token, so they would otherwise share the
+    #: anonymous per-IP bucket with every other unauthenticated call. Hosted MCP
+    #: clients (Claude.ai, ChatGPT, Gemini) call from a small pool of shared
+    #: egress addresses, so one IP-keyed bucket would throttle unrelated users
+    #: together — and a 429 on a token refresh disconnects the client.
+    MCP_OAUTH_RATE_LIMIT: int = 240
+    #: How often the API purges expired MCP codes and tokens.
+    MCP_HOUSEKEEPING_INTERVAL_SECONDS: int = 3600
+    #: Maximum characters a single `read_file_text` page may return.
+    MCP_TEXT_PAGE_CHARS: int = 24_000
+    #: Maximum bytes read from storage when extracting text from one document.
+    MCP_TEXT_EXTRACTION_MAX_BYTES: int = 25 * 1024 * 1024
     #: SPA route that renders the consent screen. Relative to ``APP_BASE_URL``.
     MCP_CONSENT_PATH: str = "/app/authorize"
     #: Largest request body the MCP transport accepts, in bytes.

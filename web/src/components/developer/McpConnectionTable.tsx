@@ -172,6 +172,12 @@ export function McpConnectionTable({
               )}
             </div>
 
+            <p className="mt-2 text-[11px] text-muted">
+              Permission changes take effect on this application&apos;s next request — you do not
+              need to reconnect it. Removing a permission stops that tool immediately; adding one
+              lets the agent use it straight away.
+            </p>
+
             {connection.status === "PAUSED" && connection.paused_at ? (
               <p className="mt-2 text-[11px] text-warning">
                 Paused {new Date(connection.paused_at).toLocaleString(undefined, { hour12: false })}.

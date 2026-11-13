@@ -28,6 +28,7 @@ class ConversionJobRepositoryPort(ConversionJobWriteRepositoryPort, Protocol):
         limit: int,
         since: datetime | None = None,
         origin: JobOrigin | None = None,
+        grant_id: str | None = None,
     ) -> tuple[list[ConversionJob], int]:
         """Return the user's job history (newest first) plus the total count.
 
@@ -38,6 +39,10 @@ class ConversionJobRepositoryPort(ConversionJobWriteRepositoryPort, Protocol):
         returned. ``None`` (the default) means unfiltered, preserving the
         historical behaviour for every existing caller; the MCP history tool
         passes ``JobOrigin.MCP`` to answer "what did this agent convert?".
+
+        When ``grant_id`` is provided, only jobs started by that MCP connection
+        are returned — the narrower meaning the agent history tool's ``AGENT``
+        scope promises.
         """
         ...
 

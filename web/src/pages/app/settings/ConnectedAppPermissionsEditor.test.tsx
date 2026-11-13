@@ -188,17 +188,17 @@ describe("ConnectedAppPermissionsEditor effect messaging", () => {
       render(APP, { ...initialPermissionState(APP), scopes: ["documents.read"] }),
     );
     expect(html).toContain("next request");
-    expect(html).toContain("re-authorize");
+    expect(html).toContain("does not need to reconnect");
   });
 
-  it("says an addition waits for re-authorization rather than being instant", () => {
+  it("says an addition also takes effect on the next request", () => {
     const html = visibleText(
       render(APP, {
         ...initialPermissionState(APP),
         scopes: ["documents.read", "documents.convert", "documents.write"],
       }),
     );
-    expect(html).toContain("does not start working");
-    expect(html).toContain("re-authorizes");
+    expect(html).toContain("next request");
+    expect(html).toContain("does not need to reconnect");
   });
 });

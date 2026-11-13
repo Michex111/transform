@@ -132,6 +132,7 @@ class ConversionService:
         user_id: int,
         tier: SubscriptionTier = SubscriptionTier.FREE,
         origin: JobOrigin = JobOrigin.WEB,
+        grant_id: str | None = None,
     ) -> ConversionJob:
         """Create and enqueue a job that converts a file already stored in the
         user's library.
@@ -157,6 +158,7 @@ class ConversionService:
             object_key=object_key,
             user_id=user_id,
             origin=origin,
+            grant_id=grant_id,
         )
         await self.create_conversion_job(job)
         await self.push_conversion_job(job, tier=tier)
@@ -173,6 +175,7 @@ class ConversionService:
         limit: int = 20,
         since=None,
         origin: JobOrigin | None = None,
+        grant_id: str | None = None,
     ) -> tuple[list[ConversionJob], int]:
         """Return the user's conversion history (newest first) plus total count.
 
@@ -186,7 +189,7 @@ class ConversionService:
                 scope (see ``MCPToolBox.get_conversion_history``).
         """
         return await self.db_repository.list_user_history(
-            user_id, offset, limit, since=since, origin=origin
+            user_id, offset, limit, since=since, origin=origin, grant_id=grant_id
         )
 
     async def search_jobs(

@@ -341,15 +341,23 @@ def test_removing_delete_needs_no_confirmation() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_narrowing_invalidates_a_wider_token_the_agent_already_holds() -> None:
-    """The claim the UI makes: narrowing bites on the agent's next call."""
+def test_narrowing_takes_effect_on_the_agent_following_call() -> None:
+    """The claim the UI makes: narrowing bites on the agent's next call.
+
+    It bites by *reducing the token's effective scopes*, not by rejecting the
+    token. Rejecting made clients loop refresh → 401 and show the connection as
+    broken; the safer and more useful behaviour is that the same session keeps
+    working with less authority.
+    """
 
     async def _run() -> None:
         repo = FakeMCPRepository()
         service = _service(repo)
         grant = await _seed_grant(repo, scopes=(READ, CONVERT, DELETE))
         await _issue_access_token(repo, grant, "wide-token")
-        assert await service.load_access_token("wide-token") is not None
+        loaded = await service.load_access_token("wide-token")
+        assert loaded is not None
+        assert DELETE in loaded.scopes
 
         await service.update_connected_app(
             user_id=7,
@@ -359,7 +367,9 @@ def test_narrowing_invalidates_a_wider_token_the_agent_already_holds() -> None:
             folder_id=None,
             history_scope=HistoryScope.AGENT,
         )
-        assert await service.load_access_token("wide-token") is None
+        narrowed = await service.load_access_token("wide-token")
+        assert narrowed is not None
+        assert narrowed.scopes == (READ,)
 
     asyncio.run(_run())
 

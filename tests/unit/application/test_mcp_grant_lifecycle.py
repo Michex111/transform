@@ -332,7 +332,13 @@ def test_revoking_another_users_grant_is_impossible() -> None:
 
 
 def test_scoping_narrows_a_token_after_a_re_consent() -> None:
-    """A token minted before a scope reduction is refused, not downgraded."""
+    """A token minted before a scope reduction is narrowed, not refused.
+
+    Refusing it disconnected clients that had done nothing wrong: they kept a
+    live token and the verifier answered "not authenticated" on every call until
+    they re-authorized. The grant is the authority, so the same token simply
+    loses the removed capability.
+    """
 
     with sqlite_session_factory() as factory:
 
@@ -350,7 +356,9 @@ def test_scoping_narrows_a_token_after_a_re_consent() -> None:
                 # Re-consent without `delete`.
                 await _grant(service, user_id=account, scopes=(AgentScope.DOCUMENTS_READ,))
 
-                assert await service.load_access_token("wide-token") is None
+                loaded = await service.load_access_token("wide-token")
+                assert loaded is not None
+                assert loaded.scopes == (AgentScope.DOCUMENTS_READ,)
 
         asyncio.run(_run())
 

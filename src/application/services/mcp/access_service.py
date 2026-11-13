@@ -26,7 +26,7 @@ import hashlib
 import secrets
 import uuid
 from collections.abc import Callable, Iterable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
@@ -54,7 +54,6 @@ from src.domain.security.value_object.agent_scope import (
     DEFAULT_SCOPES,
     KNOWN_REQUEST_SCOPES,
     AgentScope,
-    is_subset,
     normalize_scopes,
 )
 from src.infrastructure.logging.audit import log_connection_control
@@ -128,6 +127,17 @@ class AuthorizationRequestView:
     redirect_uri: str
     resource: str
     requested_scopes: tuple[AgentScope, ...]
+    #: Every scope the user *may* choose for this connection: the client's
+    #: registered set intersected with the deployment's grantable set.
+    #:
+    #: Distinct from :attr:`requested_scopes` on purpose. An authorization
+    #: request that names no scope resolves to ``DEFAULT_SCOPES`` (read, convert,
+    #: write), but the user must still be able to turn on workspaces or delete
+    #: when they choose to — otherwise those capabilities cannot be granted at
+    #: all from any client that omits ``scope`` (which is most of them).
+    #: ``requested_scopes`` is what the screen pre-checks; ``available_scopes``
+    #: is what it shows.
+    available_scopes: tuple[AgentScope, ...]
     #: Scopes this user already granted this client, so the screen can say
     #: "already allowed" instead of pretending the decision is new.
     already_granted: tuple[AgentScope, ...]
@@ -150,6 +160,7 @@ class MCPAccessService:
         access_token_ttl_minutes: int = 60,
         refresh_token_ttl_days: int = 30,
         authorization_code_ttl_minutes: int = 5,
+        refresh_reuse_grace_seconds: int = 60,
         grantable_scopes: Sequence[AgentScope] = ALL_SCOPES,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
@@ -161,6 +172,7 @@ class MCPAccessService:
         self._access_ttl = timedelta(minutes=access_token_ttl_minutes)
         self._refresh_ttl = timedelta(days=refresh_token_ttl_days)
         self._code_ttl = timedelta(minutes=authorization_code_ttl_minutes)
+        self._refresh_grace = timedelta(seconds=max(0, refresh_reuse_grace_seconds))
         self._grantable = tuple(grantable_scopes)
         self._clock = clock or (lambda: datetime.now(UTC))
 
@@ -198,6 +210,7 @@ class MCPAccessService:
         client = await self._require_client(client_id)
         self._ensure_redirect_uri(client, redirect_uri)
         scopes = self.resolve_scopes(client, requested_scopes)
+        available = self.available_scopes(client)
         resource_url = self.validate_resource(resource)
         existing = await self._repository.get_grant_for_user_client(user_id, client_id)
         already = existing.scopes if existing is not None and existing.is_active() else ()
@@ -207,7 +220,8 @@ class MCPAccessService:
             redirect_uri=redirect_uri,
             resource=resource_url,
             requested_scopes=scopes,
-            already_granted=tuple(s for s in already if s in scopes),
+            available_scopes=available,
+            already_granted=tuple(s for s in already if s in available),
             # Report the binding the user already has so a re-consent screen
             # reflects it instead of defaulting to whole-Drive, which would look
             # like a fresh decision. With no grant, the least-access defaults win.
@@ -231,6 +245,7 @@ class MCPAccessService:
         folder_access: FolderAccess = FolderAccess.ALL,
         folder_id: str | None = None,
         history_scope: HistoryScope = HistoryScope.AGENT,
+        approved_scopes: Iterable[str] | None = None,
     ) -> str:
         """Record consent and return the redirect the browser must follow.
 
@@ -248,7 +263,23 @@ class MCPAccessService:
         """
         client = await self._require_client(client_id)
         self._ensure_redirect_uri(client, redirect_uri)
-        scopes = self.resolve_scopes(client, requested_scopes)
+        if approved_scopes is None:
+            # No explicit decision: grant exactly what was requested (the
+            # pre-existing behaviour).
+            scopes = self.resolve_scopes(client, requested_scopes)
+        else:
+            # The user's decision, checked against what this client *may* be
+            # granted rather than only against what it asked for. That is what
+            # makes a capability the request never named (workspaces.*, delete)
+            # grantable at all, while still refusing anything the deployment or
+            # the client's registration does not allow.
+            available = set(self.available_scopes(client))
+            scopes = normalize_scopes(approved_scopes)
+            outside = [scope.value for scope in scopes if scope not in available]
+            if outside:
+                raise InvalidScopeError(outside, reason="client")
+            if not scopes:
+                raise InvalidGrantError("Select at least one permission to allow.")
         resource_url = self.validate_resource(resource)
         if not code_challenge:
             raise InvalidGrantError("A PKCE code_challenge is required.")
@@ -345,12 +376,30 @@ class MCPAccessService:
         scopes: Iterable[str] | None = None,
         resource: str | None = None,
     ) -> IssuedTokens:
-        """Redeem a refresh token, rotating it (the presented one is revoked)."""
+        """Redeem a refresh token, rotating it atomically.
+
+        Two properties this method exists to guarantee, both of which were
+        previously bugs that disconnected real clients:
+
+        * **The grant is the authority.** The issued scope set is the *grant's
+          current* scopes (optionally narrowed by the request), never the scopes
+          frozen into the token at issue time. A user who turns a permission on
+          or off in Settings therefore takes effect on the next refresh instead
+          of requiring a fresh consent, and a narrowing never leaves the client
+          holding a token that the verifier then refuses.
+        * **Rotation is atomic and a retry is not a replay.** The presented token
+          is revoked by a single conditional UPDATE; if that loses a race, or the
+          token was rotated moments ago, a request inside
+          ``MCP_REFRESH_REUSE_GRACE_SECONDS`` receives a fresh pair instead of
+          ``invalid_grant``. The successor minted by the request being retried is
+          revoked, so exactly one refresh token stays live. After the window a
+          replay is refused exactly as before.
+        """
         now = self._clock()
         record = await self._repository.get_token(hash_secret(refresh_token))
         if record is None or record.kind != REFRESH_TOKEN_KIND:
             raise InvalidGrantError("The refresh token is invalid.")
-        if record.revoked_at is not None or record.expires_at <= now:
+        if record.expires_at <= now:
             raise InvalidGrantError("The refresh token is expired or revoked.")
         if record.client_id != client_id:
             raise InvalidGrantError("The refresh token was issued to a different client.")
@@ -360,19 +409,95 @@ class MCPAccessService:
             raise InvalidTargetError(resource)
 
         grant = await self._require_active_grant(record.grant_id, record.subject)
-        narrowed = record.scopes
-        if scopes:
-            requested = normalize_scopes(scopes)
-            if not requested or not is_subset(requested, record.scopes):
-                raise InvalidScopeError(list(scopes))
-            narrowed = requested
 
-        # Rotation: the presented refresh token dies with the exchange, so a
-        # stolen copy is single-use and its replay is a detectable change.
-        await self._repository.revoke_token(record.token_hash, now)
-        return await self._issue(
-            grant=grant, scopes=narrowed, resource=presented_resource, now=now, with_refresh=True
+        # A retry arrives with a token that is already revoked. Only a *rotated*
+        # one, inside the grace window, and for the same client is acceptable.
+        if record.revoked_at is not None:
+            if not self._within_reuse_grace(record, now):
+                raise InvalidGrantError("The refresh token is expired or revoked.")
+            # Mint a fresh pair and retire the successor the lost request
+            # created, so the connection never accumulates live refresh tokens.
+            successor = record.replaced_by
+            issued = await self._issue(
+                grant=grant,
+                scopes=self._effective_scopes(grant, scopes),
+                resource=presented_resource,
+                now=now,
+                with_refresh=True,
+            )
+            if successor:
+                await self._repository.revoke_successor(successor, now)
+            return issued
+
+        # Reserve the successor before the atomic rotate: the repository stores
+        # only hashes, so it must learn the successor's hash at rotation time.
+        successor_plaintext = secrets.token_urlsafe(32)
+        rotated = await self._repository.rotate_refresh_token(
+            record.token_hash, now, hash_secret(successor_plaintext)
         )
+        if rotated is None:
+            # Another request rotated it between our read and our UPDATE. Treat
+            # it exactly like the retry path above: inside the window the client
+            # gets working tokens; outside it, a refusal.
+            latest = await self._repository.get_token(record.token_hash)
+            if latest is None or not self._within_reuse_grace(latest, now):
+                raise InvalidGrantError("The refresh token is expired or revoked.")
+            issued = await self._issue(
+                grant=grant,
+                scopes=self._effective_scopes(grant, scopes),
+                resource=presented_resource,
+                now=now,
+                with_refresh=True,
+            )
+            if latest.replaced_by:
+                await self._repository.revoke_successor(latest.replaced_by, now)
+            return issued
+
+        return await self._issue(
+            grant=grant,
+            scopes=self._effective_scopes(grant, scopes),
+            resource=presented_resource,
+            now=now,
+            with_refresh=True,
+            refresh_plaintext=successor_plaintext,
+        )
+
+    def _within_reuse_grace(self, record: TokenRecord, now: datetime) -> bool:
+        """Whether a revoked refresh token may still be exchanged as a retry.
+
+        Requires an actual rotation (``replaced_by`` set) — a token revoked by
+        the user, or by :meth:`revoke_connection`, has no successor and is
+        always refused — and a ``revoked_at`` inside the configured window.
+        """
+        if (
+            record.replaced_by is None
+            or record.revoked_at is None
+            or self._refresh_grace <= timedelta(0)
+        ):
+            return False
+        revoked_at = record.revoked_at
+        if revoked_at.tzinfo is None:
+            revoked_at = revoked_at.replace(tzinfo=UTC)
+        return now - revoked_at <= self._refresh_grace
+
+    @staticmethod
+    def _effective_scopes(
+        grant: AgentGrant, requested: Iterable[str] | None
+    ) -> tuple[AgentScope, ...]:
+        """The scopes a refreshed token should carry: the grant's, narrowed.
+
+        Never the token's frozen set and never anything the grant lacks, so a
+        refresh can neither resurrect a revoked capability nor silently drop one
+        the user has since granted.
+        """
+        current = tuple(grant.scopes)
+        if not requested:
+            return current
+        wanted = normalize_scopes(requested)
+        narrowed = tuple(scope for scope in current if scope in set(wanted))
+        if not narrowed:
+            raise InvalidScopeError(list(requested))
+        return narrowed
 
     async def load_access_token(self, token: str) -> TokenRecord | None:
         """Resolve an access token to its record, or ``None`` if unusable.
@@ -393,11 +518,19 @@ class MCPAccessService:
         grant = await self._repository.get_grant(record.grant_id)
         if grant is None or not grant.is_active():
             return None
-        if not is_subset(record.scopes, grant.scopes):
-            # The grant was narrowed (or re-consented with fewer scopes) after
-            # this token was minted: the token is now more powerful than the
-            # consent behind it, so it is refused rather than downgraded.
-            return None
+        # The grant is the authority, not the scopes frozen into the token.
+        #
+        # This used to reject any token whose scopes were not a subset of the
+        # grant's, which meant that *narrowing* a connection in Settings left
+        # every refreshed token immediately unusable (the client looped
+        # refresh → 401 → refresh until it gave up), and it also meant that
+        # *widening* one had no effect until a full re-authorization. Both are
+        # fixed by resolving the effective set here, on every request: the token
+        # is a handle, the grant is the permission. The token's own scopes are
+        # deliberately not an upper bound — a grant that gains a capability is
+        # meant to be usable at once, which is what the Connected-apps screen
+        # promises.
+        effective = replace(record, scopes=tuple(grant.scopes))
         last_used = grant.last_used_at
         if last_used is not None and last_used.tzinfo is None:
             last_used = last_used.replace(tzinfo=UTC)
@@ -406,7 +539,18 @@ class MCPAccessService:
             # UPDATE would be a no-op otherwise, but it would still cost a round
             # trip on the hot path of every tool call.
             await self._repository.touch_grant(record.grant_id, now)
-        return record
+        return effective
+
+    async def effective_scopes_for_grant(self, grant_id: str) -> tuple[AgentScope, ...]:
+        """The scopes a token for ``grant_id`` should be treated as holding.
+
+        One place for the "grant is the authority" rule, so the tool transport
+        and the download capability cannot disagree about it.
+        """
+        grant = await self._repository.get_grant(grant_id)
+        if grant is None or not grant.is_active():
+            return ()
+        return tuple(grant.scopes)
 
     async def revoke_token(self, token: str) -> None:
         """Revoke an access or refresh token (RFC 7009).
@@ -645,6 +789,27 @@ class MCPAccessService:
                 raise InvalidScopeError(outside, reason="client")
         return scopes
 
+    def available_scopes(self, client: OAuthClientRecord) -> tuple[AgentScope, ...]:
+        """Every scope this client may be granted here, whether asked for or not.
+
+        The consent screen shows these, unchecked unless requested. It is the
+        client's registered set (which the SDK fills with the full request
+        vocabulary when a client omits ``scope``) intersected with the
+        deployment's ``grantable_scopes``.
+
+        This is deliberately broader than :meth:`resolve_scopes`: that decides
+        what an authorization *request* means; this decides what a *person* may
+        tick. Conflating the two is what made ``workspaces.*`` and
+        ``documents.delete`` impossible to grant from any client that omitted
+        ``scope`` at registration.
+        """
+        registered = {value for value in (client.scope or "").split() if value}
+        candidates = [
+            scope for scope in ALL_SCOPES
+            if scope in self._grantable and (not registered or scope.value in registered)
+        ]
+        return tuple(candidates)
+
     def validate_resource(self, resource: str | None) -> str:
         """Bind the request to this server's RFC 8707 resource identifier.
 
@@ -673,13 +838,13 @@ class MCPAccessService:
     @staticmethod
     def _ensure_redirect_uri(client: OAuthClientRecord, redirect_uri: str) -> None:
         """Exact-match the redirect URI against the registered set."""
-        registered = {str(uri) for uri in client.redirect_uris}
+        registered = set(client.redirect_uris)
         if redirect_uri not in registered:
             raise InvalidRedirectUriError()
 
     async def _require_active_grant(self, grant_id: str, subject: str) -> AgentGrant:
         grant = await self._repository.get_grant(grant_id)
-        if grant is None or str(grant.user_id) != str(subject):
+        if grant is None or str(grant.user_id) != subject:
             # Same error for "no such grant" and "someone else's grant": the
             # caller must not be able to distinguish the two.
             raise InvalidGrantError()
@@ -695,6 +860,7 @@ class MCPAccessService:
         resource: str,
         now: datetime,
         with_refresh: bool,
+        refresh_plaintext: str | None = None,
     ) -> IssuedTokens:
         access_token = secrets.token_urlsafe(32)
         await self._repository.save_token(
@@ -711,7 +877,7 @@ class MCPAccessService:
         )
         refresh_token = None
         if with_refresh:
-            refresh_token = secrets.token_urlsafe(32)
+            refresh_token = refresh_plaintext or secrets.token_urlsafe(32)
             await self._repository.save_token(
                 TokenRecord(
                     token_hash=hash_secret(refresh_token),

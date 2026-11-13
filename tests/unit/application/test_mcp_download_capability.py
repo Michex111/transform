@@ -58,6 +58,13 @@ class Fixture:
         assert user_id == 7 and file_key == "input/key"
         return self.row
 
+    async def get_file(self, user_id, file_id):
+        assert user_id == 7 and file_id == "file"
+        return SimpleNamespace(
+            id="file", user_id=7, file_key="file/key.pdf",
+            file_name="report.pdf", folder_id="child",
+        )
+
     async def resolve_folder_scope(self, user_id, folder_id):
         assert user_id == 7 and folder_id == "bound"
         return self.subtree
@@ -157,7 +164,25 @@ def test_cannot_issue_for_inaccessible_job(change: str) -> None:
         elif change == "no_output":
             f.job.output_file = None
         else:
-            f.token.scopes = (AgentScope.DOCUMENTS_CONVERT,)
+            # The GRANT's scopes are the authority now, so "no read" means the
+            # consent itself does not include documents.read.
+            f.grant.scopes = (AgentScope.DOCUMENTS_CONVERT,)
         with pytest.raises(DownloadUnavailable):
             await f.service.create_link("real-token", "job")
+    asyncio.run(run())
+
+
+def test_a_drive_file_link_authorizes_and_redeems() -> None:
+    """C3: the same capability mechanism works for a Drive file, not just a job."""
+
+    async def run():
+        f = Fixture()
+        link = await f.service.create_file_link("real-token", "file")
+        capability = link["download_url"].split("#", 1)[1]
+        target = await f.service.redeem(capability)
+        assert target.file_id == "file"
+        assert target.output_key == "file/key.pdf"
+        assert target.file_name == "report.pdf"
+        assert target.job_id is None
+
     asyncio.run(run())

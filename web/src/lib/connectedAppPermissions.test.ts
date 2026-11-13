@@ -239,16 +239,17 @@ describe("describePermissionChange", () => {
     expect(effect.message).toContain("next request");
   });
 
-  it("says an addition waits for re-authorization rather than taking effect now", () => {
+  it("says an addition also takes effect on the next request", () => {
     const effect = describePermissionChange({
       state: state({ scopes: ["documents.read", "documents.convert", "documents.write"] }),
       original: app(),
     });
     expect(effect.direction).toBe("widening");
     expect(effect.message).toBe(PERMISSION_WIDENING_MESSAGE);
-    // The dangerous mistake is implying the new permission works immediately.
-    expect(effect.message).not.toContain("next request");
-    expect(effect.message).toContain("re-authorizes");
+    // The grant is the authority, so widening is immediate too. Saying it waits
+    // for a re-authorization was true only before A1/A2 were fixed.
+    expect(effect.message).toContain("next request");
+    expect(effect.message).toContain("does not need to reconnect");
   });
 
   it("treats a folder widening and narrowing by direction", () => {
@@ -296,7 +297,7 @@ describe("describePermissionChange", () => {
     });
     expect(effect.direction).toBe("both");
     expect(effect.message).toContain("next request");
-    expect(effect.message).toContain("re-authorizes");
+    expect(effect.message).toContain("does not need to reconnect");
   });
 });
 

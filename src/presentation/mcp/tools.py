@@ -40,7 +40,10 @@ from src.application.services.mcp.download_capability import DownloadUnavailable
 from src.application.services.mcp.toolbox import MCPToolBox, MCPToolContext
 from src.application.services.mcp.workspace_tools import MCPWorkspaceTools
 from src.domain.security.value_object.agent_scope import normalize_scopes
-from src.presentation.api.dependencies.mcp_download import create_mcp_download_link
+from src.presentation.api.dependencies.mcp_download import (
+    create_mcp_download_link,
+    create_mcp_file_download_link,
+)
 from src.presentation.mcp.activity import instrument_tool
 from src.presentation.mcp.dependencies import open_mcp_scope
 
@@ -63,14 +66,25 @@ Workflow for "convert my X and save the result":
   4. save_file(job_id) — save the result into the Drive if the user requests it.
 
 Other things you can do:
+  - read_file_text(file_id)  — READ a document's text. Use this for "summarise,
+     quote, translate this document". Text formats come back directly; PDF,
+     DOCX, PPTX, XLSX and similar are extracted for you. Paged by characters:
+     read has_more / next_offset. This is almost always what you want instead of
+     download_file.
+  - download_file(file_id)   — transfer a document's RAW BYTES (base64). Use it
+     only when the bytes themselves matter. Large files arrive in parts: read
+     has_more / next_offset and concatenate the decoded parts IN ORDER. A single
+     part is not the file.
+  - get_file_download_link(file_id) — a short-lived browser link for one of the
+     user's files.
+  - read_conversion_output(job_id) — read a finished conversion's output as
+     text without saving it to the Drive.
   - list_folders  — find a folder's id, then pass it as folder_id to list_files
      or save_file. Nothing else returns folder ids.
   - create_folder(name, parent_id) — make a folder to organise into.
-  - download_file(file_id) — read a document's contents (as base64). Large files
-     arrive in parts: read has_more / next_offset and keep calling until it is
-     false, then concatenate the parts IN ORDER. A single part is not the file.
-     Never summarise a file you have only partly read — say how much you saw.
-  - upload_file(file_name, content_base64) — create a new file in the Drive.
+  - upload_file(file_name, content_text | content_base64) — create a new file in
+     the Drive. Pass content_text for UTF-8 text; content_base64 only for
+     binary.
   - get_conversion_history — list recent conversions.
   - get_credits — check the user's remaining credits.
 
@@ -83,22 +97,32 @@ documents.* ones and are NOT granted by default.
   1. list_workspaces — find one. Ask the user which to use; never assume one.
   2. get_workspace(workspace_id) — runtime state, toolchain and disk budget.
   3. write_workspace_file(workspace_id, path, content) — write real file content
-     verbatim (this is also how you create a directory).
-  4. run_code(workspace_id, source, mode) — SCRIPT (Python), COMMAND (shell) or
+     verbatim (this is also how you create a directory). Pass content_base64 for
+     binary data.
+  4. copy_file_to_workspace(file_id, workspace_id, path) — bring a Drive file in
+     so code can read it. Needs documents.read and workspaces.execute.
+  5. run_code(workspace_id, source, mode) — SCRIPT (Python), COMMAND (shell) or
      PROJECT (`sync`, `lock`, `add <package>`). Returns an execution id
      immediately.
-  5. get_execution(execution_id) — the status, exit_code, stdout, stderr and
-     artifacts. Call this until the status is terminal.
-  6. list_artifacts(workspace_id) — files recent runs produced. `stored: true`
+  6. get_execution(execution_id) — the status, exit_code, stdout, stderr and
+     artifacts. Call this until the status is terminal. Output is paged: use
+     offset to read further back.
+  7. list_artifacts(workspace_id) — files recent runs produced. `stored: true`
      means the file was copied into durable storage and will outlive the runtime;
      `stored: false` means it only ever existed inside the runtime.
-  7. create_workspace(name) — only when the user asks for a new one.
-  8. list_workspace_files / read_workspace_file — inspect the workspace.
-  9. cancel_execution(execution_id) — stop a run that is taking too long. A run
+  8. save_artifact_to_drive(execution_id, path) — save a stored artifact into
+     the Drive. Needs workspaces.read and documents.write.
+  9. create_workspace(name) — only when the user asks for a new one.
+ 10. list_workspace_files / read_workspace_file — inspect the workspace.
+     read_workspace_file accepts encoding="base64" for binary files, and pages
+     with offset / max_bytes.
+ 11. cancel_execution(execution_id) — stop a run that is taking too long. A run
      can last minutes, and this is the only way to end one.
- 10. save_workspace_environment(workspace_id) — after installing packages, so
-     they survive the runtime being replaced. It is built in the background, so
-     it is not saved until a later call shows it ready.
+ 12. start_workspace / stop_workspace — control the runtime explicitly. File and
+     code tools start it automatically when needed, so you rarely need these.
+ 13. save_workspace_environment(workspace_id) — after installing packages, so
+     they survive the runtime being replaced. It is built in the background; use
+     get_workspace_environment to see whether it is ready.
 
 What a workspace does and does not preserve: files, pyproject.toml, uv.lock and
 installed packages survive stopping and restarting. Running processes, open
@@ -129,7 +153,9 @@ Notes:
   - delete_file is permanent and needs the documents.delete permission, which
     is not granted by default. Always confirm with the user first. There is no
     tool that deletes a workspace — that is deliberate.
-  - Never claim to have read a document's text unless you used download_file.
+  - Never claim to have read a document's text unless you used read_file_text
+    (or read_conversion_output) and saw the text. download_file gives you bytes,
+    not a summary.
 """
 
 
@@ -157,7 +183,11 @@ async def _tool_scope() -> AsyncGenerator[tuple[MCPToolBox, MCPToolContext]]:
     async with open_mcp_scope(user_id, grant_id) as scope:
         yield scope.toolbox, MCPToolContext(
             user_id=user_id,
-            scopes=scopes,
+            # The GRANT's current scopes, not the token's frozen copy. This is
+            # what makes an edit on the Connected-apps screen take effect on the
+            # next call in either direction. ``token.scopes`` is kept only for a
+            # token that carries no grant (which cannot reach a tool anyway).
+            scopes=scope.scopes if scope.scopes else scopes,
             tier_resolver=scope.resolve_tier,
             client_id=token.client_id,
             grant_id=grant_id,
@@ -167,6 +197,7 @@ async def _tool_scope() -> AsyncGenerator[tuple[MCPToolBox, MCPToolContext]]:
             folder_access=scope.folder_access,
             folder_id=scope.folder_id,
             history_scope=scope.history_scope,
+            authorization_error=scope.authorization_error,
         )
 
 
@@ -196,13 +227,14 @@ async def _workspace_scope() -> AsyncGenerator[tuple["MCPWorkspaceTools", MCPToo
             raise RuntimeError("Workspace tools are not configured.")
         yield scope.workspace_tools, MCPToolContext(
             user_id=user_id,
-            scopes=scopes,
+            scopes=scope.scopes if scope.scopes else scopes,
             tier_resolver=scope.resolve_tier,
             client_id=token.client_id,
             grant_id=grant_id,
             folder_access=scope.folder_access,
             folder_id=scope.folder_id,
             history_scope=scope.history_scope,
+            authorization_error=scope.authorization_error,
         )
 
 
@@ -385,6 +417,138 @@ def register_tools(mcp: MCPServer) -> None:
         """
         async with _tool_scope() as (toolbox, ctx):
             return await toolbox.download_file(ctx, file_id, offset, max_bytes)
+
+    @mcp.tool(
+        name="read_file_text",
+        title="Read a document's text",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=False,
+        ),
+        structured_output=True,
+    )
+    @instrument_tool("read_file_text")
+    async def read_file_text(
+        file_id: str,
+        offset: int = 0,
+        max_chars: int | None = None,
+    ) -> dict[str, Any]:
+        """Return readable TEXT from one of the user's documents.
+
+        Use this when the user asks you to read, summarise, quote or translate a
+        document. Text formats (txt, md, csv, json, source code) are decoded
+        directly; PDF, DOCX, ODT, RTF, PPTX, XLSX, HTML and EPUB are extracted
+        for you. Nothing is converted, saved or charged.
+
+        The text is paged by character. A page has `has_more` and `next_offset`;
+        keep calling with `offset` = `next_offset` until `has_more` is false, then
+        work with the parts in order.
+
+        Args:
+            file_id: The id returned by list_files.
+            offset: Character offset to start from. Omit for the beginning.
+            max_chars: Preferred page size in characters (clamped to the server
+                maximum).
+
+        Returns:
+            {"ok": true, "content", "offset", "chars_returned", "total_chars",
+            "has_more", "next_offset"?, "file_name", "extension", "file_id"} or
+            {"ok": false, "error"}.
+
+        Read-only. Requires documents.read. A file outside this connection's
+        folder is reported exactly as one that does not exist.
+        """
+        async with _tool_scope() as (toolbox, ctx):
+            return await toolbox.read_file_text(ctx, file_id, offset, max_chars)
+
+    @mcp.tool(
+        name="read_conversion_output",
+        title="Read a conversion result as text",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=False,
+        ),
+        structured_output=True,
+    )
+    @instrument_tool("read_conversion_output")
+    async def read_conversion_output(
+        job_id: str,
+        offset: int = 0,
+        max_chars: int | None = None,
+    ) -> dict[str, Any]:
+        """Read a COMPLETED conversion's output as text, without saving it.
+
+        Use this instead of save_file + download_file when the point is to read
+        what a conversion produced. The output is extracted to text exactly as
+        read_file_text does, and nothing is written to the user's Drive.
+
+        Args:
+            job_id: A job_id whose status is COMPLETED.
+            offset: Character offset to start from.
+            max_chars: Preferred page size in characters.
+
+        Returns:
+            {"ok": true, "content", "offset", "chars_returned", "total_chars",
+            "has_more", "next_offset"?, "job_id", "target_format"} or
+            {"ok": false, "error"}.
+
+        Read-only. Requires documents.read.
+        """
+        async with _tool_scope() as (toolbox, ctx):
+            return await toolbox.read_conversion_output(ctx, job_id, offset, max_chars)
+
+    @mcp.tool(
+        name="get_file_download_link",
+        title="Get a download link for a file",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=False,
+        ),
+        structured_output=True,
+    )
+    @instrument_tool("get_file_download_link")
+    async def get_file_download_link(file_id: str) -> dict[str, Any]:
+        """A short-lived browser link to download one of the user's files.
+
+        Use this when the user wants the file itself (to save it, or open it in
+        another app). Share the link only with the intended user: anyone holding
+        it can download the file while it remains authorized, and it expires in
+        a few minutes.
+
+        Args:
+            file_id: The id returned by list_files.
+
+        Returns:
+            {"ok": true, "download_url", "expires_in_seconds"} or
+            {"ok": false, "error"} when the file cannot be reached by this
+            connection.
+
+        Read-only. Requires documents.read. Never returns the file's internal
+        storage location.
+        """
+        token = get_access_token()
+        if token is None:
+            raise RuntimeError("MCP tool invoked without an authenticated access token.")
+        async with _tool_scope() as (toolbox, ctx):
+            # Ownership, folder confinement and the scope check all still apply;
+            # this only decides whether a link may be minted.
+            file_result = await toolbox.get_file(ctx, file_id)
+            if not file_result.get("ok"):
+                return file_result
+        try:
+            link = await create_mcp_file_download_link(token.token, file_id)
+        except DownloadUnavailable:
+            return {
+                "ok": False,
+                "error": "A download link is not available for this file and connection.",
+            }
+        return {"ok": True, **link}
 
     @mcp.tool(
         name="list_folders",
@@ -686,24 +850,26 @@ def register_tools(mcp: MCPServer) -> None:
     @instrument_tool("upload_file")
     async def upload_file(
         file_name: str,
-        content_base64: str,
+        content_text: str | None = None,
+        content_base64: str | None = None,
         folder_id: str | None = None,
     ) -> dict[str, Any]:
         """Create a NEW file in the user's Drive from content you provide.
 
-        Generate the file's bytes, base64-encode them, and pass them here. This
-        is how you save a document you authored (for example a report you
-        generated as text) into the user's Drive, unlike save_file which only
-        promotes a conversion result. A chat attachment is not automatically
-        accessible to this server: this tool requires its actual bytes, not an
-        attachment reference or URL.
+        This is how you save a document you authored (for example a report you
+        generated as text). Unlike save_file, which only promotes a conversion
+        result, this accepts content from you. A chat attachment is not
+        automatically accessible to this server: this tool requires the actual
+        content, not an attachment reference or URL.
 
         Args:
             file_name: The name for the new file, including its extension
-                (e.g. "report.pdf" or "notes.md").
-            content_base64: The file's raw bytes, base64-encoded. This is
-                supplied by you and is length-limited (a few tens of MB); for
-                anything larger ask the user to upload it in the web app.
+                (e.g. "report.md" or "notes.csv").
+            content_text: The file's content as UTF-8 text. Use this for any
+                textual document — do not hand-encode it as base64.
+            content_base64: The file's raw bytes, base64-encoded. Use this only
+                for binary content. Exactly one of content_text/content_base64
+                must be given.
             folder_id: Optional destination folder id. Omit to place the file in
                 the connection's folder (or the Drive root for an unrestricted
                 connection). A folder outside this connection's allowed folder
@@ -717,7 +883,10 @@ def register_tools(mcp: MCPServer) -> None:
         """
         async with _tool_scope() as (toolbox, ctx):
             return await toolbox.upload_file(
-                ctx, file_name=file_name, content_base64=content_base64,
+                ctx,
+                file_name=file_name,
+                content_text=content_text,
+                content_base64=content_base64,
                 folder_id=folder_id,
             )
 
@@ -777,7 +946,7 @@ def register_tools(mcp: MCPServer) -> None:
         structured_output=True,
     )
     @instrument_tool("list_workspaces")
-    async def list_workspaces(limit: int = 20) -> dict[str, Any]:
+    async def list_workspaces(limit: int = 20, offset: int = 0) -> dict[str, Any]:
         """List the user's cloud workspaces.
 
         A workspace is a persistent Python environment that keeps its files and
@@ -785,6 +954,7 @@ def register_tools(mcp: MCPServer) -> None:
 
         Args:
             limit: Maximum workspaces to return (default 20, maximum 50).
+            offset: Workspaces to skip, for paging.
 
         Returns:
             {"ok": true, "total", "workspaces": [{workspace_id, name,
@@ -792,7 +962,7 @@ def register_tools(mcp: MCPServer) -> None:
             {"ok": false, "error", "required_scope": "workspaces.read"}.
         """
         async with _workspace_scope() as (tools, ctx):
-            return await tools.list_workspaces(ctx, limit=limit)
+            return await tools.list_workspaces(ctx, limit=limit, offset=offset)
 
     @mcp.tool(
         name="get_workspace",
@@ -887,19 +1057,35 @@ def register_tools(mcp: MCPServer) -> None:
         structured_output=True,
     )
     @instrument_tool("read_workspace_file")
-    async def read_workspace_file(workspace_id: str, path: str) -> dict[str, Any]:
-        """Read a text file from a workspace. Binary files are refused.
+    async def read_workspace_file(
+        workspace_id: str,
+        path: str,
+        offset: int = 0,
+        max_bytes: int | None = None,
+        encoding: str = "utf-8",
+    ) -> dict[str, Any]:
+        """Read a file from a workspace, as text by default.
+
+        Binary files (a chart, a trained model) are readable with
+        encoding="base64". Long files are paged with offset / max_bytes.
 
         Args:
             workspace_id: The workspace to read from.
             path: File path relative to the workspace root.
+            offset: Byte offset to start from.
+            max_bytes: Preferred page size in bytes (clamped).
+            encoding: "utf-8" (default) or "base64" for binary content.
 
         Returns:
-            {"ok": true, "path", "content", "size_bytes", "truncated"} or
+            {"ok": true, "path", "size_bytes", "offset", "bytes_returned",
+            "has_more", "next_offset"?, "content" | "content_base64"} or
             {"ok": false, "error"}. Requires workspaces.read.
         """
         async with _workspace_scope() as (tools, ctx):
-            return await tools.read_workspace_file(ctx, workspace_id, path)
+            return await tools.read_workspace_file(
+                ctx, workspace_id, path,
+                offset=offset, max_bytes=max_bytes, encoding=encoding,
+            )
 
     @mcp.tool(
         name="write_workspace_file",
@@ -914,24 +1100,33 @@ def register_tools(mcp: MCPServer) -> None:
     )
     @instrument_tool("write_workspace_file")
     async def write_workspace_file(
-        workspace_id: str, path: str, content: str
+        workspace_id: str,
+        path: str,
+        content: str | None = None,
+        content_base64: str | None = None,
     ) -> dict[str, Any]:
-        """Write a text file into a workspace, creating parent directories.
+        """Write a file into a workspace, creating parent directories.
 
         The content is written verbatim, so pass real file content rather than a
-        description of it. The runtime is started automatically if needed.
+        description of it. Use content for text and content_base64 for binary
+        data. The runtime is started automatically if needed.
 
         Args:
             workspace_id: The workspace to write into.
             path: File path relative to the workspace root.
-            content: The exact file content (maximum 2 MB).
+            content: The exact file content as UTF-8 text (maximum 2 MB).
+            content_base64: The exact file content as base64 bytes. Exactly one
+                of content/content_base64 must be given.
 
         Returns:
             {"ok": true, "path", "bytes_written"} or {"ok": false, "error"}.
             Requires workspaces.execute.
         """
         async with _workspace_scope() as (tools, ctx):
-            return await tools.write_workspace_file(ctx, workspace_id, path, content)
+            return await tools.write_workspace_file(
+                ctx, workspace_id, path,
+                content=content, content_base64=content_base64,
+            )
 
     @mcp.tool(
         name="run_code",
@@ -949,7 +1144,7 @@ def register_tools(mcp: MCPServer) -> None:
         workspace_id: str,
         source: str,
         mode: str = "SCRIPT",
-        timeout_seconds: int = 300,
+        timeout_seconds: int | None = None,
     ) -> dict[str, Any]:
         """Run Python, a shell command, or a `uv` operation in a workspace.
 
@@ -962,7 +1157,8 @@ def register_tools(mcp: MCPServer) -> None:
             source: The Python code, the shell command line, or a `uv`
                 operation (`sync`, `lock`, `add <package>`).
             mode: SCRIPT (default), COMMAND, or PROJECT.
-            timeout_seconds: Time limit, 1-3600 (default 300).
+            timeout_seconds: Time limit, 1-3600. Omit to use the deployment's
+                configured default.
 
         Returns:
             {"ok": true, "execution_id", "status"} or {"ok": false, "error"}.
@@ -985,19 +1181,27 @@ def register_tools(mcp: MCPServer) -> None:
         structured_output=True,
     )
     @instrument_tool("get_execution")
-    async def get_execution(execution_id: str) -> dict[str, Any]:
-        """Status, exit code and bounded output of one execution.
+    async def get_execution(
+        execution_id: str,
+        offset: int = 0,
+        max_chars: int | None = None,
+    ) -> dict[str, Any]:
+        """Status, exit code and pageable output of one execution.
 
         Args:
             execution_id: The id returned by run_code.
+            offset: Character offset into stdout/stderr to start from.
+            max_chars: Preferred page size in characters.
 
         Returns:
             {"ok": true, "status", "exit_code", "stdout", "stderr",
-            "artifacts"} or {"ok": false, "error"}. Requires
-            workspaces.read.
+            "output_offset", "output_has_more", "artifacts"} or
+            {"ok": false, "error"}. Requires workspaces.read.
         """
         async with _workspace_scope() as (tools, ctx):
-            return await tools.get_execution(ctx, execution_id)
+            return await tools.get_execution(
+                ctx, execution_id, offset=offset, max_chars=max_chars
+            )
 
     @mcp.tool(
         name="list_artifacts",
@@ -1093,6 +1297,162 @@ def register_tools(mcp: MCPServer) -> None:
         """
         async with _workspace_scope() as (tools, ctx):
             return await tools.save_workspace_environment(ctx, workspace_id)
+
+    @mcp.tool(
+        name="get_workspace_environment",
+        title="Check a workspace's saved environment",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=False,
+        ),
+        structured_output=True,
+    )
+    @instrument_tool("get_workspace_environment")
+    async def get_workspace_environment(workspace_id: str) -> dict[str, Any]:
+        """Whether the workspace's environment snapshot is ready.
+
+        Call this after save_workspace_environment. Only tell the user their
+        packages are saved once the revision status is READY.
+
+        Args:
+            workspace_id: The workspace to check.
+
+        Returns:
+            {"ok": true, "workspace_id", "revision": {revision_id, status,
+            created_at} | null} or {"ok": false, "error"}. Requires
+            workspaces.read.
+        """
+        async with _workspace_scope() as (tools, ctx):
+            return await tools.get_workspace_environment(ctx, workspace_id)
+
+    @mcp.tool(
+        name="start_workspace",
+        title="Start a workspace's runtime",
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=False,
+        ),
+        structured_output=True,
+    )
+    @instrument_tool("start_workspace")
+    async def start_workspace(workspace_id: str) -> dict[str, Any]:
+        """Start (or confirm) the workspace's runtime.
+
+        File and code tools start it automatically, so this is only needed when
+        the user explicitly wants the environment warmed up.
+
+        Returns:
+            {"ok": true, "workspace_id", "runtime_state", "changed"} or
+            {"ok": false, "error"}. Requires workspaces.execute.
+        """
+        async with _workspace_scope() as (tools, ctx):
+            return await tools.start_workspace(ctx, workspace_id)
+
+    @mcp.tool(
+        name="stop_workspace",
+        title="Stop a workspace's runtime",
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=False,
+        ),
+        structured_output=True,
+    )
+    @instrument_tool("stop_workspace")
+    async def stop_workspace(workspace_id: str) -> dict[str, Any]:
+        """Stop the workspace's runtime, preserving files and snapshots.
+
+        Running processes and in-memory variables are lost; files,
+        pyproject.toml and uv.lock survive.
+
+        Returns:
+            {"ok": true, "workspace_id", "runtime_state"} or
+            {"ok": false, "error"}. Requires workspaces.execute. Refused while an
+            execution is still running.
+        """
+        async with _workspace_scope() as (tools, ctx):
+            return await tools.stop_workspace(ctx, workspace_id)
+
+    @mcp.tool(
+        name="copy_file_to_workspace",
+        title="Copy a Drive file into a workspace",
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=False,
+            idempotent_hint=False,
+            open_world_hint=False,
+        ),
+        structured_output=True,
+    )
+    @instrument_tool("copy_file_to_workspace")
+    async def copy_file_to_workspace(
+        file_id: str,
+        workspace_id: str,
+        path: str,
+    ) -> dict[str, Any]:
+        """Copy one of the user's Drive files into a workspace so code can use it.
+
+        This is how "analyse my spreadsheet" works: copy the file in, then
+        run_code against it. The source must be readable by this connection, so
+        the same folder confinement as every other document tool applies.
+
+        Args:
+            file_id: The id returned by list_files.
+            workspace_id: The workspace to copy into.
+            path: Destination path relative to the workspace root.
+
+        Returns:
+            {"ok": true, "workspace_id", "path", "bytes_written",
+            "source_file_id", "source_file_name"} or {"ok": false, "error"}.
+            Requires documents.read and workspaces.execute.
+        """
+        async with _workspace_scope() as (tools, ctx):
+            return await tools.copy_file_to_workspace(ctx, file_id, workspace_id, path)
+
+    @mcp.tool(
+        name="save_artifact_to_drive",
+        title="Save a workspace artifact to the Drive",
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=False,
+            idempotent_hint=False,
+            open_world_hint=False,
+        ),
+        structured_output=True,
+    )
+    @instrument_tool("save_artifact_to_drive")
+    async def save_artifact_to_drive(
+        execution_id: str,
+        path: str,
+        folder_id: str | None = None,
+        file_name: str | None = None,
+    ) -> dict[str, Any]:
+        """Save a stored workspace artifact as a new file in the user's Drive.
+
+        Use this to keep a chart, report or model that code produced. Only an
+        artifact that list_artifacts reports as `stored: true` can be saved.
+
+        Args:
+            execution_id: The execution that produced the artifact.
+            path: The artifact's workspace-relative path.
+            folder_id: Optional destination folder. Omit for the connection's
+                allowed folder.
+            file_name: Optional name for the saved file. It must include the
+                correct extension.
+
+        Returns:
+            {"ok": true, "file": {"file_id", ...}} or {"ok": false, "error"}.
+            Requires workspaces.read and documents.write.
+        """
+        async with _workspace_scope() as (tools, ctx):
+            return await tools.save_artifact_to_drive(
+                ctx, execution_id, path, folder_id=folder_id, file_name=file_name
+            )
 
 
 __all__ = ["INSTRUCTIONS", "register_tools"]

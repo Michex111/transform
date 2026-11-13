@@ -76,6 +76,13 @@ class TokenRecord:
     expires_at: datetime
     resource: str | None = None
     revoked_at: datetime | None = None
+    #: Hash of the token that replaced this one when it was rotated, or ``None``.
+    #:
+    #: Distinguishes "revoked on purpose" from "rotated by a refresh" — which is
+    #: what lets a retried refresh within the reuse grace window be recognised
+    #: as a retry rather than as a replay attack. Only the *hash* is stored, so
+    #: the repository can never re-send the successor's plaintext.
+    replaced_by: str | None = None
 
 
 class MCPRepositoryPort(Protocol):
@@ -169,6 +176,30 @@ class MCPRepositoryPort(Protocol):
     async def get_token(self, token_hash: str) -> TokenRecord | None: ...
 
     async def revoke_token(self, token_hash: str, revoked_at: datetime) -> None: ...
+
+    async def rotate_refresh_token(
+        self, token_hash: str, now: datetime, successor_hash: str
+    ) -> TokenRecord | None:
+        """Atomically mark a refresh token rotated, or report that it was not.
+
+        A single conditional ``UPDATE … WHERE token_hash=? AND revoked_at IS
+        NULL`` is the whole mechanism: two concurrent refreshes cannot both win,
+        and a retried request cannot be mistaken for a fresh one. The loser
+        falls back to the reuse grace window in the application service.
+
+        Returns the *pre-rotation* record (including its scopes) when this call
+        won the race, or ``None`` when the token was already rotated/revoked.
+        """
+        ...
+
+    async def revoke_successor(self, token_hash: str, revoked_at: datetime) -> None:
+        """Best-effort revocation of a token minted by a grace-window retry.
+
+        When a retry inside the grace window mints a fresh pair, the pair minted
+        by the request it is retrying is abandoned. Revoking it here keeps the
+        number of live refresh tokens for one connection at one.
+        """
+        ...
 
     async def revoke_tokens_for_grant(self, grant_id: str, revoked_at: datetime) -> int: ...
 

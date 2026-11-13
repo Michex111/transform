@@ -333,6 +333,17 @@ class FileService:
             raise FileRecordNotFoundError()
         return row
 
+    async def find_by_key(self, user_id: int, file_key: str) -> UserFileModel | None:
+        """The caller's file row for a stored object key, if any.
+
+        Used where only an object key is known — a conversion job's input, or a
+        workspace artifact — and ownership plus folder confinement must still be
+        proved. Returns ``None`` rather than raising so the caller can answer
+        "not found" without distinguishing "another user's" from "does not
+        exist".
+        """
+        return await self._files.find_by_key(user_id, file_key)
+
     async def get_owned_files(
         self, user_id: int, file_ids: list[str]
     ) -> list[UserFileModel]:

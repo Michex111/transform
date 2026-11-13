@@ -106,6 +106,15 @@ register yourself, and the user approves you in a browser.
    re-authorizing. Refresh tokens last 30 days, and a refresh token is issued on
    every code exchange — you do not need to do anything special to get one.
 
+   Rotation is single-use, but a request you never saw the response to is safe
+   to retry: presenting the previous refresh token within 60 seconds of a
+   rotation returns a fresh pair instead of \`invalid_grant\`. After that window a
+   replay is refused, so retry promptly rather than much later.
+
+   Permission changes the user makes in Settings take effect on your next call —
+   both directions, with no reconnect. A narrowed connection keeps working with
+   fewer capabilities; a widened one gains them immediately.
+
 ## 3. Scopes — request only what you need
 
 | Scope | Grants |
@@ -146,7 +155,10 @@ token. It is advertised in \`scopes_supported\` and always accepted, but it is a
 | \`list_files\` | read | whole Drive; optional name / extension / folder filters |
 | \`list_folders\` | read | folder ids — nothing else returns them |
 | \`get_file\` | read | metadata only — never content, never a storage key |
-| \`download_file\` | read | file contents, paged (see below) |
+| \`download_file\` | read | raw bytes, paged (see below) — rarely what you want |
+| \`read_file_text\` | read | **read a document's text**; paged by characters |
+| \`read_conversion_output\` | read | read a finished conversion's output as text, without saving it |
+| \`get_file_download_link\` | read | a short-lived browser link for one Drive file |
 | \`get_conversion_status\` | read | poll an async conversion |
 | \`get_conversion_history\` | read | recent conversions |
 | \`get_credits\` | read | the user's remaining credits |
@@ -165,12 +177,24 @@ token. It is advertised in \`scopes_supported\` and always accepted, but it is a
 | \`get_execution\` | workspaces.read | status, exit code, stdout, stderr |
 | \`cancel_execution\` | workspaces.execute | stop a run that is taking too long |
 | \`save_workspace_environment\` | workspaces.execute | persist installed packages |
+| \`get_workspace_environment\` | workspaces.read | whether the saved environment is ready |
+| \`start_workspace\` | workspaces.execute | start the runtime explicitly |
+| \`stop_workspace\` | workspaces.execute | stop the runtime, keeping files |
+| \`copy_file_to_workspace\` | documents.read + workspaces.execute | bring a Drive file in for code to use |
+| \`save_artifact_to_drive\` | workspaces.read + documents.write | save a produced artifact into the Drive |
 | \`create_workspace\` | workspaces.execute | only when the user asks for a new one |
 
 Call \`tools/list\` for current schemas rather than assuming them.
 
-Reading a large file — \`download_file\` returns about 128 KB per call, because a
-result travels as a single transport event with a size cap:
+Reading a document — prefer \`read_file_text\`. It returns text directly, extracts
+PDF/DOCX/PPTX/XLSX for you, and is paged by characters:
+
+1. Call with just \`file_id\`, read \`content\` plus \`has_more\`.
+2. While \`has_more\` is true, call again with \`offset\` = \`next_offset\`.
+
+Use \`download_file\` only when the *bytes* matter (you are re-uploading them).
+It returns about 128 KB per call, because a result travels as a single transport
+event with a size cap:
 
 1. Call with just \`file_id\` and read the first part plus \`has_more\`.
 2. While \`has_more\` is true, call again with \`offset\` set to \`next_offset\`.
@@ -181,8 +205,9 @@ was truncated.
 
 Deliberate limitations — do not work around these:
 - \`convert_file\` requires a file already in the Drive. A chat attachment is
-  not automatically accessible to this server; \`upload_file\` requires its
-  bytes as base64 and is size-capped. Never invent access to a local file.
+  not automatically accessible to this server; \`upload_file\` takes the content
+  (\`content_text\` for UTF-8, \`content_base64\` for bytes) and is size-capped.
+  Never invent access to a local file.
 - Tools resolve file and job IDs server-side; never supply a storage object key.
   \`save_file\` only promotes a conversion result.
 - There is no tool that deletes or renames a folder or a workspace. Deletion of a

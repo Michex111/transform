@@ -28,11 +28,23 @@ def build_mcp_download_capabilities(session: AsyncSession) -> MCPDownloadCapabil
     return MCPDownloadCapabilities(
         repository=SQLMCPRepository(session),
         conversions=SQLConversionJobRepository(session),
-        files=files,
+        # FileService, not the bare repository: it now exposes both the
+        # `find_by_key` lookup the job path needs and the ownership-checked
+        # `get_file` the Drive-file link needs, so one object serves both link
+        # kinds and the ownership rule cannot drift between them.
+        files=file_service,
         folders=file_service,
         secret=settings.SECRET_KEY.get_secret_value(),
         resource_url=settings.mcp_resource_url(),
     )
+
+
+async def create_mcp_file_download_link(access_token: str, file_id: str) -> dict:
+    """Issue a Drive-file download link outside FastAPI (fresh session)."""
+    async with get_session_factory()() as session:
+        return await build_mcp_download_capabilities(session).create_file_link(
+            access_token, file_id
+        )
 
 
 def get_mcp_download_capabilities(

@@ -21,6 +21,7 @@ real-SQLite tests.
 from pathlib import Path
 from typing import Any
 
+import asyncio
 import pytest
 
 from src.application.exceptions.workspace_exceptions import (
@@ -120,6 +121,27 @@ class FakeWorkspaces:
         # The real service queues the build, so PENDING is the honest default.
         return SimpleNamespace(revision_id="rev-1", status="PENDING")
 
+    async def start_runtime(self, workspace_id: str, user_id: int) -> Any:
+        from types import SimpleNamespace
+
+        self.started = getattr(self, "started", [])
+        self.started.append(workspace_id)
+        return SimpleNamespace(
+            runtime=SimpleNamespace(state="RUNNING"), changed=False
+        )
+
+    async def stop_runtime(self, workspace_id: str, user_id: int) -> Any:
+        from types import SimpleNamespace
+
+        return SimpleNamespace(state="STOPPED")
+
+    async def latest_revision(self, workspace_id: str, user_id: int) -> Any:
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            revision_id="rev-1", status="READY", created_at=None
+        )
+
 
 class FakeExecutions:
     def __init__(self, *, failure: Exception | None = None) -> None:
@@ -190,6 +212,13 @@ class FakeExecutions:
             ExecutionArtifactRef(execution_id=execution.execution_id, artifact=artifact)
             for artifact in execution.artifacts
         ]
+
+    async def get_artifact(self, execution_id: str, user_id: int, path: str) -> Any:
+        execution = await self.get(execution_id, user_id)
+        for artifact in execution.artifacts:
+            if artifact.path == path and artifact.object_key:
+                return artifact
+        return None
 
 
 def _tools(
@@ -266,7 +295,9 @@ class TestScopes:
 
             assert result["ok"] is False
             assert result["required_scope"].startswith("workspaces.")
-            assert result["tool"] == tool
+            # Same envelope as the document tools (D4): no per-family shape
+            # difference for an agent to special-case.
+            assert "error" in result
 
         import asyncio
 
@@ -528,7 +559,7 @@ class TestFiles:
             read = await tools.read_workspace_file(ctx, "ws-1", "main.py")
             assert read["ok"] is True
             assert read["content"] == "print(42)\n"
-            assert read["truncated"] is False
+            assert read["has_more"] is False
 
         import asyncio
 
@@ -690,3 +721,96 @@ def test_save_workspace_environment_does_not_claim_the_snapshot_is_ready() -> No
         assert workspaces.saved == ["ws-1"]
 
     asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
+# C4/C6: Drive <-> workspace bridges and snapshot status
+# ---------------------------------------------------------------------------
+
+
+class _FakeDocuments:
+    def __init__(self, *, denied: dict[str, Any] | None = None, artifact: bytes = b"chart") -> None:
+        self.denied = denied
+        self.artifact = artifact
+        self.saved: list[tuple[str, bytes, str | None]] = []
+
+    async def read_owned_bytes(self, ctx: Any, file_id: str) -> Any:
+        if self.denied:
+            return self.denied
+        from types import SimpleNamespace
+
+        return SimpleNamespace(id=file_id, file_name="data.csv"), b"1,2,3\n"
+
+    async def read_object_bytes(self, ctx: Any, object_key: str) -> Any:
+        return self.artifact
+
+    async def store_bytes_as_file(
+        self, ctx: Any, file_name: str, data: bytes, folder_id: str | None = None
+    ) -> dict[str, Any]:
+        self.saved.append((file_name, data, folder_id))
+        return {"ok": True, "file": {"file_id": "saved-1", "file_name": file_name}}
+
+
+def _tools_with_documents(documents: _FakeDocuments) -> MCPWorkspaceTools:
+    return MCPWorkspaceTools(
+        workspaces=FakeWorkspaces(),
+        executions=FakeExecutions(),
+        documents=documents,  # type: ignore[arg-type]
+    )
+
+
+def test_copy_file_to_workspace_writes_the_source_bytes() -> None:
+    async def scenario() -> None:
+        workspaces = FakeWorkspaces()
+        documents = _FakeDocuments()
+        tools = MCPWorkspaceTools(
+            workspaces=workspaces, executions=FakeExecutions(), documents=documents  # type: ignore[arg-type]
+        )
+        result = await tools.copy_file_to_workspace(
+            _ctx(AgentScope.DOCUMENTS_READ, AgentScope.WORKSPACES_EXECUTE),
+            "file-1", "ws-1", "data/input.csv",
+        )
+        assert result["ok"] is True
+        assert result["bytes_written"] == 6
+        assert workspaces.written["data/input.csv"] == b"1,2,3\n"
+
+    asyncio.run(scenario())
+
+
+def test_copy_file_to_workspace_passes_through_a_folder_denial() -> None:
+    async def scenario() -> None:
+        tools = _tools_with_documents(
+            _FakeDocuments(denied={"ok": False, "error": "No such file was found in your Drive."})
+        )
+        result = await tools.copy_file_to_workspace(
+            _ctx(AgentScope.DOCUMENTS_READ, AgentScope.WORKSPACES_EXECUTE),
+            "elsewhere", "ws-1", "input.csv",
+        )
+        assert result == {"ok": False, "error": "No such file was found in your Drive."}
+
+    asyncio.run(scenario())
+
+
+def test_save_artifact_to_drive_uses_the_upload_pipeline() -> None:
+    async def scenario() -> None:
+        documents = _FakeDocuments(artifact=b"PNG")
+        tools = _tools_with_documents(documents)
+        result = await tools.save_artifact_to_drive(
+            _ctx(AgentScope.WORKSPACES_READ, AgentScope.DOCUMENTS_WRITE),
+            "ex-1", "outputs/report.csv", file_name="report.csv",
+        )
+        assert result["ok"] is True
+        assert documents.saved == [("report.csv", b"PNG", None)]
+
+    asyncio.run(scenario())
+
+
+def test_get_workspace_environment_reports_the_latest_revision() -> None:
+    async def scenario() -> None:
+        result = await _tools().get_workspace_environment(
+            _ctx(AgentScope.WORKSPACES_READ), "ws-1"
+        )
+        assert result["ok"] is True
+        assert result["revision"]["status"] == "READY"
+
+    asyncio.run(scenario())

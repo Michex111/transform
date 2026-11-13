@@ -42,6 +42,7 @@ class SQLConversionJobRepository:
             client_encrypted=job_data.client_encrypted,
             batch_id=job_data.batch_id,
             workflow_id=job_data.workflow_id,
+            grant_id=job_data.grant_id,
             # Stored as the enum's plain string value. The column is a
             # String(16), not a native enum, so this is what keeps a future
             # origin from needing a schema migration.
@@ -142,6 +143,7 @@ class SQLConversionJobRepository:
         limit: int,
         since: datetime | None = None,
         origin: JobOrigin | None = None,
+        grant_id: str | None = None,
     ) -> tuple[list[ConversionJob], int]:
         """Returns the user's job history (newest first) plus the total count.
 
@@ -160,6 +162,11 @@ class SQLConversionJobRepository:
             base = base.where(ConversionJobModel.created_at >= since)
         if origin is not None:
             base = base.where(ConversionJobModel.origin == str(origin))
+        if grant_id is not None:
+            # Per-connection attribution: what "only conversions it started"
+            # means. Applied in addition to ``origin`` so a grant-scoped read can
+            # never include another connection's jobs.
+            base = base.where(ConversionJobModel.grant_id == grant_id)
 
         count_q = select(func.count()).select_from(base.subquery())
         total = (await self.session.execute(count_q)).scalar_one()
@@ -312,7 +319,7 @@ class SQLConversionJobRepository:
                 ConversionJobModel.batch_id.is_not(None),
             )
         )
-        return int((await self.session.execute(stmt)).scalar_one() or 0)
+        return (await self.session.execute(stmt)).scalar_one() or 0
 
     async def count_batches_for_workflows(
         self, workflow_ids: list[str], user_id: int
@@ -566,6 +573,7 @@ class SQLConversionJobRepository:
             progress=job_model.progress,
             batch_id=job_model.batch_id,
             workflow_id=job_model.workflow_id,
+            grant_id=getattr(job_model, "grant_id", None),
             # Defensive: a row written before 0021 defaults to WEB server-side,
             # but any unrecognised value still degrades to WEB rather than
             # raising on a history read.

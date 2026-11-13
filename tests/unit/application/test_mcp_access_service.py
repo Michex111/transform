@@ -296,8 +296,13 @@ def test_a_user_cannot_revoke_another_users_grant() -> None:
     asyncio.run(_run())
 
 
-def test_narrowing_a_grant_invalidates_a_wider_token() -> None:
-    """A re-consent that drops convert must not leave the old token able to convert."""
+def test_narrowing_a_grant_takes_effect_on_the_next_call() -> None:
+    """A re-consent that drops convert must take effect immediately.
+
+    The token is no longer *rejected* (that made clients loop refresh → 401 until
+    they gave up). Instead the grant's current scopes become the effective set,
+    so the same token simply can no longer convert.
+    """
 
     async def _run() -> None:
         repo = FakeMCPRepository()
@@ -305,7 +310,9 @@ def test_narrowing_a_grant_invalidates_a_wider_token() -> None:
         await _register(repo)
         code = await _approve(repo, scopes=("documents.read", "documents.convert"))
         issued = await service.exchange_code(client_id="client-1", code=code, redirect_uri=None)
-        assert await service.load_access_token(issued.access_token) is not None
+        loaded = await service.load_access_token(issued.access_token)
+        assert loaded is not None
+        assert AgentScope.DOCUMENTS_CONVERT in loaded.scopes
 
         await service.approve(
             user_id=7,
@@ -315,7 +322,9 @@ def test_narrowing_a_grant_invalidates_a_wider_token() -> None:
             code_challenge="challenge",
             resource=RESOURCE,
         )
-        assert await service.load_access_token(issued.access_token) is None
+        narrowed = await service.load_access_token(issued.access_token)
+        assert narrowed is not None, "a narrowed grant must not break the session"
+        assert narrowed.scopes == (AgentScope.DOCUMENTS_READ,)
 
     asyncio.run(_run())
 
@@ -406,28 +415,45 @@ def test_refresh_rotates_the_refresh_token() -> None:
         )
         assert second.refresh_token != first.refresh_token
 
+        # Inside the reuse grace window a retried request gets a working pair
+        # rather than invalid_grant — this is the case that used to disconnect
+        # real clients when a response was lost.
+        replay = await service.exchange_refresh(
+            client_id="client-1", refresh_token=first.refresh_token, resource=RESOURCE
+        )
+        assert replay.refresh_token
+
+        # After the window, the same replay is refused.
+        later = MCPAccessService(
+            repository=repo, resource_url=RESOURCE,
+            clock=lambda: _NOW + timedelta(minutes=5),
+        )
         with pytest.raises(InvalidGrantError):
-            await service.exchange_refresh(
+            await later.exchange_refresh(
                 client_id="client-1", refresh_token=first.refresh_token, resource=RESOURCE
             )
 
     asyncio.run(_run())
 
 
-def test_refresh_cannot_widen_the_scope_set() -> None:
+def test_a_refresh_cannot_widen_the_scope_set() -> None:
     async def _run() -> None:
         repo = FakeMCPRepository()
         service = _service(repo)
         await _register(repo)
         code = await _approve(repo)
         issued = await service.exchange_code(client_id="client-1", code=code, redirect_uri=None)
-        with pytest.raises(InvalidScopeError):
-            await service.exchange_refresh(
-                client_id="client-1",
-                refresh_token=issued.refresh_token or "",
-                scopes=["documents.read", "documents.delete"],
-                resource=RESOURCE,
-            )
+        # Requesting a scope the grant does not hold narrows to what the grant
+        # DOES hold; it can never widen. (It used to raise, which was the right
+        # answer for the old "token scopes are the authority" model.)
+        refreshed = await service.exchange_refresh(
+            client_id="client-1",
+            refresh_token=issued.refresh_token or "",
+            scopes=["documents.read", "documents.delete"],
+            resource=RESOURCE,
+        )
+        assert AgentScope.DOCUMENTS_DELETE not in refreshed.scopes
+        assert refreshed.scopes == (AgentScope.DOCUMENTS_READ,)
 
     asyncio.run(_run())
 
@@ -764,7 +790,7 @@ def test_the_consent_view_lists_every_permission_including_workspaces() -> None:
     def _run() -> None:
         from src.presentation.api.routers.v1.mcp import _scope_descriptions
 
-        described = _scope_descriptions((), ())
+        described = _scope_descriptions(ALL_SCOPES, (), ())
         listed = [item.scope for item in described]
         assert listed == [scope.value for scope in ALL_SCOPES], (
             "the consent screen must offer exactly the product's permissions"
@@ -778,3 +804,94 @@ def test_the_consent_view_lists_every_permission_including_workspaces() -> None:
         assert OFFLINE_ACCESS not in listed
 
     _run()
+
+
+# ---------------------------------------------------------------------------
+# A1/A2/A3/A4: the grant is the authority, and rotation survives a retry
+# ---------------------------------------------------------------------------
+
+
+def test_consent_can_grant_an_available_scope_that_was_not_requested() -> None:
+    """A3: a client that omits `scope` must not cap what the user may allow."""
+
+    async def _run() -> None:
+        repo = FakeMCPRepository()
+        service = _service(repo)
+        await _register(repo)  # registers with scope=None -> full vocabulary
+        view = await service.describe_authorization(
+            user_id=7,
+            client_id="client-1",
+            redirect_uri=REDIRECT,
+            requested_scopes=(),  # most clients send nothing
+            resource=RESOURCE,
+        )
+        assert AgentScope.WORKSPACES_READ in view.available_scopes
+        assert AgentScope.DOCUMENTS_DELETE in view.available_scopes
+        # Pre-checked set stays the conservative default.
+        assert AgentScope.WORKSPACES_READ not in view.requested_scopes
+
+        url = await service.approve(
+            user_id=7,
+            client_id="client-1",
+            redirect_uri=REDIRECT,
+            requested_scopes=(),
+            approved_scopes=["documents.read", "workspaces.read"],
+            code_challenge="challenge",
+            resource=RESOURCE,
+        )
+        assert "code=" in url
+        grant = await repo.get_grant_for_user_client(7, "client-1")
+        assert grant is not None
+        assert AgentScope.WORKSPACES_READ in grant.scopes
+
+
+def test_a_refresh_picks_up_a_widened_grant() -> None:
+    """A2: widening takes effect on refresh, with no reconnect."""
+
+    async def _run() -> None:
+        repo = FakeMCPRepository()
+        service = _service(repo)
+        await _register(repo)
+        code = await _approve(repo, scopes=("documents.read",))
+        issued = await service.exchange_code(client_id="client-1", code=code, redirect_uri=None)
+
+        grant = await repo.get_grant_for_user_client(7, "client-1")
+        assert grant is not None
+        await repo.update_grant_binding(
+            grant_id=grant.id,
+            user_id=7,
+            scopes=(AgentScope.DOCUMENTS_READ, AgentScope.DOCUMENTS_CONVERT),
+            folder_access=FolderAccess.ALL,
+            folder_id=None,
+            history_scope=HistoryScope.AGENT,
+        )
+
+        refreshed = await service.exchange_refresh(
+            client_id="client-1", refresh_token=issued.refresh_token or "", resource=RESOURCE
+        )
+        assert AgentScope.DOCUMENTS_CONVERT in refreshed.scopes
+
+
+def test_two_concurrent_refreshes_both_succeed_inside_the_grace_window() -> None:
+    """A4: a network retry must not look like a replay attack."""
+
+    async def _run() -> None:
+        repo = FakeMCPRepository()
+        service = _service(repo)
+        await _register(repo)
+        code = await _approve(repo)
+        first = await service.exchange_code(client_id="client-1", code=code, redirect_uri=None)
+        token = first.refresh_token or ""
+
+        first_call, second_call = await asyncio.gather(
+            service.exchange_refresh(client_id="client-1", refresh_token=token, resource=RESOURCE),
+            service.exchange_refresh(client_id="client-1", refresh_token=token, resource=RESOURCE),
+        )
+        assert first_call.access_token
+        assert second_call.access_token
+        # Exactly one refresh token is live afterwards: the successor minted by
+        # the lost request was retired by the retry.
+        live = [r for r in repo.tokens.values() if r.kind == "REFRESH" and r.revoked_at is None]
+        assert len(live) == 1
+
+    asyncio.run(_run())

@@ -65,6 +65,22 @@ _AUTH_PATHS = {
     "/api/users/me/phone/verify",
 }
 
+#: MCP OAuth endpoints that carry no bearer token and therefore used to fall to
+#: the anonymous per-IP bucket.
+#:
+#: Hosted MCP clients (Claude.ai, ChatGPT, Gemini) call from a small pool of
+#: shared egress addresses, so one IP-keyed bucket throttled unrelated users
+#: together — and a 429 on a token refresh disconnects the client outright. They
+#: get their own, higher bucket keyed by (client_id, IP). ``client_id`` is read
+#: from the QUERY string only: consuming a form body in middleware would break
+#: the endpoint that is about to read it.
+_MCP_OAUTH_PATHS = {
+    "/mcp/token",
+    "/mcp/register",
+    "/mcp/revoke",
+    "/mcp/authorize",
+}
+
 
 def _truncate_rate_limit_key(key: str) -> str:
     """Shorten a limiter key for the audit trail (``scope:prefix`` only).
@@ -212,6 +228,15 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         # neither header, so legitimate traffic is unaffected.
         if request.url.path in _AUTH_PATHS:
             return f"ip:{client_ip}:auth", self._settings.RATE_LIMIT_AUTH
+
+        # MCP OAuth endpoints: own bucket, keyed by (client_id, IP). Ahead of the
+        # API-key/bearer branches because these requests are unauthenticated by
+        # design, and ahead of the generic IP bucket so a shared hosted-client
+        # egress address cannot throttle unrelated users' token refreshes.
+        if request.url.path in _MCP_OAUTH_PATHS:
+            client_id = (request.query_params.get("client_id") or "")[:128]
+            digest = hashlib.sha256(f"{client_id}|{client_ip}".encode("utf-8")).hexdigest()
+            return f"mcp-oauth:{digest}", self._settings.MCP_OAUTH_RATE_LIMIT
 
         # Per-API-key limits take priority over everything else.
         api_key = request.headers.get("x-api-key")

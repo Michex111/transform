@@ -36,6 +36,7 @@ from src.application.services.mcp.workspace_tools import MCPWorkspaceTools
 from src.application.services.conversions.priority_queue_dispatcher import PriorityQueueDispatcher
 from src.application.services.conversions.queue_priority_router import QueuePriorityRouter
 from src.domain.security.value_object.agent_access_scope import FolderAccess, HistoryScope
+from src.domain.security.value_object.agent_scope import AgentScope
 from src.domain.subscriptions.value_object.tier import SubscriptionTier
 from src.infrastructure.adapters.repository.sql_conversion_job_repo import (
     SQLConversionJobRepository,
@@ -70,14 +71,19 @@ logger = logging.getLogger(__name__)
 
 def binding_from_grant(
     grant: object | None, user_id: int, grant_id: str
-) -> tuple[FolderAccess, str | None, HistoryScope]:
+) -> tuple[FolderAccess, str | None, HistoryScope, str | None]:
     """Read the binding from a grant, refusing anything unexpected.
 
-    Fail **closed**. A missing grant (or one belonging to another account) leaves
-    the defaults ``ALL``/``None``/``AGENT``, and ``ALL`` means the whole Drive.
-    A token that reached here has already passed the token verifier, which loads
-    and checks the same row, so this is a race or a wiring bug — but the safe
-    answer to either is to refuse the call, never to widen an agent's reach.
+    Fail **closed**. A missing grant (or one belonging to another account) is
+    reported as an *authorization error* rather than as the defaults
+    ``ALL``/``None``/``AGENT`` — ``ALL`` means the whole Drive, so falling back
+    to it would widen an agent's reach at the exact moment its authority became
+    unreadable.
+
+    The error is returned (not raised) so the tool layer can answer with the
+    ``{"ok": false, ...}`` envelope an agent can act on. A raised
+    ``RuntimeError`` here surfaced to the client as a bare "Error executing
+    tool", which reads as a server bug and gives the user no way forward.
     """
     if grant is None or getattr(grant, "user_id", None) != user_id or getattr(grant, "id", None) != grant_id:
         logger.error(
@@ -85,8 +91,30 @@ def binding_from_grant(
             "(grant_id=%s); refusing the call rather than widening access.",
             grant_id,
         )
-        raise RuntimeError("The connection's authorization could not be loaded.")
-    return grant.folder_access, grant.folder_id, grant.history_scope  # type: ignore[attr-defined]
+        return (
+            FolderAccess.FOLDER,
+            None,
+            HistoryScope.AGENT,
+            "This connection's authorization changed. Reconnect the application in "
+            "Transform to continue.",
+        )
+    # A grant whose status stopped being active (paused or revoked between the
+    # token verifier and this read) is refused too.
+    is_active = getattr(grant, "is_active", None)
+    if callable(is_active) and not is_active():
+        return (
+            FolderAccess.FOLDER,
+            None,
+            HistoryScope.AGENT,
+            "This connection is no longer active. Reconnect the application in "
+            "Transform to continue.",
+        )
+    return (
+        grant.folder_access,  # type: ignore[attr-defined]
+        grant.folder_id,  # type: ignore[attr-defined]
+        grant.history_scope,  # type: ignore[attr-defined]
+        None,
+    )
 
 
 @dataclass
@@ -118,6 +146,17 @@ class MCPServiceScope:
     folder_access: FolderAccess = FolderAccess.ALL
     folder_id: str | None = None
     history_scope: HistoryScope = HistoryScope.AGENT
+    #: The **effective** permissions for this call: the grant's *current*
+    #: scopes, read on every request.
+    #:
+    #: Deliberately not the scopes frozen into the token. An access token is a
+    #: handle; the grant is the permission. Resolving the set here is what makes
+    #: an edit on the Connected-apps screen take effect on the agent's next call
+    #: — in both directions — without a reconnect.
+    scopes: tuple[AgentScope, ...] = ()
+    #: Set when the grant could not be loaded or is no longer active. Every tool
+    #: must refuse with this sentence instead of running with defaults.
+    authorization_error: str | None = None
 
 
 @contextlib.asynccontextmanager
@@ -177,14 +216,18 @@ async def open_mcp_scope(
         folder_access = FolderAccess.ALL
         folder_id: str | None = None
         history_scope = HistoryScope.AGENT
+        scopes: tuple[AgentScope, ...] = ()
+        authorization_error: str | None = None
         if grant_id:
             grant = await SQLMCPRepository(session=session).get_grant(grant_id)
             # ``user_id`` is re-checked here even though the token's subject was
             # already validated: a token must never inherit a binding from a
             # grant belonging to another account, however it was presented.
-            folder_access, folder_id, history_scope = binding_from_grant(
+            folder_access, folder_id, history_scope, authorization_error = binding_from_grant(
                 grant, user_id, grant_id
             )
+            if authorization_error is None and grant is not None:
+                scopes = tuple(grant.scopes)  # type: ignore[attr-defined]
 
         # Read-side storage is wrapped so a download returns the file's real
         # bytes: anything the worker stored is at-rest ciphertext, and reading it
@@ -195,30 +238,38 @@ async def open_mcp_scope(
             storage=get_minio_download_adapter(),
             encryption_service=get_encryption_service(),
         )
+        toolbox = MCPToolBox(
+            file_service=file_service,
+            conversion_service=conversion_service,
+            transfer_service=transfer_service,
+            copier=MinioObjectCopier(storage=get_minio_download_adapter()),
+            credits=credit_service,
+            object_store=object_store,
+            text_page_chars=get_settings().MCP_TEXT_PAGE_CHARS,
+            text_extraction_max_bytes=get_settings().MCP_TEXT_EXTRACTION_MAX_BYTES,
+        )
         yield MCPServiceScope(
             file_service=file_service,
             conversion_service=conversion_service,
             transfer_service=transfer_service,
             credit_service=credit_service,
-            toolbox=MCPToolBox(
-                file_service=file_service,
-                conversion_service=conversion_service,
-                transfer_service=transfer_service,
-                copier=MinioObjectCopier(storage=get_minio_download_adapter()),
-                credits=credit_service,
-                object_store=object_store,
-            ),
+            toolbox=toolbox,
             # Built from the same session and the same builders the REST router
-            # uses; see ``workspace_dependencies``.
+            # uses; see ``workspace_dependencies``. The toolbox is injected so
+            # the Drive↔workspace bridge reuses the document folder gate and the
+            # normal upload pipeline instead of re-implementing either.
             workspace_tools=MCPWorkspaceTools(
                 workspaces=build_workspace_service(session),
                 executions=build_execution_service(session),
                 default_timeout_seconds=get_settings().WORKSPACE_EXECUTION_TIMEOUT_SECONDS,
+                documents=toolbox,
             ),
             resolve_tier=resolve_tier,
             folder_access=folder_access,
             folder_id=folder_id,
             history_scope=history_scope,
+            scopes=scopes,
+            authorization_error=authorization_error,
         )
 
 
@@ -241,4 +292,5 @@ def get_mcp_oauth_provider() -> MCPOAuthProvider:
         access_token_ttl_minutes=settings.MCP_ACCESS_TOKEN_TTL_MINUTES,
         refresh_token_ttl_days=settings.MCP_REFRESH_TOKEN_TTL_DAYS,
         authorization_code_ttl_minutes=settings.MCP_AUTHORIZATION_CODE_TTL_MINUTES,
+        refresh_reuse_grace_seconds=settings.MCP_REFRESH_REUSE_GRACE_SECONDS,
     )

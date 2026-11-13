@@ -118,5 +118,11 @@ class ToolOutcome:
     #: control working, and a user investigating "what did my agent try?" needs
     #: to see attempts that were blocked.
     DENIED = "DENIED"
+    #: An expected ``{"ok": false}`` answer that is not a scope refusal: "no such
+    #: file", "that conversion is still processing", "outside your folder". These
+    #: are the tool working correctly, so counting them as ``ERROR`` made the
+    #: activity dashboard unreadable (a normal agent workflow looked like a wave
+    #: of failures).
+    REFUSED = "REFUSED"
 
-    ALL = (SUCCESS, ERROR, DENIED)
+    ALL = (SUCCESS, ERROR, DENIED, REFUSED)

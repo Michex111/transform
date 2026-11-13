@@ -29,6 +29,7 @@ import hashlib
 import logging
 from collections.abc import AsyncGenerator, Callable
 from contextlib import AbstractAsyncContextManager
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 from mcp.server.auth.provider import (
@@ -88,6 +89,7 @@ class MCPOAuthProvider(
         access_token_ttl_minutes: int = 60,
         refresh_token_ttl_days: int = 30,
         authorization_code_ttl_minutes: int = 5,
+        refresh_reuse_grace_seconds: int = 60,
         grantable_scopes: tuple[AgentScope, ...] = ALL_SCOPES,
     ) -> None:
         self._session_scope = session_scope
@@ -96,6 +98,7 @@ class MCPOAuthProvider(
         self._access_token_ttl_minutes = access_token_ttl_minutes
         self._refresh_token_ttl_days = refresh_token_ttl_days
         self._authorization_code_ttl_minutes = authorization_code_ttl_minutes
+        self._refresh_reuse_grace_seconds = refresh_reuse_grace_seconds
         self._grantable_scopes = grantable_scopes
 
     # ------------------------------------------------------------------
@@ -111,6 +114,7 @@ class MCPOAuthProvider(
                 access_token_ttl_minutes=self._access_token_ttl_minutes,
                 refresh_token_ttl_days=self._refresh_token_ttl_days,
                 authorization_code_ttl_minutes=self._authorization_code_ttl_minutes,
+                refresh_reuse_grace_seconds=self._refresh_reuse_grace_seconds,
                 grantable_scopes=self._grantable_scopes,
             )
 
@@ -254,21 +258,39 @@ class MCPOAuthProvider(
     ) -> RefreshToken | None:
         async with self._service() as service:
             record = await service.peek_refresh_token(refresh_token)
-        if record is None or record.kind != "REFRESH" or record.revoked_at is not None:
-            # The SDK answers invalid_grant for this without calling back into
-            # the provider, so without a line here a refused refresh leaves NO
-            # server-side trace at all: the access log shows a 400 and the
-            # reason (unknown, rotated, revoked, expired) is unknowable. That is
-            # exactly the position an operator was in when a major client
-            # silently dropped its connection.
+
+        # One refusal reason per *cause*, so an operator can tell a retry that
+        # arrived too late from a token for another client or a stolen replay.
+        # Only the fingerprint is logged — never the token.
+        reason: str | None = None
+        now = datetime.now(UTC)
+        if record is None:
+            reason = "unknown"
+        elif record.kind != "REFRESH":
+            reason = "wrong-kind"
+        elif self._expired(record.expires_at, now):
+            reason = "expired"
+        elif record.client_id != client.client_id:
+            reason = "client-mismatch"
+        elif record.revoked_at is not None:
+            # A *rotated* token inside the reuse grace window is a retry, not a
+            # replay: let the exchange path mint a fresh pair. Anything else
+            # (a user revocation, or a replay after the window) is refused here.
+            if record.replaced_by is None:
+                reason = "revoked"
+            elif not self._within_grace(record.revoked_at, now):
+                reason = "rotated"
+        if reason is not None:
             logger.info(
                 "MCP refresh token refused before exchange (fingerprint=%s client_id=%s "
                 "reason=%s)",
                 _fingerprint(refresh_token),
                 client.client_id,
-                "unknown-or-revoked" if record is None or record.revoked_at is not None else "wrong-kind",
+                reason,
             )
             return None
+
+        assert record is not None  # narrowed by the checks above
         sdk_scopes = [scope.value for scope in record.scopes] + [OFFLINE_ACCESS]
         return RefreshToken(
             token=refresh_token,
@@ -278,6 +300,19 @@ class MCPOAuthProvider(
             resource=record.resource,
             subject=record.subject,
         )
+
+    @staticmethod
+    def _expired(expires_at: datetime, now: datetime) -> bool:
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=UTC)
+        return expires_at <= now
+
+    def _within_grace(self, revoked_at: datetime, now: datetime) -> bool:
+        if self._refresh_reuse_grace_seconds <= 0:
+            return False
+        if revoked_at.tzinfo is None:
+            revoked_at = revoked_at.replace(tzinfo=UTC)
+        return now - revoked_at <= timedelta(seconds=self._refresh_reuse_grace_seconds)
 
     async def exchange_refresh_token(
         self,

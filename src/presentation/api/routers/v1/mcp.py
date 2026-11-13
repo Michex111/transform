@@ -140,24 +140,21 @@ async def authorization_server_metadata_inserted_path() -> dict:
 
 
 def _scope_descriptions(
-    requested: tuple[AgentScope, ...], already_granted: tuple[AgentScope, ...]
+    available: tuple[AgentScope, ...],
+    requested: tuple[AgentScope, ...],
+    already_granted: tuple[AgentScope, ...],
 ) -> list[ScopeDescription]:
-    """Every permission the product has, marked requested/granted.
+    """Every permission the user *may* grant, marked requested/granted.
 
-    Listing all of them (rather than only the requested ones) lets the consent
-    screen show what *isn't* being granted, which is how a user can tell that
-    "delete my files" was not silently included.
+    Iterates the client's available set rather than ``ALL_SCOPES``: a scope the
+    client never registered for cannot be granted, so offering it would be a
+    checkbox that fails on approval. ``requested`` decides what the screen
+    pre-checks; scopes that are available but were not requested are shown
+    unchecked, which is how workspace access and delete become grantable from a
+    client that omits ``scope`` at registration (most of them).
 
-    Derived from :data:`ALL_SCOPES` rather than written out. It WAS a hand-listed
-    four, which quietly broke the ``workspaces.*`` permissions twice over: the
-    screen never rendered them, so a user could not see that an application was
-    asking for workspace access, and — because the screen posts back only what it
-    rendered — an approved connection silently lost them. An agent then failed
-    every workspace tool with "needs the workspaces.read permission" and the user
-    had no way to grant it.
-
-    Iterating the vocabulary means a new capability appears here automatically,
-    which is the only version of this that does not rot.
+    Destructive scopes are never pre-checked, even when requested — the flag is
+    sent as data so the UI does not have to re-derive it from the name.
     """
     requested_set = set(requested)
     granted_set = set(already_granted)
@@ -165,11 +162,11 @@ def _scope_descriptions(
         ScopeDescription(
             scope=scope.value,
             description=SCOPE_DESCRIPTIONS[scope],
-            requested=scope in requested_set,
+            requested=scope in requested_set and scope not in DESTRUCTIVE_SCOPES,
             already_granted=scope in granted_set,
             destructive=scope in DESTRUCTIVE_SCOPES,
         )
-        for scope in ALL_SCOPES
+        for scope in available
     ]
 
 
@@ -270,7 +267,7 @@ async def describe_consent_request(
     """
     try:
         view = await access.describe_authorization(
-            user_id=int(current_user.id),
+            user_id=current_user.id,
             client_id=client_id,
             redirect_uri=redirect_uri,
             requested_scopes=scope.split() if scope else (),
@@ -284,14 +281,16 @@ async def describe_consent_request(
         raise HTTPException(status_code=code, detail=exc.description) from exc
 
     folder_rows, _total = await file_service.list_root_folders(
-        int(current_user.id), offset=0, limit=_MAX_CONSENT_FOLDERS,
+        current_user.id, offset=0, limit=_MAX_CONSENT_FOLDERS,
     )
     return ConsentRequestResponse(
         client_id=view.client_id,
         client_name=view.client_name,
         redirect_uri=view.redirect_uri,
         resource=view.resource,
-        scopes=_scope_descriptions(view.requested_scopes, view.already_granted),
+        scopes=_scope_descriptions(
+            view.available_scopes, view.requested_scopes, view.already_granted
+        ),
         folders=[
             ConsentFolderOption(folder_id=folder.id, name=folder.name)
             for folder in folder_rows
@@ -318,7 +317,7 @@ async def approve_consent_request(
     re-validated before any code is minted. The folder binding is resolved
     against the user's own folders here, before the grant is persisted.
     """
-    user_id = int(current_user.id)
+    user_id = current_user.id
     try:
         view = await access.describe_authorization(
             user_id=user_id,
@@ -330,7 +329,7 @@ async def approve_consent_request(
         approved = [
             scope
             for scope in normalize_scopes(body.approved_scopes)
-            if scope in set(view.requested_scopes)
+            if scope in set(view.available_scopes)
         ]
         if not approved:
             # Approving nothing is a refusal, not a zero-scope grant: a token
@@ -364,6 +363,7 @@ async def approve_consent_request(
             folder_access=body.folder_access,
             folder_id=resolved_folder_id,
             history_scope=body.history_scope,
+            approved_scopes=[scope.value for scope in approved],
         )
     except MCPAccessError as exc:
         code = status.HTTP_404_NOT_FOUND if "not registered" in exc.description else 400
@@ -384,7 +384,7 @@ async def list_active_folder_access(
     condition the toolbox enforces, so the badge can never advertise a binding
     that grants nothing.
     """
-    grants = await access.list_connections(int(current_user.id))
+    grants = await access.list_connections(current_user.id)
     folders: list[FolderAccessEntry] = []
     for grant in grants:
         folder_id = grant.folder_id
@@ -454,7 +454,7 @@ async def list_connected_apps(
     folder's display name is resolved here; a folder that no longer exists is
     reported as ``folder_name: null`` rather than failing the listing.
     """
-    user_id = int(current_user.id)
+    user_id = current_user.id
     grants = await access.list_connections(user_id)
     apps: list[ConnectedAppResponse] = []
     for grant in grants:
@@ -495,7 +495,7 @@ async def update_connected_app(
     id the caller does not own is refused rather than stored, and a whole-Drive
     edit discards any supplied folder id.
     """
-    user_id = int(current_user.id)
+    user_id = current_user.id
 
     # Resolve the folder in the router (it owns file I/O), so the service only
     # ever receives an id that is provably the caller's.
@@ -566,7 +566,7 @@ async def revoke_connected_app(
     which the agent keeps working. A grant belonging to another account is
     reported as not found, so the endpoint cannot be used to probe for ids.
     """
-    grant = await access.revoke_connection(int(current_user.id), grant_id)
+    grant = await access.revoke_connection(current_user.id, grant_id)
     if grant is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Application not found")
     return Response(status_code=status.HTTP_204_NO_CONTENT)

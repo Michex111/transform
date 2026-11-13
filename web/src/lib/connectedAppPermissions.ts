@@ -194,16 +194,15 @@ export interface PermissionChangeEffect {
 /**
  * The honest statement of *when* a change takes effect, per direction.
  *
- * A reduction is enforced as soon as the app next asks (and the app then has to
- * re-authorize, because what it holds no longer covers what it needs); an
- * addition does nothing at all until the app re-authorizes or refreshes. The
- * two must never be flattened into "changes are instant", which would be a
- * promise the product cannot keep for an addition.
+ * A change is enforced on the app's next request, in **both** directions: the
+ * server resolves the effective scope set from the stored grant on every call,
+ * so an addition no longer waits for a re-authorization. Saying otherwise would
+ * be a promise the product cannot keep — in either direction.
  */
 export const PERMISSION_NARROWING_MESSAGE =
-  "Reduced access takes effect on the app's next request. The app will need to re-authorize, because its current access stops working.";
+  "Reduced access takes effect on the app's next request — the app does not need to reconnect.";
 export const PERMISSION_WIDENING_MESSAGE =
-  "Added access does not start working until the app re-authorizes or refreshes its connection.";
+  "Added access also takes effect on the app's next request — the app does not need to reconnect.";
 
 /**
  * Whether an edit reduces what the app can reach.

@@ -42,6 +42,11 @@ from src.application.exceptions.file_system_exceptions import (
     FolderNotFoundError,
 )
 from src.application.services.billing.credit_service import CreditBalance
+from src.application.services.mcp.text_extraction import (
+    MCPTextExtractor,
+    TextExtractionUnavailable,
+    page_text,
+)
 from src.domain.conversions.entities.conversion_job import ConversionJob
 from src.domain.conversions.policies.job_ownership import is_job_owner
 from src.domain.conversions.value_object.job_origin import JobOrigin
@@ -138,6 +143,10 @@ class MCPToolContext:
     folder_id: str | None = None
     #: How much conversion history ``get_conversion_history`` may read.
     history_scope: HistoryScope = HistoryScope.AGENT
+    #: Set when the grant behind this call could not be loaded, or is no longer
+    #: active. Every tool refuses with this sentence rather than running with
+    #: defaults — a missing binding must never be read as "unrestricted".
+    authorization_error: str | None = None
 
     def allows(self, scope: AgentScope) -> bool:
         return covers(self.scopes, scope)
@@ -165,6 +174,16 @@ class MCPFileServicePort(Protocol):
     """
 
     async def get_file(self, user_id: int, file_id: str) -> UserFileModel: ...
+
+    async def find_by_key(self, user_id: int, file_key: str) -> UserFileModel | None:
+        """The caller's file row for a stored object key, if any.
+
+        The bridge between a conversion job (which knows only an object key) and
+        a Drive file (which knows only its folder). Needed to prove that a job's
+        *source* lies inside a confined grant's subtree — the check that stops
+        ``save_file`` copying content in from outside the folder.
+        """
+        ...
 
     async def list_files(
         self, user_id: int, folder_id: str | None = None, *, offset: int = 0, limit: int = 20,
@@ -232,6 +251,7 @@ class MCPConversionServicePort(Protocol):
         user_id: int,
         tier: SubscriptionTier = SubscriptionTier.FREE,
         origin: JobOrigin = JobOrigin.WEB,
+        grant_id: str | None = None,
     ) -> ConversionJob: ...
 
     async def get_conversion_job(self, job_id: str) -> ConversionJob | None: ...
@@ -243,10 +263,12 @@ class MCPConversionServicePort(Protocol):
         offset: int = 0,
         limit: int = 20,
         origin: JobOrigin | None = None,
+        grant_id: str | None = None,
     ) -> tuple[list[ConversionJob], int]:
         """The user's conversion history (newest first) plus total count.
 
         ``origin`` filters to one :class:`JobOrigin`; ``None`` is unfiltered.
+        ``grant_id`` narrows further to jobs started by one MCP connection.
         """
         ...
 
@@ -435,6 +457,9 @@ class MCPToolBox:
         object_store: MCPObjectStorePort,
         max_list_limit: int = _MAX_LIST_LIMIT,
         conversion_map: dict[str, list[str]] | None = None,
+        text_extractor: MCPTextExtractor | None = None,
+        text_page_chars: int = 24_000,
+        text_extraction_max_bytes: int = _MAX_DOWNLOAD_BYTES,
     ) -> None:
         self._files = file_service
         self._conversions = conversion_service
@@ -446,6 +471,11 @@ class MCPToolBox:
         #: Injected so tests can pin the graph; production reads the real
         #: registry (the same source the REST ``/supported`` endpoint uses).
         self._map = conversion_map or build_conversion_map()
+        #: Turns a container format (PDF, DOCX, …) into readable text. Injected
+        #: so a unit test does not need LibreOffice installed.
+        self._extractor = text_extractor or MCPTextExtractor(self._map)
+        self._text_page_chars = max(1, text_page_chars)
+        self._text_extraction_max_bytes = max(1, text_extraction_max_bytes)
 
     # ------------------------------------------------------------------
     # Read-only tools
@@ -458,9 +488,9 @@ class MCPToolBox:
         denied = self._require(ctx, AgentScope.DOCUMENTS_READ, "get_supported_conversions")
         if denied:
             return denied
-        folder = await self._resolve_folder(ctx, "get_supported_conversions")
-        if folder.denial:
-            return folder.denial
+        # No folder gate: this reports static capability, touches no user data,
+        # and a confined grant whose folder was deleted should still be able to
+        # discover what the service supports.
         source = normalize_extension(source_format) if source_format else None
         if source:
             targets = self._map.get(source)
@@ -495,18 +525,37 @@ class MCPToolBox:
         if folder.denial:
             return folder.denial
         limit = self._clamp_limit(limit)
-        offset = max(0, int(offset or 0))
+        offset = max(0, self._as_int(offset, 0) or 0)
         extensions = _normalize_extension_filter(extension)
 
         if query:
-            # ``folder_ids`` is the agent's subtree when the grant is confined,
-            # else None (whole drive). Pushing the restriction into the query
-            # keeps the total honest and the page full — a post-filter would
-            # return short pages and count files the caller may not see.
+            # ``folder_id`` used to be ignored whenever ``query`` was present,
+            # because the query branch ran first and returned. A search inside a
+            # folder is a normal thing to ask for, so the two filters now
+            # combine: the named folder (and its subtree) intersected with the
+            # grant's subtree.
+            if folder_id is not None:
+                if not folder.allows(folder_id):
+                    return self._folder_unavailable(ctx, "list_files")
+                named = await self._files.resolve_folder_scope(ctx.user_id, folder_id)
+                if named is None:
+                    return self._folder_unavailable(ctx, "list_files")
+                search_folders = list(
+                    named if folder.subtree is None else named & folder.subtree
+                )
+                if not search_folders:
+                    return self._folder_unavailable(ctx, "list_files")
+            else:
+                # ``folder_ids`` is the agent's subtree when the grant is
+                # confined, else None (whole drive). Pushing the restriction into
+                # the query keeps the total honest and the page full — a
+                # post-filter would return short pages and count files the
+                # caller may not see.
+                search_folders = None if folder.subtree is None else list(folder.subtree)
             rows, total = await self._files.search_files(
                 ctx.user_id, query, offset=offset, limit=limit,
                 extensions=extensions or None,
-                folder_ids=None if folder.subtree is None else list(folder.subtree),
+                folder_ids=search_folders,
             )
         elif folder_id is not None:
             # A named folder must be inside the subtree; anything else is
@@ -724,6 +773,16 @@ class MCPToolBox:
                 tool="get_conversion_status",
             )
             return {"ok": False, "error": "No such conversion was found."}
+        if not await self._job_source_in_scope(ctx, job, folder):
+            # Same bytes as "not found", deliberately: a distinct message would
+            # confirm that a job exists on a file this connection may not reach.
+            log_permission_denied(
+                resource=f"job:{job_id}",
+                user_id=str(ctx.user_id),
+                action="mcp.tool_call",
+                tool="get_conversion_status",
+            )
+            return {"ok": False, "error": "No such conversion was found."}
         self._audit(ctx, "get_conversion_status", f"job:{job_id}")
         return {"ok": True, "job": _job_payload(job)}
 
@@ -751,15 +810,24 @@ class MCPToolBox:
         if folder.denial:
             return folder.denial
         limit = self._clamp_limit(limit)
-        offset = max(0, int(offset or 0))
-        # AGENT scope maps to the MCP origin. All MCP-origin jobs are attributed
-        # to this user, so the only split available is by origin; per-grant
-        # attribution would need a grant_id column on the job row (there is
-        # none), which is why the docstring calls AGENT "any connected app".
-        origin = JobOrigin.MCP if ctx.history_scope is HistoryScope.AGENT else None
-        jobs, total = await self._conversions.list_history(
-            ctx.user_id, offset=offset, limit=limit, origin=origin
-        )
+        offset = max(0, self._as_int(offset, 0) or 0)
+        # AGENT scope now means "conversions THIS connection started", not "any
+        # connected application of this user": ``convert_file`` stamps the
+        # grant id on the job row, so the narrower claim is finally true. Jobs
+        # created before 0030 have no grant id and therefore drop out of this
+        # listing — the conservative direction for a per-connection view.
+        if ctx.history_scope is HistoryScope.AGENT:
+            jobs, total = await self._conversions.list_history(
+                ctx.user_id,
+                offset=offset,
+                limit=limit,
+                origin=JobOrigin.MCP,
+                grant_id=ctx.grant_id or None,
+            )
+        else:
+            jobs, total = await self._conversions.list_history(
+                ctx.user_id, offset=offset, limit=limit, origin=None
+            )
         self._audit(ctx, "get_conversion_history", f"history:{len(jobs)}")
         return {
             "ok": True,
@@ -772,16 +840,13 @@ class MCPToolBox:
     async def get_credits(self, ctx: MCPToolContext) -> dict[str, Any]:
         """Report the caller's credit balance for the active period.
 
-        Read-only and takes no file or folder target, but the folder gate still
-        applies: a restricted grant whose bound folder no longer exists is
-        refused like every other tool.
+        Read-only and takes no file or folder target, so the folder gate does
+        not apply: an agent whose bound folder was deleted should still be able
+        to answer "how many credits do I have?".
         """
         denied = self._require(ctx, AgentScope.DOCUMENTS_READ, "get_credits")
         if denied:
             return denied
-        folder = await self._resolve_folder(ctx, "get_credits")
-        if folder.denial:
-            return folder.denial
         balance = await self._credits.get_balance(ctx.user_id)
         self._audit(ctx, "get_credits", "credits")
         return {"ok": True, "balance": balance.balance, "resets_at": _iso(balance.resets_at)}
@@ -837,7 +902,7 @@ class MCPToolBox:
         # on every call, so a 20 MB file cost 20 MB of storage transfer for each
         # 128 KiB page — and asking for the first four bytes of a large file cost
         # the whole file. The at-rest reader also decrypts only the prefix now.
-        known_total = int(row.file_size_bytes or 0)
+        known_total = row.file_size_bytes or 0
         read_limit = min(_MAX_DOWNLOAD_BYTES, start + chunk + 1)
         try:
             data = await self._store.read_object(
@@ -905,6 +970,209 @@ class MCPToolBox:
         elif start > 0:
             payload["note"] = f"This is the final part (bytes {start}-{end} of {total})."
         return payload
+
+    async def read_file_text(
+        self,
+        ctx: MCPToolContext,
+        file_id: str,
+        offset: Any = 0,
+        max_chars: Any = None,
+    ) -> dict[str, Any]:
+        """Return one page of a document's TEXT, not its bytes.
+
+        The tool an agent should reach for when asked to read, summarise, quote
+        or translate a document. ``download_file`` remains for real byte
+        transfer (a model needs the bytes to re-upload them, not to read them).
+
+        Text files are decoded directly; PDF/DOCX/PPTX/XLSX/ODT/RTF/EPUB/HTML are
+        extracted through the same converters the workers use, in-process and
+        charged to nobody. Paged by characters.
+        """
+        denied = self._require(ctx, AgentScope.DOCUMENTS_READ, "read_file_text")
+        if denied:
+            return denied
+        folder = await self._resolve_folder(ctx, "read_file_text")
+        if folder.denial:
+            return folder.denial
+        row = await self._owned_file_in_scope(ctx, file_id, folder)
+        if isinstance(row, dict):
+            return row
+        if (row.file_size_bytes or 0) > self._text_extraction_max_bytes:
+            return {
+                "ok": False,
+                "error": (
+                    f"This document is larger than the "
+                    f"{self._text_extraction_max_bytes // (1024 * 1024)} MB limit for "
+                    "text extraction. Use download_file or the web app instead."
+                ),
+            }
+        try:
+            data = await self._store.read_object(
+                row.file_key,
+                max_bytes=self._text_extraction_max_bytes + 1,
+                user_id=str(ctx.user_id),
+            )
+        except Exception as exc:  # noqa: BLE001 - storage or decryption failures
+            logger.warning("MCP read_file_text failed for file %s: %s", file_id, exc)
+            return {"ok": False, "error": "The file could not be read from storage."}
+        if len(data) > self._text_extraction_max_bytes:
+            return {
+                "ok": False,
+                "error": "This document is larger than the limit for text extraction.",
+            }
+        result = await self._extract_and_page(
+            row.file_extension, row.file_name, data, offset, max_chars,
+            extra={"file_id": row.id, "size_bytes": len(data)},
+        )
+        if result.get("ok"):
+            self._audit(ctx, "read_file_text", f"file:{row.id}")
+        return result
+
+    async def read_conversion_output(
+        self,
+        ctx: MCPToolContext,
+        job_id: str,
+        offset: Any = 0,
+        max_chars: Any = None,
+    ) -> dict[str, Any]:
+        """Read a completed conversion's output as text without saving it.
+
+        Closes the "convert to read" loop: a PDF can be turned into ``md`` and
+        read directly, instead of saving the output into the user's Drive purely
+        to download it again. The same folder confinement as ``save_file``
+        applies, and the refusal for an out-of-scope job is byte-identical to
+        "No such conversion was found.".
+        """
+        denied = self._require(ctx, AgentScope.DOCUMENTS_READ, "read_conversion_output")
+        if denied:
+            return denied
+        folder = await self._resolve_folder(ctx, "read_conversion_output")
+        if folder.denial:
+            return folder.denial
+        job = await self._conversions.get_conversion_job(job_id)
+        if not is_job_owner(job, ctx.user_id) or not await self._job_source_in_scope(
+            ctx, job, folder
+        ):
+            log_permission_denied(
+                resource=f"job:{job_id}",
+                user_id=str(ctx.user_id),
+                action="mcp.tool_call",
+                tool="read_conversion_output",
+            )
+            return {"ok": False, "error": "No such conversion was found."}
+        if job.status is not JobStatus.COMPLETED or not job.output_file:
+            return {
+                "ok": False,
+                "error": "That conversion has not produced an output yet.",
+                "job": _job_payload(job),
+            }
+        try:
+            data = await self._store.read_object(
+                job.output_file,
+                max_bytes=self._text_extraction_max_bytes + 1,
+                user_id=str(ctx.user_id),
+            )
+        except Exception as exc:  # noqa: BLE001 - storage or decryption failures
+            logger.warning("MCP read_conversion_output failed for job %s: %s", job_id, exc)
+            return {"ok": False, "error": "The conversion output could not be read from storage."}
+        name = job.output_file.rsplit("/", 1)[-1]
+        result = await self._extract_and_page(
+            job.conversion.target_format, name, data, offset, max_chars,
+            extra={"job_id": job.job_id, "target_format": job.conversion.target_format},
+        )
+        if result.get("ok"):
+            self._audit(ctx, "read_conversion_output", f"job:{job.job_id}")
+        return result
+
+    async def _extract_and_page(
+        self,
+        extension: str | None,
+        file_name: str,
+        data: bytes,
+        offset: Any,
+        max_chars: Any,
+        *,
+        extra: dict[str, Any],
+    ) -> dict[str, Any]:
+        try:
+            text = await self._extractor.extract(extension, file_name, data)
+        except TextExtractionUnavailable as exc:
+            return {"ok": False, "error": str(exc), **extra}
+        page = page_text(text, offset, max_chars, self._text_page_chars)
+        if not page.get("ok"):
+            return {**page, **extra}
+        return {**page, **extra, "file_name": file_name, "extension": extension}
+
+    async def read_owned_bytes(
+        self, ctx: MCPToolContext, file_id: str
+    ) -> tuple[UserFileModel, bytes] | dict[str, Any]:
+        """Bytes of an owned, in-scope file — the bridge the workspace tools use.
+
+        Public (unlike ``_owned_file``) because ``copy_file_to_workspace`` must
+        reach it without re-implementing the folder confinement. It returns a
+        refusal payload, never a partial result.
+        """
+        allowed = self._require(ctx, AgentScope.DOCUMENTS_READ, "copy_file_to_workspace")
+        if allowed:
+            return allowed
+        folder = await self._resolve_folder(ctx, "copy_file_to_workspace")
+        if folder.denial:
+            return folder.denial
+        row = await self._owned_file_in_scope(ctx, file_id, folder)
+        if isinstance(row, dict):
+            return row
+        if (row.file_size_bytes or 0) > _MAX_DOWNLOAD_BYTES:
+            return {
+                "ok": False,
+                "error": "That file is too large to copy into a workspace.",
+            }
+        try:
+            data = await self._store.read_object(
+                row.file_key, max_bytes=_MAX_DOWNLOAD_BYTES, user_id=str(ctx.user_id)
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("MCP read_owned_bytes failed for %s: %s", file_id, exc)
+            return {"ok": False, "error": "The file could not be read from storage."}
+        return row, data
+
+    async def store_bytes_as_file(
+        self,
+        ctx: MCPToolContext,
+        file_name: str,
+        data: bytes,
+        folder_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Create a Drive file from arbitrary bytes, honouring the folder binding.
+
+        Used by ``save_artifact_to_drive`` so a workspace artifact goes through
+        the same upload pipeline as every other created file (magic-byte checks,
+        quota, folder ownership) rather than a second, weaker path.
+        """
+        return await self.upload_file(
+            ctx,
+            file_name=file_name,
+            content_base64=base64.b64encode(data).decode("ascii"),
+            folder_id=folder_id,
+        )
+
+    async def read_object_bytes(
+        self, ctx: MCPToolContext, object_key: str
+    ) -> bytes | dict[str, Any]:
+        """Read a stored object by key, for a caller that has already proved owner.
+
+        The only intended caller is ``save_artifact_to_drive``: the artifact
+        lookup (``ExecutionService.get_artifact``) is the ownership check, and
+        this method deliberately performs no second authorization of its own.
+        It must never be exposed as a tool, because an object key is exactly the
+        handle an agent must not be able to name.
+        """
+        try:
+            return await self._store.read_object(
+                object_key, max_bytes=_MAX_DOWNLOAD_BYTES, user_id=str(ctx.user_id)
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("MCP artifact read failed: %s", exc)
+            return {"ok": False, "error": "The artifact could not be read from storage."}
 
     @staticmethod
     def _as_int(value: Any, default: int | None) -> int | None:
@@ -995,11 +1263,11 @@ class MCPToolBox:
             user_id=ctx.user_id,
             tier=await ctx.resolve_tier(),
             # Recorded as MCP, not API: an agent acting under an OAuth grant is
-            # a different actor from an API-key caller, and the agent-facing
-            # history tool has to answer "what did *this agent* convert?". The
-            # two were only ever conflated because no origin branch existed yet;
-            # no credit logic switches on the value.
+            # a different actor from an API-key caller. ``grant_id`` makes the
+            # history tool's AGENT scope mean "this connection", not "any
+            # connected application".
             origin=JobOrigin.MCP,
+            grant_id=ctx.grant_id or None,
         )
         self._audit(ctx, "convert_file", f"file:{row.id}->job:{job.job_id}")
         return {
@@ -1048,6 +1316,19 @@ class MCPToolBox:
 
         job = await self._conversions.get_conversion_job(job_id)
         if not is_job_owner(job, ctx.user_id):
+            log_permission_denied(
+                resource=f"job:{job_id}",
+                user_id=str(ctx.user_id),
+                action="mcp.tool_call",
+                tool="save_file",
+            )
+            return {"ok": False, "error": "No such conversion was found."}
+        if not await self._job_source_in_scope(ctx, job, folder):
+            # A confined agent must not be able to *copy in* content from
+            # outside its folder by naming a job id it learned elsewhere (for
+            # example from the user's full history). The download capability
+            # already applies this rule; without it here the two paths disagreed
+            # and this one was the hole.
             log_permission_denied(
                 resource=f"job:{job_id}",
                 user_id=str(ctx.user_id),
@@ -1122,20 +1403,26 @@ class MCPToolBox:
         self,
         ctx: MCPToolContext,
         file_name: str,
-        content_base64: str,
+        content_base64: str | None = None,
         folder_id: str | None = None,
+        content_text: str | None = None,
     ) -> dict[str, Any]:
         """Store model-supplied bytes as a NEW file inside the allowed folder.
 
         Unlike ``save_file`` (which only promotes a document Transform itself
         produced), this accepts arbitrary content. That is why it is guarded so
-        tightly: ``content_base64`` is model-supplied and therefore untrusted, so
-        it is decoded and bounded *before* anything touches storage, the tier's
+        tightly: the content is model-supplied and therefore untrusted, so it is
+        decoded and bounded *before* anything touches storage, the tier's
         per-file cap and the account quota are enforced through the ordinary
         upload path, and the destination folder must sit inside the grant's
         subtree. The resulting row is identical to a browser upload because it
         goes through the same ``create_upload`` → storage write →
         ``complete_upload`` sequence.
+
+        Exactly one of ``content_text`` (UTF-8, the shape a model produces
+        naturally) or ``content_base64`` (arbitrary bytes) must be supplied.
+        Requiring base64 for a plain text document made models hand-encode large
+        payloads, which is where most corrupted-upload reports came from.
         """
         denied = self._require(ctx, AgentScope.DOCUMENTS_WRITE, "upload_file")
         if denied:
@@ -1152,37 +1439,43 @@ class MCPToolBox:
         else:
             destination = None
 
-        # Reject an oversized payload BEFORE decoding it. ``content_base64`` is
-        # model-supplied, and a decoded-length check can only run after
-        # ``b64decode`` has allocated the whole thing — so a 200 MB argument
-        # would cost ~150 MB of memory for a request that is refused anyway.
-        # Base64 length is a tight upper bound on decoded length, so this check
-        # costs nothing and closes that allocation.
-        max_encoded = 4 * ((_MAX_UPLOAD_BYTES + 2) // 3)
-        if len(content_base64) > max_encoded:
+        if (content_text is None) == (content_base64 is None):
             return {
                 "ok": False,
                 "error": (
-                    f"Content larger than {_MAX_UPLOAD_BYTES // (1024 * 1024)} MB cannot be "
-                    "uploaded through this tool. Ask the user to upload it in the Transform "
-                    "web app instead."
+                    "Provide exactly one of content_text (UTF-8) or "
+                    "content_base64 (arbitrary bytes)."
                 ),
             }
-        try:
-            data = base64.b64decode(content_base64, validate=True)
-        except (binascii.Error, ValueError):
-            return {"ok": False, "error": "content_base64 is not valid base64-encoded data."}
-        if not data:
-            return {"ok": False, "error": "The uploaded content was empty."}
-        if len(data) > _MAX_UPLOAD_BYTES:
-            return {
-                "ok": False,
-                "error": (
-                    f"Content larger than {_MAX_UPLOAD_BYTES // (1024 * 1024)} MB cannot be "
-                    "uploaded through this tool. Ask the user to upload it in the Transform "
-                    "web app instead."
-                ),
-            }
+
+        if content_text is not None:
+            data = content_text.encode("utf-8")
+            # The same ceiling applies, checked after encoding because the byte
+            # count (not the character count) is what storage and the tier cap
+            # measure.
+            if not data:
+                return {"ok": False, "error": "The uploaded content was empty."}
+            if len(data) > _MAX_UPLOAD_BYTES:
+                return self._upload_too_large()
+        else:
+            assert content_base64 is not None
+            # Reject an oversized payload BEFORE decoding it. ``content_base64``
+            # is model-supplied, and a decoded-length check can only run after
+            # ``b64decode`` has allocated the whole thing — so a 200 MB argument
+            # would cost ~150 MB of memory for a request that is refused anyway.
+            # Base64 length is a tight upper bound on decoded length, so this
+            # check costs nothing and closes that allocation.
+            max_encoded = 4 * ((_MAX_UPLOAD_BYTES + 2) // 3)
+            if len(content_base64) > max_encoded:
+                return self._upload_too_large()
+            try:
+                data = base64.b64decode(content_base64, validate=True)
+            except (binascii.Error, ValueError):
+                return {"ok": False, "error": "content_base64 is not valid base64-encoded data."}
+            if not data:
+                return {"ok": False, "error": "The uploaded content was empty."}
+            if len(data) > _MAX_UPLOAD_BYTES:
+                return self._upload_too_large()
 
         extension = extension_from_filename(file_name)
         if not extension:
@@ -1310,7 +1603,24 @@ class MCPToolBox:
         Checked *before* any data is touched, and audited as a permission
         denial, so an under-scoped agent is visible in the security log rather
         than merely told "no".
+
+        An unreadable authorization is refused first: if the grant behind this
+        call could not be loaded, every tool must answer with the actionable
+        reconnect sentence instead of running with default (whole-Drive)
+        authority.
         """
+        if ctx.authorization_error:
+            log_permission_denied(
+                resource="grant:unavailable",
+                user_id=str(ctx.user_id),
+                action="mcp.tool_call",
+                tool=tool,
+            )
+            return {
+                "ok": False,
+                "error": ctx.authorization_error,
+                "reconnect_required": True,
+            }
         if ctx.allows(scope):
             return None
         log_permission_denied(
@@ -1376,11 +1686,43 @@ class MCPToolBox:
             return {"ok": False, "error": _FILE_NOT_FOUND_ERROR}
         return row
 
+    async def _job_source_in_scope(
+        self, ctx: MCPToolContext, job: ConversionJob, folder: _FolderResolution
+    ) -> bool:
+        """Whether a job's *source* file is one this connection may reach.
+
+        Unrestricted grants always pass. A confined grant must be able to prove
+        the job's input object belongs to an owned Drive file inside its
+        subtree; otherwise a job id learned from somewhere else would let content
+        from outside the folder be read or copied in.
+
+        Fail closed: no object key, no matching owned row, or a row outside the
+        subtree all answer ``False`` — and the caller reports that with the exact
+        "No such conversion was found." payload.
+        """
+        if folder.subtree is None:
+            return True
+        if not job.object_key:
+            return False
+        row = await self._files.find_by_key(ctx.user_id, job.object_key)
+        return row is not None and folder.allows(row.folder_id)
+
     def _clamp_limit(self, limit: Any, default: int = 20) -> int:
         value = self._as_int(limit, default)
         if value is None:
             value = default
         return max(1, min(value, self._max_list_limit))
+
+    @staticmethod
+    def _upload_too_large() -> dict[str, Any]:
+        return {
+            "ok": False,
+            "error": (
+                f"Content larger than {_MAX_UPLOAD_BYTES // (1024 * 1024)} MB cannot be "
+                "uploaded through this tool. Ask the user to upload it in the Transform "
+                "web app instead."
+            ),
+        }
 
     @staticmethod
     def _default_output_name(job: ConversionJob) -> str:

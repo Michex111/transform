@@ -33,20 +33,45 @@ import { breadcrumbJsonLd, faqJsonLd } from "@/lib/seo";
  */
 
 const MCP_TOOLS = [
-  { name: "get_supported_conversions", scope: "read", kind: "read" },
-  { name: "list_files", scope: "read", kind: "read" },
-  { name: "get_file", scope: "read", kind: "read" },
-  { name: "get_conversion_status", scope: "read", kind: "read" },
+  { name: "get_supported_conversions", scope: "documents.read", kind: "read" },
+  { name: "list_files", scope: "documents.read", kind: "read" },
+  { name: "get_file", scope: "documents.read", kind: "read" },
+  { name: "read_file_text", scope: "documents.read", kind: "read" },
+  { name: "download_file", scope: "documents.read", kind: "read" },
+  { name: "get_file_download_link", scope: "documents.read", kind: "read" },
+  { name: "list_folders", scope: "documents.read", kind: "read" },
+  { name: "get_conversion_status", scope: "documents.read", kind: "read" },
+  { name: "read_conversion_output", scope: "documents.read", kind: "read" },
+  { name: "get_conversion_history", scope: "documents.read", kind: "read" },
+  { name: "get_credits", scope: "documents.read", kind: "read" },
+  { name: "create_folder", scope: "documents.write", kind: "write" },
   { name: "convert_file", scope: "documents.convert", kind: "convert" },
   { name: "save_file", scope: "documents.write", kind: "write" },
+  { name: "upload_file", scope: "documents.write", kind: "write" },
   { name: "delete_file", scope: "documents.delete", kind: "destructive" },
+  { name: "list_workspaces", scope: "workspaces.read", kind: "read" },
+  { name: "get_workspace", scope: "workspaces.read", kind: "read" },
+  { name: "get_workspace_environment", scope: "workspaces.read", kind: "read" },
+  { name: "list_workspace_files", scope: "workspaces.read", kind: "read" },
+  { name: "read_workspace_file", scope: "workspaces.read", kind: "read" },
+  { name: "get_execution", scope: "workspaces.read", kind: "read" },
+  { name: "list_artifacts", scope: "workspaces.read", kind: "read" },
+  { name: "create_workspace", scope: "workspaces.execute", kind: "write" },
+  { name: "write_workspace_file", scope: "workspaces.execute", kind: "write" },
+  { name: "run_code", scope: "workspaces.execute", kind: "write" },
+  { name: "cancel_execution", scope: "workspaces.execute", kind: "destructive" },
+  { name: "save_workspace_environment", scope: "workspaces.execute", kind: "write" },
+  { name: "start_workspace", scope: "workspaces.execute", kind: "write" },
+  { name: "stop_workspace", scope: "workspaces.execute", kind: "write" },
+  { name: "copy_file_to_workspace", scope: "documents.read + workspaces.execute", kind: "write" },
+  { name: "save_artifact_to_drive", scope: "workspaces.read + documents.write", kind: "write" },
 ];
 
 const SCOPES = [
   {
     scope: "documents.read",
     label: "Read documents",
-    body: "Find files in your Drive and read their metadata.",
+    body: "Find files in your Drive, read their text and download them.",
     icon: MagnifyingGlass,
   },
   {
@@ -66,6 +91,18 @@ const SCOPES = [
     label: "Delete documents",
     body: "Remove files. Never granted by default — you must opt in.",
     icon: Trash,
+  },
+  {
+    scope: "workspaces.read",
+    label: "See cloud workspaces",
+    body: "See a workspace's files, environments and execution history.",
+    icon: Files,
+  },
+  {
+    scope: "workspaces.execute",
+    label: "Run code in workspaces",
+    body: "Write workspace files and run code. Separate from document access.",
+    icon: Robot,
   },
 ];
 
@@ -217,8 +254,8 @@ export function McpPage() {
       <Section>
         <SectionHeading
           eyebrow="Tools"
-          title="Seven tools, each gated by a scope"
-          intro="The server exposes a small, auditable tool surface. A read-only tool cannot change anything, and the destructive tool is separately permissioned."
+          title="Thirty-two tools, each gated by a scope"
+          intro="The server exposes document tools and cloud-workspace tools. Every one is gated by an OAuth scope you approve, and the destructive ones are separately permissioned."
         />
         <div className="mt-8 overflow-x-auto rounded-lg border border-outline">
           <table className="w-full text-left text-sm">

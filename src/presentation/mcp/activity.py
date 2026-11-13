@@ -72,7 +72,13 @@ def _classify(result: Any) -> tuple[str, str | None]:
     if isinstance(result, dict) and result.get("ok") is False:
         if "required_scope" in result:
             return ToolOutcome.DENIED, "permission_denied"
-        return ToolOutcome.ERROR, "tool_error"
+        if result.get("reconnect_required"):
+            return ToolOutcome.DENIED, "authorization_changed"
+        # Any other ``ok: false`` is a *value* the tool returns on purpose — a
+        # missing file, an unfinished conversion, a folder denial. It is the
+        # tool behaving correctly, so it is REFUSED rather than ERROR: folding it
+        # into ERROR made ordinary agent behaviour look like an outage.
+        return ToolOutcome.REFUSED, "expected_refusal"
     return ToolOutcome.SUCCESS, None
 
 

@@ -65,15 +65,20 @@ async def redeem_download(
     except DownloadUnavailable:
         raise HTTPException(status_code=404, detail="Download unavailable or expired.", headers=_HEADERS) from None
     log_data_access(
-        user_id=str(target.user_id), action="download", resource="conversion_output",
-        job_id=target.job_id, grant_id=target.grant_id,
+        user_id=str(target.user_id),
+        action="download",
+        resource="conversion_output" if target.job_id else "drive_file",
+        job_id=target.job_id,
+        file_id=target.file_id,
+        grant_id=target.grant_id,
     )
+    name = target.file_name or target.output_key.rsplit("/", 1)[-1]
     return StreamingResponse(
         iter_decrypted_object(storage, target.output_key, encryption, str(target.user_id)),
         media_type="application/octet-stream",
         headers={
             **_HEADERS,
-            "Content-Disposition": content_disposition_attachment(target.output_key.rsplit("/", 1)[-1]),
+            "Content-Disposition": content_disposition_attachment(name),
             "X-Content-Type-Options": "nosniff",
         },
     )

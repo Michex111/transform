@@ -98,6 +98,10 @@ export function McpConsentScreen({
 
       <ul className="mb-5 divide-y divide-outline">
         {request.scopes.map((s) => {
+          // Every available scope is selectable. The client's request decides
+          // what starts *checked*; it must not decide what the user is allowed
+          // to grant, because most MCP clients omit `scope` at registration and
+          // would otherwise make workspace and delete access impossible.
           const requested = s.requested;
           return (
             <li key={s.scope} className="flex items-start gap-3 py-3">
@@ -105,18 +109,15 @@ export function McpConsentScreen({
                 type="checkbox"
                 id={`scope-${s.scope}`}
                 checked={selectedScopes.has(s.scope)}
-                disabled={!requested}
                 onChange={() => onToggleScope(s.scope)}
-                className="mt-0.5 h-4 w-4 shrink-0 accent-[var(--color-primary)] disabled:opacity-40"
+                className="mt-0.5 h-4 w-4 shrink-0 accent-[var(--color-primary)]"
               />
-              <label
-                htmlFor={`scope-${s.scope}`}
-                className={requested ? "text-sm" : "text-sm text-muted"}
-              >
+              <label htmlFor={`scope-${s.scope}`} className="text-sm">
                 <span className="block text-on-background">{s.description}</span>
                 <span className="block font-mono text-xs text-muted">
                   {s.scope}
-                  {!requested && " · not requested"}
+                  {!requested && " · optional for this app"}
+                  {s.destructive && " · cannot be undone"}
                   {s.already_granted && " · already allowed"}
                 </span>
               </label>

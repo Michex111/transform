@@ -128,17 +128,17 @@ class MCPEnv:
         assert response.status_code == 200, response.text
         return str(response.json()["access_token"])
 
-    def register_client(self, redirect_uri: str) -> dict[str, Any]:
-        response = self.client.post(
-            "/mcp/register",
-            json={
-                "redirect_uris": [redirect_uri],
-                "client_name": "Test Agent",
-                "token_endpoint_auth_method": "none",
-                "grant_types": ["authorization_code", "refresh_token"],
-                "response_types": ["code"],
-            },
-        )
+    def register_client(self, redirect_uri: str, *, scope: str | None = None) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "redirect_uris": [redirect_uri],
+            "client_name": "Test Agent",
+            "token_endpoint_auth_method": "none",
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"],
+        }
+        if scope is not None:
+            payload["scope"] = scope
+        response = self.client.post("/mcp/register", json=payload)
         assert response.status_code in (200, 201), response.text
         return response.json()
 
@@ -444,11 +444,20 @@ def test_a_convert_scope_does_not_imply_delete(tmp_path) -> None:
         assert [row["file_id"] for row in listing["files"]] == [file_id]
 
 
-def test_undoable_scope_approval_cannot_widen_the_request(tmp_path) -> None:
-    """A tampered consent page cannot approve a scope that was never requested."""
+def test_undoable_scope_approval_cannot_widen_the_clients_registration(tmp_path) -> None:
+    """A tampered consent page cannot approve beyond what the client registered.
+
+    The boundary moved in this build: a client that registers NO scope may be
+    granted any scope the deployment allows (most clients omit `scope`, and
+    capping them at read/convert/write made workspace access ungrantable). A
+    client that registers a NARROW set is still a hard cap, which is what this
+    test pins.
+    """
     with mcp_env(str(tmp_path / "mcp.db")) as env:
         env.seed_user()
-        client_info = env.register_client("https://agent.example.test/callback")
+        client_info = env.register_client(
+            "https://agent.example.test/callback", scope="documents.read"
+        )
         _verifier, challenge = _pkce()
         token = env.sign_in()
 
@@ -553,10 +562,10 @@ CONSENT_REDIRECT = "https://agent.example.test/callback"
 
 
 def _consent_setup(
-    env: MCPEnv, *, username: str = "ada"
+    env: MCPEnv, *, username: str = "ada", client_scope: str | None = None
 ) -> tuple[dict[str, Any], str, str]:
     """Register a client, sign in and mint a PKCE challenge for a consent post."""
-    client_info = env.register_client(CONSENT_REDIRECT)
+    client_info = env.register_client(CONSENT_REDIRECT, scope=client_scope)
     _verifier, challenge = _pkce()
     token = env.sign_in(username)
     return client_info, challenge, token
@@ -978,7 +987,7 @@ def test_a_tampered_approval_cannot_widen_scopes_even_when_it_binds_a_folder(tmp
     with mcp_env(str(tmp_path / "mcp.db")) as env:
         user = env.seed_user()
         folder = env.add_folder(user, "folder-a", "Reports")
-        client_info, challenge, token = _consent_setup(env)
+        client_info, challenge, token = _consent_setup(env, client_scope="documents.read")
 
         response = _post_consent(
             env,
@@ -1274,11 +1283,20 @@ def test_patch_narrowing_stops_an_already_issued_agent_token(tmp_path) -> None:
         )
         assert response.status_code == 200, response.text
 
-        # …and the very next call is refused: the token now exceeds its consent.
-        after = env.mcp_post(
-            {"jsonrpc": "2.0", "id": 9, "method": "tools/list"}, token=agent_token
+        # …and the very next call cannot convert: the grant is now the
+        # authority and no longer includes documents.convert. The session is
+        # NOT broken, which is the whole point of resolving scopes from the
+        # grant rather than rejecting the token.
+        refused = env.call_tool(
+            agent_token,
+            "convert_file",
+            {"file_id": "11111111-1111-1111-1111-111111111111", "target_format": "pdf"},
         )
-        assert after.status_code == 401, after.text
+        assert refused["ok"] is False
+        assert refused["required_scope"] == "documents.convert"
+
+        # Reading still works with the reduced set.
+        assert env.call_tool(agent_token, "list_files", {})["ok"] is True
 
 
 
@@ -1465,10 +1483,14 @@ def test_status_returns_redeemable_download_with_real_oauth(tmp_path, monkeypatc
                 await session.commit()
 
         _run(restrict_grant())
+        # B2: the job's source has no attributable file inside the bound
+        # subtree, so the status read is refused — with exactly the same bytes as
+        # a job that does not exist, so it is not an existence oracle.
         restricted = env.call_tool(token, "get_conversion_status", {"job_id": "finished"})
-        assert restricted["job"]["status"] == "COMPLETED"
+        missing = env.call_tool(token, "get_conversion_status", {"job_id": "missing"})
+        assert restricted == missing
+        assert restricted["ok"] is False
         assert "download_url" not in restricted
-        assert "not available" in restricted["download_note"]
         response = env.client.post(
             "/api/v1/mcp/download/redeem", data={"capability": url.fragment}
         )

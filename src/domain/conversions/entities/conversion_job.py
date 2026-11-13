@@ -56,6 +56,15 @@ class ConversionJob:
     # a plain id rather than a relationship: the user's conversion history must
     # survive the deletion of the shortcut that created it.
     workflow_id: str | None = None
+    # The MCP connection (``AgentGrant``) that started this conversion, when it
+    # came from an AI agent. ``None`` for every other origin.
+    #
+    # Without it, the agent-facing history tool could only say "conversions
+    # started by *some* connected application of this user", because a job row
+    # recorded the origin but not which grant submitted it. Declared last for
+    # the same reason ``origin`` is: a new defaulted field only stays safe for
+    # positional construction while nothing before it moves.
+    grant_id: str | None = None
 
     def pending_processing(self):
         if self.status != JobStatus.AWAITING_UPLOAD:

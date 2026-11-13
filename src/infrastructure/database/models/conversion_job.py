@@ -76,6 +76,17 @@ class ConversionJobModel(Base):
     # nothing joins on it, and the runs view simply stops naming a workflow that
     # no longer exists.
     workflow_id: Mapped[str | None] = mapped_column(String(36), index=True, nullable=True)
+    # The MCP connection that started this job, when an AI agent did. Nullable
+    # because most jobs are not agent-started; indexed because the agent history
+    # tool filters on it.
+    #
+    # Not a foreign key, for the same reason as ``workflow_id``: the user's
+    # conversion history must outlive the revocation (and eventual deletion) of
+    # the connection that produced it. A dangling id is harmless — nothing joins
+    # on it — while a cascade would destroy the user's own record of their work.
+    grant_id: Mapped[str | None] = mapped_column(
+        String(64), index=True, nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,

@@ -7,9 +7,12 @@ and secure file storage.
 """
 
 import asyncio
+import contextlib
 import logging
+import random
 import time
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 
 import uvicorn
 from fastapi import FastAPI, Request, Response
@@ -112,6 +115,28 @@ TELEMETRY_WRITTEN = Gauge(
 )
 
 
+async def _mcp_housekeeping_loop() -> None:
+    """Periodically purge expired MCP codes and tokens.
+
+    Jittered so a fleet of instances does not sweep on the same second. Every
+    failure is logged and retried on the next tick: housekeeping is never
+    allowed to take the API down.
+    """
+    from src.infrastructure.adapters.repository.sql_mcp_repo import SQLMCPRepository
+    from src.infrastructure.database.session import get_session_factory
+
+    interval = max(60, settings.MCP_HOUSEKEEPING_INTERVAL_SECONDS)
+    while True:
+        await asyncio.sleep(interval * (0.9 + random.random() * 0.2))
+        try:
+            async with get_session_factory()() as session:
+                await SQLMCPRepository(session).delete_expired(datetime.now(UTC))
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 — housekeeping must never crash the app
+            logger.warning("MCP housekeeping sweep failed", exc_info=True)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     if settings.RUN_MIGRATIONS:
@@ -172,10 +197,20 @@ async def lifespan(_: FastAPI):
     ingestion = get_telemetry_ingestion()
     ingestion.start()
 
+    # Housekeeping: purge spent MCP authorization codes and expired tokens.
+    # Without this the token table grows by two rows per hour per connection,
+    # forever. Kept in the API (not a worker) because it needs no converter
+    # tooling and must run even on a deployment with no background workers.
+    housekeeping = asyncio.create_task(_mcp_housekeeping_loop()) if settings.MCP_ENABLED else None
+
     if _mcp_mount is None:
         try:
             yield
         finally:
+            if housekeeping is not None:
+                housekeeping.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await housekeeping
             await ingestion.stop()
         return
 
@@ -184,6 +219,10 @@ async def lifespan(_: FastAPI):
         async with _mcp_mount.run():
             yield
     finally:
+        if housekeeping is not None:
+            housekeeping.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await housekeeping
         # Drain the queue on shutdown so a clean deploy does not lose the final
         # seconds of activity.
         await ingestion.stop()

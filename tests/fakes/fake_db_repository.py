@@ -20,10 +20,13 @@ class FakeDatabaseRepository:
         limit: int,
         since=None,
         origin=None,
+        grant_id=None,
     ) -> tuple[list[ConversionJob], int]:
         rows = [j for j in self.job_table.values() if j.user_id == user_id]
         if origin is not None:
             rows = [j for j in rows if j.origin == origin]
+        if grant_id is not None:
+            rows = [j for j in rows if getattr(j, "grant_id", None) == grant_id]
         if since is not None:
             # Best-effort: filter by a stable created-at when present.
             rows = [

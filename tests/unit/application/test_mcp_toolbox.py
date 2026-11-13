@@ -118,6 +118,12 @@ class FakeFileService:
             raise FileRecordNotFoundError("File not found")
         return row
 
+    async def find_by_key(self, user_id: int, file_key: str) -> UserFileModel | None:
+        for row in self.files.values():
+            if row.user_id == user_id and row.file_key == file_key:
+                return row
+        return None
+
     async def list_all_files(self, user_id: int, **kwargs: Any) -> tuple[list[UserFileModel], int]:
         rows = [row for row in self.files.values() if row.user_id == user_id]
         return rows, len(rows)
@@ -223,10 +229,13 @@ class FakeConversionService:
     async def list_history(
         self, user_id: int, *, offset: int = 0, limit: int = 20,
         origin: JobOrigin | None = None,
+        grant_id: str | None = None,
     ) -> tuple[list[ConversionJob], int]:
         jobs = [job for job in self.jobs.values() if job.user_id == user_id]
         if origin is not None:
             jobs = [job for job in jobs if job.origin == origin]
+        if grant_id is not None:
+            jobs = [job for job in jobs if job.grant_id == grant_id]
         return jobs[offset:offset + limit], len(jobs)
 
 
@@ -335,6 +344,7 @@ def _build_toolbox(**kwargs: Any) -> tuple[
     copier = FakeCopier()
     credits = kwargs.pop("credits", FakeCreditService())
     store = kwargs.pop("store", FakeObjectStore())
+    extractor = kwargs.pop("text_extractor", None)
     toolbox = MCPToolBox(
         file_service=files,
         conversion_service=conversions,
@@ -343,6 +353,7 @@ def _build_toolbox(**kwargs: Any) -> tuple[
         credits=credits,
         object_store=store,
         conversion_map=CONVERSION_MAP,
+        text_extractor=extractor,
     )
     return toolbox, files, conversions, transfers, copier, credits, store
 
@@ -360,6 +371,7 @@ def _ctx(
     folder_access: FolderAccess = FolderAccess.ALL,
     folder_id: str | None = None,
     history_scope: HistoryScope = HistoryScope.AGENT,
+    grant_id: str = "",
 ) -> MCPToolContext:
     return MCPToolContext(
         user_id=user_id,
@@ -367,6 +379,7 @@ def _ctx(
         folder_access=folder_access,
         folder_id=folder_id,
         history_scope=history_scope,
+        grant_id=grant_id,
     )
 
 
@@ -725,12 +738,10 @@ def test_folder_access_with_no_bound_folder_denies_every_tool() -> None:
         )
         payload = base64.b64encode(b"hello").decode()
         results = [
-            await toolbox.get_supported_conversions(ctx),
             await toolbox.list_files(ctx),
             await toolbox.get_file(ctx, "in-bound"),
             await toolbox.get_conversion_status(ctx, "job-1"),
             await toolbox.get_conversion_history(ctx),
-            await toolbox.get_credits(ctx),
             await toolbox.download_file(ctx, "in-bound"),
             await toolbox.convert_file(ctx, "in-bound", "pdf"),
             await toolbox.save_file(ctx, "job-1"),
@@ -739,6 +750,11 @@ def test_folder_access_with_no_bound_folder_denies_every_tool() -> None:
         ]
         for result in results:
             assert result == _FOLDER_DENIAL
+
+        # D6: these read no user data, so a confined grant whose folder is gone
+        # must still be able to use them. Denying them was pure friction.
+        assert (await toolbox.get_supported_conversions(ctx))["ok"] is True
+        assert (await toolbox.get_credits(ctx))["ok"] is True
 
     asyncio.run(_run())
 
@@ -751,7 +767,8 @@ def test_folder_access_to_a_deleted_folder_denies_every_tool() -> None:
         )
         payload = base64.b64encode(b"hello").decode()
         assert await toolbox.list_files(ctx) == _FOLDER_DENIAL
-        assert await toolbox.get_credits(ctx) == _FOLDER_DENIAL
+        # get_credits deliberately ignores the folder gate (D6).
+        assert (await toolbox.get_credits(ctx))["ok"] is True
         assert await toolbox.list_files(ctx, folder_id="bound") == _FOLDER_DENIAL
         assert await toolbox.upload_file(ctx, "notes.txt", payload) == _FOLDER_DENIAL
 
@@ -822,7 +839,10 @@ def test_save_file_restricted_defaults_to_the_bound_folder() -> None:
             "saved-file-1", file_name="resume.pdf", file_extension="pdf", folder_id="bound",
         )
         toolbox, _files, _c, transfers, _copy, _cr, _st = _build_toolbox(
-            files=files, conversions=FakeConversionService({"job-1": _job()})
+            files=files,
+            conversions=FakeConversionService(
+                {"job-1": _job(object_key="upload/in-bound/a.docx")}
+            ),
         )
         result = await toolbox.save_file(_folder_ctx(AgentScope.DOCUMENTS_WRITE), "job-1")
         assert result["ok"] is True
@@ -1337,5 +1357,177 @@ def test_list_folders_for_a_confined_grant_starts_at_its_bound_folder() -> None:
         # The count must be what the caller can reach, not the repository's
         # total (which includes folders it may never see).
         assert result["total"] == 1
+
+    asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
+# B1/B2/B3: a confined grant cannot reach a job on an out-of-folder file
+# ---------------------------------------------------------------------------
+
+
+def test_a_confined_grant_cannot_status_a_job_outside_its_folder() -> None:
+    """B2: same bytes as a missing job, so no existence oracle."""
+
+    async def _run() -> None:
+        toolbox, *_ = _build_toolbox(
+            files=FakeFileService(dict(FOLDER_FILES), dict(FOLDER_PARENTS)),
+            conversions=FakeConversionService(
+                {
+                    "job-elsewhere": _job(
+                        job_id="job-elsewhere",
+                        object_key="upload/elsewhere/c.docx",
+                        user_id=7,
+                    )
+                }
+            ),
+        )
+        ctx = _folder_ctx(AgentScope.DOCUMENTS_READ)
+
+        outside = await toolbox.get_conversion_status(ctx, "job-elsewhere")
+        missing = await toolbox.get_conversion_status(ctx, "job-does-not-exist")
+        assert outside == missing
+        assert outside == {"ok": False, "error": "No such conversion was found."}
+
+    asyncio.run(_run())
+
+
+def test_a_confined_grant_cannot_save_a_job_from_outside_its_folder() -> None:
+    """B1: the hole that let content be copied in from another folder."""
+
+    async def _run() -> None:
+        toolbox, _files, _c, transfers, _copy, _cr, _st = _build_toolbox(
+            files=FakeFileService(dict(FOLDER_FILES), dict(FOLDER_PARENTS)),
+            conversions=FakeConversionService(
+                {
+                    "job-elsewhere": _job(
+                        job_id="job-elsewhere", object_key="upload/elsewhere/c.docx"
+                    )
+                }
+            ),
+        )
+        ctx = _folder_ctx(AgentScope.DOCUMENTS_WRITE)
+
+        outside = await toolbox.save_file(ctx, "job-elsewhere")
+        missing = await toolbox.save_file(ctx, "job-does-not-exist")
+        assert outside == missing == {"ok": False, "error": "No such conversion was found."}
+        assert transfers.created == []
+
+    asyncio.run(_run())
+
+
+def test_agent_history_is_scoped_to_the_current_connection() -> None:
+    """B3: AGENT means "this connection", not "any connected application"."""
+
+    async def _run() -> None:
+        conversions = FakeConversionService(
+            {
+                "mine": _job(job_id="mine", origin=JobOrigin.MCP, grant_id="g1"),
+                "theirs": _job(job_id="theirs", origin=JobOrigin.MCP, grant_id="g2"),
+            }
+        )
+        toolbox, *_ = _build_toolbox(conversions=conversions)
+        result = await toolbox.get_conversion_history(
+            _ctx(AgentScope.DOCUMENTS_READ, grant_id="g1")
+        )
+        assert result["ok"] is True
+        assert [item["job_id"] for item in result["items"]] == ["mine"]
+
+    asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
+# C1/C2: reading text rather than base64, and text uploads
+# ---------------------------------------------------------------------------
+
+
+class _FakeExtractor:
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.calls: list[tuple[str | None, str]] = []
+
+    async def extract(self, extension: str | None, file_name: str, data: bytes) -> str:
+        self.calls.append((extension, file_name))
+        return self.text
+
+
+def test_read_file_text_returns_a_bounded_page() -> None:
+    async def _run() -> None:
+        extractor = _FakeExtractor("x" * 25)
+        toolbox, *_rest = _build_toolbox(
+            files=FakeFileService({"file-1": _file()}),
+            store=FakeObjectStore({"upload/file-1/secret-key.docx": b"ignored"}),
+            text_extractor=extractor,
+        )
+        result = await toolbox.read_file_text(
+            _ctx(AgentScope.DOCUMENTS_READ), "file-1", 0, 10
+        )
+        assert result["ok"] is True
+        assert result["chars_returned"] == 10
+        assert result["has_more"] is True
+        assert result["next_offset"] == 10
+        assert result["total_chars"] == 25
+        assert extractor.calls == [("docx", "resume.docx")]
+
+    asyncio.run(_run())
+
+
+def test_read_file_text_honours_folder_confinement() -> None:
+    async def _run() -> None:
+        toolbox, *_ = _build_toolbox(
+            files=FakeFileService(dict(FOLDER_FILES), dict(FOLDER_PARENTS)),
+            store=FakeObjectStore({"upload/elsewhere/c.docx": b"secret"}),
+            text_extractor=_FakeExtractor("secret"),
+        )
+        result = await toolbox.read_file_text(
+            _folder_ctx(AgentScope.DOCUMENTS_READ), "elsewhere"
+        )
+        assert result == {"ok": False, "error": "No such file was found in your Drive."}
+
+    asyncio.run(_run())
+
+
+def test_upload_file_accepts_utf8_text_without_base64() -> None:
+    async def _run() -> None:
+        toolbox, _files, _c, _t, _copy, _cr, store = _build_toolbox(
+            files=FakeFileService(
+                {"saved-file-1": _file("saved-file-1", file_name="notes.txt")}
+            )
+        )
+        result = await toolbox.upload_file(
+            _ctx(AgentScope.DOCUMENTS_WRITE), "notes.txt", content_text="hello ✓"
+        )
+        assert result["ok"] is True
+        assert store.puts[0][1] == "hello ✓".encode()
+
+    asyncio.run(_run())
+
+
+def test_upload_file_requires_exactly_one_content_argument() -> None:
+    async def _run() -> None:
+        toolbox, *_ = _build_toolbox()
+        missing = await toolbox.upload_file(_ctx(AgentScope.DOCUMENTS_WRITE), "a.txt")
+        both = await toolbox.upload_file(
+            _ctx(AgentScope.DOCUMENTS_WRITE), "a.txt", content_text="x", content_base64="eA=="
+        )
+        assert missing["ok"] is False and both["ok"] is False
+
+    asyncio.run(_run())
+
+
+def test_read_conversion_output_requires_a_visible_job() -> None:
+    async def _run() -> None:
+        toolbox, *_ = _build_toolbox(
+            files=FakeFileService(dict(FOLDER_FILES), dict(FOLDER_PARENTS)),
+            conversions=FakeConversionService(
+                {"j": _job(job_id="j", object_key="upload/elsewhere/c.docx")}
+            ),
+            store=FakeObjectStore({"output/resume.pdf": b"%PDF"}),
+            text_extractor=_FakeExtractor("text"),
+        )
+        result = await toolbox.read_conversion_output(
+            _folder_ctx(AgentScope.DOCUMENTS_READ), "j"
+        )
+        assert result == {"ok": False, "error": "No such conversion was found."}
 
     asyncio.run(_run())

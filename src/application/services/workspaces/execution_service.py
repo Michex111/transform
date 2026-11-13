@@ -126,7 +126,7 @@ class ExecutionService:
         it here — not in the adapter, and not only in the request schema — means
         the worker and any future SDK get the same answers.
         """
-        text = str(source)
+        text = source
         if not text.strip():
             raise InvalidExecutionRequestError("An execution requires a non-empty source.")
         if "\x00" in text:

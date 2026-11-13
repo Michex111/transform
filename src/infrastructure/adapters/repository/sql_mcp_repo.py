@@ -367,6 +367,7 @@ class SQLMCPRepository:
                 resource=token.resource,
                 expires_at=token.expires_at,
                 created_at=datetime.now(UTC),
+                replaced_by=token.replaced_by,
             )
         )
         await self._session.commit()
@@ -385,6 +386,7 @@ class SQLMCPRepository:
             resource=row.resource,
             expires_at=_aware(row.expires_at),  # type: ignore[arg-type]
             revoked_at=_aware(row.revoked_at),
+            replaced_by=row.replaced_by,
         )
 
     async def revoke_token(self, token_hash: str, revoked_at: datetime) -> None:
@@ -394,6 +396,38 @@ class SQLMCPRepository:
             .values(revoked_at=revoked_at)
         )
         await self._session.commit()
+
+    async def rotate_refresh_token(
+        self, token_hash: str, now: datetime, successor_hash: str
+    ) -> TokenRecord | None:
+        """Compare-and-swap rotation: exactly one concurrent caller can win.
+
+        A read followed by a write would let two simultaneous refreshes both
+        observe the token as live and both be issued a pair. The conditional
+        UPDATE makes the second caller's ``rowcount`` zero, and the application
+        service then falls back to the reuse grace window — which is a *retry*
+        path, not a second successful redemption of the same token.
+        """
+        record = await self.get_token(token_hash)
+        if record is None:
+            return None
+        result = await self._session.execute(
+            update(MCPTokenModel)
+            .where(
+                MCPTokenModel.token_hash == token_hash,
+                MCPTokenModel.revoked_at.is_(None),
+                MCPTokenModel.kind == "REFRESH",
+            )
+            .values(revoked_at=now, replaced_by=successor_hash)
+        )
+        await self._session.commit()
+        if not result.rowcount:  # type: ignore[attr-defined]
+            return None
+        return record
+
+    async def revoke_successor(self, token_hash: str, revoked_at: datetime) -> None:
+        """Retire a successor minted by a request whose client never saw it."""
+        await self.revoke_token(token_hash, revoked_at)
 
     async def revoke_tokens_for_grant(self, grant_id: str, revoked_at: datetime) -> int:
         result = await self._session.execute(

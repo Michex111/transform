@@ -428,3 +428,61 @@ contract, bounded download/decrypt, lazy tier, fail-closed binding) ships with i
 6. **Range reads for `download_file`.** Paging is now bounded per call, but total
    work is still linear in offset. A chunk-aligned S3 range read would make a
    page O(1); design requires a range capability on the storage port.
+
+---
+
+## 12. Remediation build — 2026-11-13
+
+A follow-up build addressed the issue register in
+`docs/mcp-copilot-fix-prompt.md` (IDs A1–E4). What changed, and what it means
+operationally:
+
+### Closed
+
+| ID | Fix |
+|---|---|
+| **A1** | Effective scopes now come from the **grant**, resolved on every request (`load_access_token` + `open_mcp_scope`). Editing a connection takes effect on the next call, in both directions. |
+| **A2** | `exchange_refresh` issues the grant's *current* scopes. A token whose scopes differ from the grant is no longer rejected — narrowing narrows, widening widens, the session survives. |
+| **A3** | Consent offers every scope in the client's **registered** set intersected with the deployment's `grantable_scopes`. `requested_scopes` only decides what is pre-checked. `workspaces.*` and `documents.delete` are grantable from clients that omit `scope`. |
+| **A4** | Rotation is one conditional `UPDATE` (`rotate_refresh_token`). A retry inside `MCP_REFRESH_REUSE_GRACE_SECONDS` (60s) receives a fresh pair; the abandoned successor is revoked. After the window, replay is `invalid_grant`. |
+| **A5** | `/mcp/token`, `/mcp/register`, `/mcp/revoke`, `/mcp/authorize` have their own bucket keyed by `(client_id, IP)` at `MCP_OAUTH_RATE_LIMIT`. uvicorn now runs with `--proxy-headers --forwarded-allow-ips=*`. |
+| **A7** | A jittered lifespan task purges expired codes and tokens every `MCP_HOUSEKEEPING_INTERVAL_SECONDS`. |
+| **A8** | Refresh refusals log distinct reasons: `unknown`, `wrong-kind`, `expired`, `client-mismatch`, `revoked`, `rotated`. |
+| **B1** | `save_file` proves the job's source is an owned Drive file inside the confined subtree. `read_conversion_output` uses the same rule. |
+| **B2** | `get_conversion_status` applies the same subtree check. |
+| **B3** | Conversion jobs carry `grant_id`; `AGENT` history is scoped to the current connection. |
+| **C1** | `read_file_text` and `read_conversion_output` return text, extracting PDF/DOCX/PPTX/XLSX in-process, with a bounded cache. |
+| **C2** | `upload_file` accepts `content_text` or `content_base64` (exactly one). |
+| **C3** | `get_file_download_link` issues the same short-lived capability for a Drive file, rechecked on redemption. |
+| **C4** | `copy_file_to_workspace` and `save_artifact_to_drive` bridge the Drive and workspaces; `read_workspace_file`/`write_workspace_file` accept base64. |
+| **C5** | File tools call `start_runtime` automatically; `start_workspace` and `stop_workspace` are exposed. |
+| **C6** | `get_workspace_environment`, and `get_workspace` now includes the latest revision. |
+| **C7** | `get_execution`, `read_workspace_file` and `list_workspaces` page with `offset`; execution output pages by character. |
+| **C11** | `run_code` defaults `timeout_seconds` to `None`, so the deployment setting applies. |
+| **D1** | `list_files` honours `query` + `folder_id` together, intersected with the grant's subtree. |
+| **D3** | An unreadable grant returns an actionable `ok:false` with `reconnect_required`, never a `RuntimeError`. |
+| **D4** | Workspace denials use the document envelope; every workspace tool writes a `log_data_access` audit entry. |
+| **D5** | `ToolOutcome.REFUSED` distinguishes expected `ok:false` answers from errors. |
+| **D6** | `get_supported_conversions` and `get_credits` skip the folder gate. |
+| **D8** | Stale tool counts removed from comments; a docs-sync test now compares the registered tools with the published lists. |
+| **E1** | The public MCP page lists all 32 tools and all six scopes. |
+| **E2** | The Connected-apps list states that permission changes apply on the next request. |
+| **E3** | The consent screen makes every available scope selectable; unrequested ones are marked optional. |
+| **E4** | `tests/unit/presentation/test_mcp_docs_sync.py` fails if a registered tool or scope is missing from `docs/mcp.md` or `web/src/lib/mcpAgentPrompt.ts`. |
+
+### Deferred, with reasons
+
+* **A6 (HTTP step-up).** The MCP SDK's Streamable-HTTP transport does not expose
+  a per-request hook to answer `403` with `WWW-Authenticate: insufficient_scope`.
+  The `ok:false` payload carries `required_scope` and `reconnect_required`, and
+  the consent screen now offers the missing scope, which is the recovery path a
+  client can actually take.
+* **C8 (conversion options).** The REST conversion endpoint accepts no options
+  (page range, quality, OCR) — there is nothing to expose. Adding options means
+  changing the converter contract first.
+* **C9 (rename/move).** Deliberately not added; it needs a product decision.
+* **C10 (MCP resources/prompts).** Not implemented in this build.
+* **D2 (typed `outputSchema`).** Results still use the `ok`/`error` envelope as
+  `dict[str, Any]`. Replacing 32 signatures with Pydantic result models is a
+  mechanical but large change with its own regression surface; the chunk size
+  remains measured against the transport cap.

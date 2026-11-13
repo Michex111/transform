@@ -188,7 +188,31 @@ class FakeMCPRepository:
                 expires_at=record.expires_at,
                 resource=record.resource,
                 revoked_at=revoked_at,
+                replaced_by=record.replaced_by,
             )
+
+    async def rotate_refresh_token(
+        self, token_hash: str, now: datetime, successor_hash: str
+    ) -> TokenRecord | None:
+        record = self.tokens.get(token_hash)
+        if record is None or record.revoked_at is not None or record.kind != "REFRESH":
+            return None
+        self.tokens[token_hash] = TokenRecord(
+            token_hash=record.token_hash,
+            grant_id=record.grant_id,
+            client_id=record.client_id,
+            subject=record.subject,
+            kind=record.kind,
+            scopes=record.scopes,
+            expires_at=record.expires_at,
+            resource=record.resource,
+            revoked_at=now,
+            replaced_by=successor_hash,
+        )
+        return record
+
+    async def revoke_successor(self, token_hash: str, revoked_at: datetime) -> None:
+        await self.revoke_token(token_hash, revoked_at)
 
     async def revoke_tokens_for_grant(self, grant_id: str, revoked_at: datetime) -> int:
         count = 0

@@ -120,23 +120,26 @@ cold hard load (see `vite-plugins/spa-route-stubs.ts`).
 
 ## Tools
 
-24 tools in two groups. `tools/list` is authoritative for schemas.
+32 tools in two groups. `tools/list` is authoritative for schemas.
 
 **Documents** — gated by `documents.*`:
 
 | Tool | Scope | Writes | Notes |
 |---|---|---|---|
-| `get_supported_conversions` | read | no | the conversion graph |
+| `get_supported_conversions` | read | no | the conversion graph (no folder gate: no user data) |
 | `list_files` | read | no | whole Drive; optional name/extension/folder filter |
 | `list_folders` | read | no | folder ids — nothing else returns them |
 | `get_file` | read | no | metadata only — never content or a storage key |
-| `download_file` | read | no | file contents as base64, **paged** |
+| `read_file_text` | read | no | **read a document's text**; extracts PDF/DOCX/XLSX; paged by characters |
+| `download_file` | read | no | raw bytes as base64, **paged** |
+| `read_conversion_output` | read | no | read a completed job's output as text without saving it |
+| `get_file_download_link` | read | no | short-lived browser link for a Drive file |
 | `get_conversion_status` | read | no | poll an async conversion |
-| `get_conversion_history` | read | no | recent conversions |
-| `get_credits` | read | no | remaining credits |
+| `get_conversion_history` | read | no | recent conversions (AGENT scope = this connection) |
+| `get_credits` | read | no | remaining credits (no folder gate: no user data) |
 | `convert_file` | convert | creates a job | the original is never modified |
 | `save_file` | write | creates a file | only promotes a job Transform itself produced |
-| `upload_file` | write | creates a file | the only way to introduce new content; size-capped |
+| `upload_file` | write | creates a file | `content_text` (UTF-8) or `content_base64`; size-capped |
 | `create_folder` | write | creates a folder | the only structural change an agent may make |
 | `delete_file` | delete | deletes | irreversible; needs an explicit grant |
 
@@ -144,17 +147,22 @@ cold hard load (see `vite-plugins/spa-route-stubs.ts`).
 
 | Tool | Scope | Writes | Notes |
 |---|---|---|---|
-| `list_workspaces` | workspaces.read | no | the user's workspaces |
-| `get_workspace` | workspaces.read | no | runtime state, toolchain, disk budget |
+| `list_workspaces` | workspaces.read | no | the user's workspaces (paged) |
+| `get_workspace` | workspaces.read | no | runtime state, toolchain, disk budget, latest environment |
+| `get_workspace_environment` | workspaces.read | no | whether the saved snapshot is ready |
 | `list_workspace_files` | workspaces.read | no | files inside a workspace |
-| `read_workspace_file` | workspaces.read | no | read one workspace file |
+| `read_workspace_file` | workspaces.read | no | text or `encoding="base64"`; paged by byte |
 | `list_artifacts` | workspaces.read | no | files recent runs produced |
-| `write_workspace_file` | workspaces.execute | yes | write a file verbatim |
+| `get_execution` | workspaces.read | no | status, exit code, paged stdout/stderr |
+| `write_workspace_file` | workspaces.execute | yes | `content` or `content_base64` |
 | `run_code` | workspaces.execute | yes | async — returns an execution id |
-| `get_execution` | workspaces.read | no | status, exit code, stdout, stderr |
 | `cancel_execution` | workspaces.execute | yes | stop a run that is taking too long |
 | `save_workspace_environment` | workspaces.execute | yes | persist installed packages |
+| `start_workspace` | workspaces.execute | yes | start the runtime (file tools do this automatically) |
+| `stop_workspace` | workspaces.execute | yes | stop the runtime, keeping files |
 | `create_workspace` | workspaces.execute | yes | only when the user asks for a new one |
+| `copy_file_to_workspace` | documents.read + workspaces.execute | yes | bring a Drive file in for code |
+| `save_artifact_to_drive` | workspaces.read + documents.write | creates a file | save a produced artifact |
 
 Deliberate omissions:
 
@@ -188,6 +196,65 @@ roughly 340 KiB with `SSE stream failed: Server-sent event exceeded the 1048576
 byte limit` — an ordinary 1 MB PDF was unreadable, and the error named no file
 and suggested no next step. Measured live: 256 KiB succeeded, 384 KiB failed.
 
+### Reading a document (not bytes)
+
+`download_file` is the wrong tool for "summarise this PDF": a model cannot
+decode base64 in its head, and PDF/DOCX/XLSX bytes are a container format. Use
+`read_file_text` (or `read_conversion_output` for a finished job). Text formats
+are decoded directly; container formats are extracted through the same converter
+functions the workers use, in-process, creating no job and charging no credits.
+Results are cached per `(extension, sha256(content))`, and pages are sized by
+characters (`MCP_TEXT_PAGE_CHARS`).
+
+## Authorization: the grant is the authority
+
+An access token is a **handle**; the stored `AgentGrant` is the permission.
+`load_access_token` resolves the effective scope set from the grant on every
+request, so an edit on Settings → AI apps takes effect on the agent's next call
+in both directions. Narrowing reduces the token's powers rather than rejecting
+it (rejecting made clients loop refresh → 401 and show the connection as
+broken). Widening needs no reconnect.
+
+The consent screen offers every scope the *client registered for* intersected
+with the deployment's `grantable_scopes`, not only the scopes the authorization
+request named. `requested_scopes` decides what is pre-checked; destructive
+scopes are never pre-checked. This is what makes `workspaces.*` and
+`documents.delete` grantable from clients that omit `scope` at registration
+(most of them).
+
+Refresh rotation is atomic (a single conditional `UPDATE … WHERE revoked_at IS
+NULL`) and has a reuse grace window (`MCP_REFRESH_REUSE_GRACE_SECONDS`, default
+60). Presenting a just-rotated refresh token inside that window returns a fresh
+pair and retires the abandoned successor, so a lost response or a retried request
+does not disconnect the client. After the window, a replay is `invalid_grant` as
+before.
+
+## Step-up authorization
+
+A missing scope is returned as a tool value
+(`{"ok": false, "required_scope": "…", "reconnect_required": true}`). The MCP
+SDK's transport does not expose a per-request hook for a `403` with
+`WWW-Authenticate: Bearer error="insufficient_scope"`, so the server cannot start
+re-consent by itself; the agent's recovery path is to ask the user to reconnect.
+Because the consent screen now lists every available scope (above), reconnecting
+actually offers the missing one.
+
+## Rate limits
+
+`/mcp/token`, `/mcp/register`, `/mcp/revoke` and `/mcp/authorize` carry no bearer
+token. They have their own bucket keyed by `(client_id, client IP)` at
+`MCP_OAUTH_RATE_LIMIT` (default 240/min), so hosted clients sharing egress
+addresses do not throttle unrelated users — a 429 on refresh disconnects the
+client. A 429 includes `Retry-After`. The API is deployed with
+`--proxy-headers --forwarded-allow-ips=*` so `client.host` is the real client
+behind Render's proxy.
+
+## Housekeeping
+
+Expired codes and tokens are purged by a jittered lifespan task every
+`MCP_HOUSEKEEPING_INTERVAL_SECONDS` (default 3600). Without it the token table
+grew by two rows per hour per connection, forever.
+
 ## Asynchronous conversions
 
 The SDK has no tasks API, so conversions follow the product's existing model:
@@ -196,9 +263,9 @@ The SDK has no tasks API, so conversions follow the product's existing model:
 blocks on a Worker.
 
 Currently `convert_file` requires an existing Drive file. `upload_file` creates
-a Drive file and requires its actual bytes in a base64 tool argument; a chat
+a Drive file from `content_text` (UTF-8) or `content_base64` (bytes); a chat
 attachment being visible to the model does not make its bytes available to this
-remote MCP server. If the client cannot provide the bytes, ask the user to
+remote MCP server. If the client cannot provide the content, ask the user to
 upload the file in Transform. The server does not fetch arbitrary URLs.
 
 When an owned completed job is authorized for download, `get_conversion_status`
@@ -226,6 +293,11 @@ a storage key or put an OAuth token in a URL.
 | `MCP_ACCESS_TOKEN_TTL_MINUTES` | `60` | Access-token lifetime. |
 | `MCP_REFRESH_TOKEN_TTL_DAYS` | `30` | Refresh-token lifetime. |
 | `MCP_AUTHORIZATION_CODE_TTL_MINUTES` | `5` | PKCE code lifetime. |
+| `MCP_REFRESH_REUSE_GRACE_SECONDS` | `60` | Window in which a just-rotated refresh token is accepted as a retry. `0` disables it. |
+| `MCP_OAUTH_RATE_LIMIT` | `240` | Requests/minute for the unauthenticated OAuth endpoints, per `(client_id, IP)`. |
+| `MCP_HOUSEKEEPING_INTERVAL_SECONDS` | `3600` | How often expired codes and tokens are purged. |
+| `MCP_TEXT_PAGE_CHARS` | `24000` | Maximum characters one `read_file_text` page may return. |
+| `MCP_TEXT_EXTRACTION_MAX_BYTES` | `26214400` (25 MiB) | Largest document text extraction will read. |
 | `MCP_CONSENT_PATH` | `/app/authorize` | SPA route for the consent screen. |
 | `MCP_MAX_REQUEST_BODY_BYTES` | `41943040` (40 MiB) | Largest request body the transport accepts. Larger than the REST cap because `upload_file` carries a 25 MiB file as ~33.4 MiB of base64 inside one JSON-RPC request; refused on `Content-Length` before the body is read. |
 

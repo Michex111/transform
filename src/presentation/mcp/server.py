@@ -80,7 +80,11 @@ def client_registration_options() -> ClientRegistrationOptions:
         # read/convert/write. ``documents.delete`` and both ``workspaces.*``
         # scopes then became impossible to grant — the consent screen refused
         # them as "outside the client's registered scope", even though the
-        # server advertises them and 10 of its 20 tools require them.
+        # server advertises them and a large share of its tools require them.
+        #
+        # NOTE: the tool count is deliberately not written here. It changes, and
+        # a stale number in a comment is how a reviewer concludes the surface is
+        # smaller than it is.
         #
         # The genuinely conservative default still applies where it belongs: an
         # authorization request that names no scope resolves to
